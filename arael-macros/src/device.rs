@@ -10,8 +10,14 @@
 //! `arael::__gpu_items!`, which drops it when arael is built without its
 //! `gpu` feature.
 //!
-//! Covered for now: root-level cross constraints (two entities with self
-//! blocks reached through refs, the holder's CrossBlock), root-level
+//! A constraint is a list of sides (its entities, each written into its own
+//! self block) and of pairs of sides with a cross tile. Covered for now:
+//! cross constraints in any collection (two entities with self blocks
+//! reached through the instance's refs or its parent's, the holder's
+//! CrossBlock or its parent's, walked through the parents' loops; parent
+//! data read per instance), root-level multi-cross
+//! constraints (any number of entities through refs, a CrossBlock of the
+//! holder's per pair), root-level
 //! constraints of one entity reached through a ref (written into its self
 //! block), the constraints of an entity of a root-level collection on
 //! itself, and cross constraints in a collection of an entity of a
@@ -45,28 +51,47 @@ pub(crate) struct DevSide {
     pub params: Vec<String>,
 }
 
+/// A cross tile of a device constraint: between its sides `i` and `j`
+/// (`i < j`), the CrossBlock field `block` of the type `holder`, reached in
+/// the walk as `access` (`__frine.hb`).
+pub(crate) struct DevPair {
+    pub i: usize,
+    pub j: usize,
+    pub holder: String,
+    pub block: String,
+    pub access: TokenStream2,
+}
+
+impl DevPair {
+    /// The pair of sides 0 and 1 of an instance of `holder`, its own
+    /// CrossBlock `block`.
+    pub(crate) fn own(holder: &str, block: &syn::Ident) -> DevPair {
+        DevPair { i: 0, j: 1, holder: holder.to_string(), block: block.to_string(), access: quote! { __frine.#block } }
+    }
+}
+
 /// One device constraint, as the root's emission needs it.
 pub(crate) struct DevConstraint {
     /// The group whose walk packs it.
     pub group_key: String,
-    pub a: DevSide,
-    /// The second entity of a constraint of two.
-    pub b: Option<DevSide>,
-    /// Of a constraint of two, the CrossBlock's holder type and field.
+    /// Its entities, in the order of a row's partials.
+    pub sides: Vec<DevSide>,
+    /// The cross tiles between pairs of its sides.
+    pub pairs: Vec<DevPair>,
+    /// The instance's type.
     pub holder: String,
-    pub block: syn::Ident,
     /// The instance data leaves, as the Rust expressions the walk reads.
     pub inst: Vec<String>,
     /// Per side, the entity data leaves, as paths in the entity
     /// (`prior.x`).
-    pub ent: [Vec<String>; 2],
+    pub ent: Vec<Vec<String>>,
     /// The root data leaves, as paths in the root.
     pub root: Vec<String>,
     /// The referenced fields read.
     pub refs: Vec<DevRef>,
-    /// The two kernels in C++, named by `cid`: they read every column
-    /// through the layout table by the constraint's own names (`C<cid>_SA`,
-    /// `C<cid>_EVA`, `C<cid>_VAL<r>`, ...), which the root aliases to its
+    /// The kernels in C++, named by `cid`: they read every column through
+    /// the layout table by the constraint's own names (`C<cid>_S0`,
+    /// `C<cid>_EV0`, `C<cid>_VAL<r>`, ...), which the root aliases to its
     /// numbering ([`device_root`]).
     pub cpp: String,
     pub cid: usize,
@@ -275,9 +300,9 @@ fn syms_of_inters(inters: &[Intermediate], out: &mut BTreeSet<String>) {
 
 /// The referenced field a leaf reads a cache of: (side, field, kind,
 /// column, offset). `None` for a leaf of no referenced field.
-fn reference_leaf(s: &str, a: &DevSide, b: Option<&DevSide>) -> Option<(usize, String, RefKind, RefCol, usize)> {
+fn reference_leaf(s: &str, sides: &[DevSide]) -> Option<(usize, String, RefKind, RefCol, usize)> {
     let (var, rest) = s.split_once('.')?;
-    let (side, sd) = [Some(a), b].into_iter().flatten().enumerate().find(|(_, sd)| sd.var == var)?;
+    let (side, sd) = sides.iter().enumerate().find(|(_, sd)| sd.var == var)?;
     let (field, tail) = rest.split_once('.')?;
     let kind = RefKind::of(&sd.ty, field)?;
     let (col, off) = kind.leaf(tail)?;
@@ -299,9 +324,9 @@ fn parameter_field(ty: &str, field: &str) -> bool {
 /// one of the entities, or a component of parameters, other than through
 /// the leaves the device computes (the parameters, the referenced fields' caches, the atom
 /// caches), so it would hold the value the solve started from.
-fn parameter_state(s: &str, a: &DevSide, b: Option<&DevSide>) -> Option<String> {
+fn parameter_state(s: &str, sides: &[DevSide]) -> Option<String> {
     let (var, rest) = s.split_once('.')?;
-    let side = [Some(a), b].into_iter().flatten().find(|sd| sd.var == var)?;
+    let side = sides.iter().find(|sd| sd.var == var)?;
     let field = rest.split(['.', '[']).next()?;
     parameter_field(&side.ty, field)
         .then(|| format!("the device reads `{s}`, which follows the parameters of `{var}.{field}`, without computing it"))
@@ -337,19 +362,19 @@ enum Leaf {
     Atom(E),
 }
 
-/// The kernels of a root-level constraint of one entity or of two (`b`):
-/// `gh` and `guard` from the assembly's CSE (rows then partials, A's then
-/// B's), `cost` from the cost's. `ft` is the root's scalar. `atoms` are the
+/// The kernels of a constraint over the entities `sides`, with a cross tile
+/// per pair of `pairs`, an instance of `holder`: `gh` and `guard` from the
+/// assembly's CSE (per row the residual, then the partials side by side),
+/// `cost` from the cost's. `ft` is the root's scalar. `atoms` are the
 /// body's atom caches and their atoms (`a.rot.sin`, `sin(a.rot.angle.work())`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn device_constraint(
     cid: usize,
     group_key: String,
     ft: &str,
-    a: DevSide,
-    b: Option<DevSide>,
+    sides: Vec<DevSide>,
+    pairs: Vec<DevPair>,
     holder: String,
-    block: syn::Ident,
     rows: usize,
     gh: (&[Intermediate], &[E]),
     guard: Option<(&[Intermediate], &E)>,
@@ -361,7 +386,13 @@ pub(crate) fn device_constraint(
     if ft != "f32" && ft != "f64" {
         return Err(format!("a root of `{ft}` has no device assembly"));
     }
-    let (na, nb) = (a.params.len(), b.as_ref().map_or(0, |b| b.params.len()));
+    if let Some(sd) = sides.iter().find(|sd| sd.params.is_empty()) {
+        return Err(format!("the entity `{}` has no parameters", sd.var));
+    }
+    if let Some(p) = pairs.iter().find(|p| p.i >= p.j || p.j >= sides.len()) {
+        return Err(format!("the cross tile `{}` joins sides {} and {} of {}", p.block, p.i, p.j, sides.len()));
+    }
+    let ns: Vec<usize> = sides.iter().map(|sd| sd.params.len()).collect();
     // the leaves each kernel reads
     let mut gh_syms = BTreeSet::new();
     syms_of_inters(gh.0, &mut gh_syms);
@@ -390,27 +421,26 @@ pub(crate) fn device_constraint(
     let all: BTreeSet<&String> = gh_syms.iter().chain(&cost_syms).collect();
     // classified, the data leaves and the referenced fields numbered in order
     let mut inst: Vec<String> = Vec::new();
-    let mut ent: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+    let mut ent: Vec<Vec<String>> = sides.iter().map(|_| Vec::new()).collect();
     let mut root: Vec<String> = Vec::new();
     let mut refs: Vec<DevRef> = Vec::new();
     let mut leaf: std::collections::BTreeMap<String, Leaf> = Default::default();
+    let param = |s: &str| sides.iter().enumerate().find_map(|(i, sd)| sd.params.iter().position(|p| p == s).map(|p| (i, p)));
     for s in all {
         let l = if let Some(e) = atom(s) {
-            if let Some(d) = e.symbols().into_iter().find(|d| !a.params.contains(d) && !b.as_ref().is_some_and(|b| b.params.contains(d))) {
+            if let Some(d) = e.symbols().into_iter().find(|d| param(d).is_none()) {
                 return Err(format!("the atom cache `{s}` reads `{d}`, not a parameter of the constraint's entities"));
             }
             Leaf::Atom(e.clone())
-        } else if let Some(p) = a.params.iter().position(|p| p == s) {
-            Leaf::Param(0, p)
-        } else if let Some(p) = b.as_ref().and_then(|b| b.params.iter().position(|p| p == s)) {
-            Leaf::Param(1, p)
-        } else if let Some((side, path, kind, col, off)) = reference_leaf(s, &a, b.as_ref()) {
+        } else if let Some((side, p)) = param(s) {
+            Leaf::Param(side, p)
+        } else if let Some((side, path, kind, col, off)) = reference_leaf(s, &sides) {
             let r = match refs.iter().position(|r| r.side == side && r.path == path) {
                 Some(r) => r,
                 None => {
                     // the step: its entity's parameters at `<var>.<field>.<first>`
                     // and after
-                    let sd = if side == 0 { &a } else { b.as_ref().expect("side 1 is b's") };
+                    let sd = &sides[side];
                     let (first, rest) = kind.step();
                     let name = |suffix: &str| format!("{}.{}.{}", sd.var, path, suffix);
                     let step = sd.params.iter().position(|p| *p == name(first))
@@ -424,11 +454,11 @@ pub(crate) fn device_constraint(
             };
             Leaf::Ref(r, col, off)
         } else {
-            if let Some(why) = parameter_state(s, &a, b.as_ref()) {
+            if let Some(why) = parameter_state(s, &sides) {
                 return Err(why);
             }
             let (var, path) = s.split_once('.').unwrap_or((s.as_str(), ""));
-            let side = [Some(&a), b.as_ref()].into_iter().flatten().position(|sd| sd.var == var);
+            let side = sides.iter().position(|sd| sd.var == var);
             match side {
                 Some(side) if !path.is_empty() => {
                     ent[side].push(path.to_string());
@@ -447,19 +477,21 @@ pub(crate) fn device_constraint(
         leaf.insert(s.clone(), l);
     }
     let names: std::collections::BTreeMap<String, String> = leaf.keys().enumerate().map(|(i, s)| (s.clone(), format!("__l{i}"))).collect();
-    let cpp = cpp_kernels(cid, ft, (na, nb), rows, &leaf, &names, &refs, (&gh_syms, &cost_syms), gh, guard, cost, loss)?;
-    Ok(DevConstraint { group_key, a, b, holder, block, inst, ent, root, refs, cpp, cid, rows, filter: None })
+    let pair_sides: Vec<(usize, usize)> = pairs.iter().map(|p| (p.i, p.j)).collect();
+    let cpp = cpp_kernels(cid, ft, (&ns, &pair_sides), rows, &leaf, &names, &refs, (&gh_syms, &cost_syms), gh, guard, cost, loss)?;
+    Ok(DevConstraint { group_key, sides, pairs, holder, inst, ent, root, refs, cpp, cid, rows, filter: None })
 }
 
 /// The kernels of [`device_constraint`] in C++
 /// (`arael-gpu/kernels/assembly.cpp` is compiled in front of them): every
 /// column is read through the layout table `L` at the start of the model's
-/// block `B`, by the constraint's own column names.
+/// block `B`, by the constraint's own column names. `ns` are the sides'
+/// parameters, `pairs` the sides of each cross tile.
 #[allow(clippy::too_many_arguments)]
 fn cpp_kernels(
     cid: usize,
     ft: &str,
-    (na, nb): (usize, usize),
+    (ns, pairs): (&[usize], &[(usize, usize)]),
     rows: usize,
     leaf: &std::collections::BTreeMap<String, Leaf>,
     names: &std::collections::BTreeMap<String, String>,
@@ -470,10 +502,12 @@ fn cpp_kernels(
     cost: (&[Intermediate], &[E]),
     loss: Option<&DevLoss>,
 ) -> Result<String, String> {
-    if na == 0 {
-        return Err("a device constraint's entities have parameters".into());
-    }
-    let pair = nb > 0;
+    // where each side's partials start in a row
+    let offs: Vec<usize> = ns.iter().scan(1, |at, &n| {
+        let o = *at;
+        *at += n;
+        Some(o)
+    }).collect();
     // the loss's argument is the kernel's local of that name
     let map = |s: &str| -> Option<String> {
         if s == LOSS_ARG_SYM {
@@ -485,20 +519,18 @@ fn cpp_kernels(
     // a leaf's type and the read that gives it
     let read = |l: &Leaf| -> Result<(&'static str, String), String> {
         Ok(match *l {
-            Leaf::Param(0, p) => ("F", format!("COL(B, F, C{cid}_EVA)[sa * {na}u + {p}u]")),
-            Leaf::Param(_, p) => ("F", format!("COL(B, F, C{cid}_EVB)[sb * {nb}u + {p}u]")),
+            Leaf::Param(i, p) => ("F", format!("COL(B, F, C{cid}_EV{i})[s{i} * {}u + {p}u]", ns[i])),
             Leaf::Ref(r, col, off) => {
-                let s = if refs[r].side == 0 { "sa" } else { "sb" };
+                let i = refs[r].side;
                 let (nv, nd) = refs[r].kind.widths();
                 match col {
-                    RefCol::Val => ("F", format!("COL(B, F, C{cid}_VAL{r})[{s} * {nv}u + {off}u]")),
-                    RefCol::ValW => ("W", format!("COL(B, W, C{cid}_VALW{r})[{s} * {nv}u + {off}u]")),
-                    RefCol::Der => ("F", format!("COL(B, F, C{cid}_DER{r})[{s} * {nd}u + {off}u]")),
+                    RefCol::Val => ("F", format!("COL(B, F, C{cid}_VAL{r})[s{i} * {nv}u + {off}u]")),
+                    RefCol::ValW => ("W", format!("COL(B, W, C{cid}_VALW{r})[s{i} * {nv}u + {off}u]")),
+                    RefCol::Der => ("F", format!("COL(B, F, C{cid}_DER{r})[s{i} * {nd}u + {off}u]")),
                 }
             }
             Leaf::Inst(j) => ("F", format!("COL(B, F, C{cid}_D{j})[o]")),
-            Leaf::Ent(0, ref f) => ("F", format!("COL(B, C{cid}_RecA, C{cid}_DATAA)[sa].{f}")),
-            Leaf::Ent(_, ref f) => ("F", format!("COL(B, C{cid}_RecB, C{cid}_DATAB)[sb].{f}")),
+            Leaf::Ent(i, ref f) => ("F", format!("COL(B, C{cid}_Rec{i}, C{cid}_DATA{i})[s{i}].{f}")),
             Leaf::Root(ref f) => ("F", format!("COL(B, RootData, ROOT)[0].{f}")),
             Leaf::Atom(ref e) => ("F", e.to_cpp_in(ft, "W", &map).map_err(|e| e.0)?),
         })
@@ -519,15 +551,12 @@ fn cpp_kernels(
     };
     let expr = |e: &E| -> Result<String, String> { e.to_cpp_in(ft, "W", &map).map_err(|e| e.0) };
     let prologue = |b: &str| {
-        let sb = if pair { format!("const u32 sb = COL({b}, u32, C{cid}_SB)[o];\n") } else { String::new() };
-        format!(
-            "GLOBAL const u64* L = (GLOBAL const u64*)B;\nconst u32 o = global_x();\nW c = 0.0f;\nif (o < n) {{\n\
-             const u32 sa = COL({b}, u32, C{cid}_SA)[o];\n{sb}"
-        )
+        let slots: String = (0..ns.len()).map(|i| format!("const u32 s{i} = COL({b}, u32, C{cid}_S{i})[o];\n")).collect();
+        format!("GLOBAL const u64* L = (GLOBAL const u64*)B;\nconst u32 o = global_x();\nW c = 0.0f;\nif (o < n) {{\n{slots}")
     };
     // the linearization: per instance its record, R rows of the residual
-    // and the two entities' derivatives, zero where the guard drops it
-    let n_partials = na + nb;
+    // and the sides' derivatives, zero where the guard drops it
+    let n_partials: usize = ns.iter().sum();
     let stride = 1 + n_partials;
     let recw = rows * stride;
     let mut body = stmts(gh.0)?;
@@ -575,24 +604,28 @@ fn cpp_kernels(
         prologue("B"),
         lets(gh_syms)?
     );
-    // the sums of the records: each entity side, the cross tiles, the cost
+    // the sums of the records: the cost, each side's entities, each pair's
+    // cross tiles
     let mut reduce = format!(
-        "KERNEL_THREADS(256) void __dk{cid}_ra(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, GLOBAL W* RESTRICT g, u32 slots) {{\n\
-         GLOBAL const u64* L = (GLOBAL const u64*)B;\n\
-         reduce_entity<{na}u, {rows}u, {stride}u, 1u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_AOFF), COL(B, u32, C{cid}_AINST), COL(B, u32, C{cid}_IDXA), COL(B, u32, C{cid}_TILEA), h, g, slots);\n}}\n\
-         KERNEL_THREADS(256) void __dk{cid}_csum(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT cost, u32 parts) {{\n\
+        "KERNEL_THREADS(256) void __dk{cid}_csum(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT cost, u32 parts) {{\n\
          GLOBAL const u64* L = (GLOBAL const u64*)B;\ncost_sum(COL(B, W, C{cid}_PART), parts, cost);\n}}\n"
     );
-    if pair {
+    for (i, (&n, &off)) in ns.iter().zip(&offs).enumerate() {
         reduce.push_str(&format!(
-            "KERNEL_THREADS(256) void __dk{cid}_rb(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, GLOBAL W* RESTRICT g, u32 slots) {{\n\
+            "KERNEL_THREADS(256) void __dk{cid}_r{i}(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, GLOBAL W* RESTRICT g, u32 slots) {{\n\
              GLOBAL const u64* L = (GLOBAL const u64*)B;\n\
-             reduce_entity<{nb}u, {rows}u, {stride}u, {}u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_BOFF), COL(B, u32, C{cid}_BINST), COL(B, u32, C{cid}_IDXB), COL(B, u32, C{cid}_TILEB), h, g, slots);\n}}\n\
-             KERNEL_THREADS(256) void __dk{cid}_rx(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, u32 slots) {{\n\
+             reduce_entity<{n}u, {rows}u, {stride}u, {off}u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_OFF{i}), COL(B, u32, C{cid}_INST{i}), \
+             COL(B, u32, C{cid}_IDX{i}), COL(B, u32, C{cid}_TILE{i}), h, g, slots);\n}}\n"
+        ));
+    }
+    for (p, &(i, j)) in pairs.iter().enumerate() {
+        let (ni, nj, oi, oj) = (ns[i], ns[j], offs[i], offs[j]);
+        reduce.push_str(&format!(
+            "KERNEL_THREADS(256) void __dk{cid}_x{p}(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, u32 slots) {{\n\
              GLOBAL const u64* L = (GLOBAL const u64*)B;\n\
-             reduce_cross<{na}u, {nb}u, {rows}u, {stride}u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_XOFF), COL(B, u32, C{cid}_XINST), COL(B, u32, C{cid}_SA), COL(B, u32, C{cid}_SB), \
-             COL(B, u32, C{cid}_IDXA), COL(B, u32, C{cid}_TILEA), COL(B, u32, C{cid}_IDXB), COL(B, u32, C{cid}_TILEB), COL(B, u32, C{cid}_TILEX), h, slots);\n}}\n",
-            1 + na
+             reduce_cross<{ni}u, {nj}u, {rows}u, {stride}u, {oi}u, {oj}u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_XOFF{p}), COL(B, u32, C{cid}_XINST{p}), \
+             COL(B, u32, C{cid}_S{i}), COL(B, u32, C{cid}_S{j}), COL(B, u32, C{cid}_IDX{i}), COL(B, u32, C{cid}_TILE{i}), \
+             COL(B, u32, C{cid}_IDX{j}), COL(B, u32, C{cid}_TILE{j}), COL(B, u32, C{cid}_TILEX{p}), h, slots);\n}}\n"
         ));
     }
     // the cost: the rows alone, or rho of their squared norm
@@ -777,30 +810,34 @@ pub(crate) fn device_root(
         e
     };
     struct Ids {
-        ea: usize,
-        /// Of a constraint of two: the second side's entity table and the cross array.
-        pair: Option<(usize, usize)>,
+        /// Per side its entity table.
+        sides: Vec<usize>,
+        /// Per pair its sides and its cross array.
+        pairs: Vec<(usize, usize, usize)>,
         refs: Vec<usize>,
     }
     let mut ids: Vec<Ids> = Vec::new();
     for c in constraints {
-        let ea = entity_of(&mut entities, &c.a, &c.ent[0]);
-        let pair = c.b.as_ref().map(|b| {
-            let eb = entity_of(&mut entities, b, &c.ent[1]);
-            let x = match crosses.iter().position(|(h, bl)| *h == c.holder && c.block == bl) {
-                Some(x) => x,
-                None => {
-                    crosses.push((c.holder.clone(), c.block.to_string()));
-                    crosses.len() - 1
-                }
-            };
-            (eb, x)
-        });
+        let sides: Vec<usize> = c.sides.iter().zip(&c.ent).map(|(sd, ent)| entity_of(&mut entities, sd, ent)).collect();
+        let pairs = c
+            .pairs
+            .iter()
+            .map(|p| {
+                let x = match crosses.iter().position(|(h, bl)| *h == p.holder && *bl == p.block) {
+                    Some(x) => x,
+                    None => {
+                        crosses.push((p.holder.clone(), p.block.clone()));
+                        crosses.len() - 1
+                    }
+                };
+                (p.i, p.j, x)
+            })
+            .collect();
         let refs = c
             .refs
             .iter()
             .map(|rf| {
-                let e = if rf.side == 0 { ea } else { pair.expect("a referenced field of side 1 is b's").0 };
+                let e = sides[rf.side];
                 match references.iter().position(|(re, r)| *re == e && r.path == rf.path) {
                     Some(r) => r,
                     None => {
@@ -815,7 +852,7 @@ pub(crate) fn device_root(
                 root_data.push(d.clone());
             }
         }
-        ids.push(Ids { ea, pair, refs });
+        ids.push(Ids { sides, pairs, refs });
     }
     // the records and their mirrors
     let records: Result<Vec<Record>, String> = entities.iter().map(|en| Record::new(&en.data, ft)).collect();
@@ -843,11 +880,9 @@ pub(crate) fn device_root(
     let entity_n: Vec<usize> = entities.iter().map(|e| e.params.len()).collect();
     let n_cross = crosses.len();
     let cshape: Vec<TokenStream2> = constraints.iter().zip(&ids).map(|(c, id)| {
-        let (nd, rows, ea) = (c.inst.len(), c.rows, id.ea);
-        match id.pair {
-            Some((eb, x)) => quote! { ::arael::__gpu::DeviceConstraint { words: 3usize, data: #nd, rows: #rows, a: #ea, pair: Some((#eb, #x)) } },
-            None => quote! { ::arael::__gpu::DeviceConstraint { words: 1usize, data: #nd, rows: #rows, a: #ea, pair: None } },
-        }
+        let (nd, rows, sides) = (c.inst.len(), c.rows, &id.sides);
+        let pairs = id.pairs.iter().map(|(i, j, x)| quote! { (#i, #j, #x) });
+        quote! { ::arael::__gpu::DeviceConstraint { data: #nd, rows: #rows, sides: vec![#(#sides),*], pairs: vec![#(#pairs),*] } }
     }).collect();
     // the C++: the records, then the kernels, each constraint's column and
     // record names aliased to the root's numbering, which the host's layout
@@ -860,27 +895,23 @@ pub(crate) fn device_root(
     for (c, id) in constraints.iter().zip(&ids) {
         let k = c.cid;
         let mut alias = |local: &str, root: String| cpp.push_str(&format!("#define ARAEL_COL_C{k}_{local} ARAEL_COL_{root}\n"));
-        alias("EVA", format!("E{}_EV", id.ea));
-        alias("IDXA", format!("E{}_IDX", id.ea));
-        alias("TILEA", format!("E{}_TILE", id.ea));
-        alias("DATAA", format!("E{}_DATA", id.ea));
-        if let Some((eb, x)) = id.pair {
-            alias("EVB", format!("E{eb}_EV"));
-            alias("IDXB", format!("E{eb}_IDX"));
-            alias("TILEB", format!("E{eb}_TILE"));
-            alias("DATAB", format!("E{eb}_DATA"));
-            alias("TILEX", format!("X{x}_TILE"));
+        for (i, e) in id.sides.iter().enumerate() {
+            for col in ["EV", "IDX", "TILE", "DATA"] {
+                alias(&format!("{col}{i}"), format!("E{e}_{col}"));
+            }
+        }
+        for (p, (_, _, x)) in id.pairs.iter().enumerate() {
+            alias(&format!("TILEX{p}"), format!("X{x}_TILE"));
         }
         for (lr, &r) in id.refs.iter().enumerate() {
             alias(&format!("VAL{lr}"), format!("R{r}_VAL"));
             alias(&format!("VALW{lr}"), format!("R{r}_VALW"));
             alias(&format!("DER{lr}"), format!("R{r}_DER"));
         }
-        if !c.ent[0].is_empty() {
-            cpp.push_str(&format!("typedef E{}Data C{k}_RecA;\n", id.ea));
-        }
-        if let (Some((eb, _)), false) = (id.pair, c.ent[1].is_empty()) {
-            cpp.push_str(&format!("typedef E{eb}Data C{k}_RecB;\n"));
+        for (i, e) in id.sides.iter().enumerate() {
+            if !c.ent[i].is_empty() {
+                cpp.push_str(&format!("typedef E{e}Data C{k}_Rec{i};\n"));
+            }
         }
         cpp.push_str(&c.cpp);
     }
@@ -939,14 +970,19 @@ pub(crate) fn device_root(
         }
         let structure: Vec<TokenStream2> = mine.iter().map(|(c, _)| {
             let cid = c.cid;
-            let (av, ahb) = (format_ident!("{}", c.a.var), format_ident!("{}", c.a.hb));
-            let slots = match &c.b {
-                Some(b) => {
-                    let (bv, bhb, block) = (format_ident!("{}", b.var), format_ident!("{}", b.hb), &c.block);
-                    quote! { [#av.#ahb.slot(), #bv.#bhb.slot(), __frine.#block.slot()] }
-                }
-                None => quote! { [#av.#ahb.slot()] },
-            };
+            // the sides' slots, then the pairs' cross slots
+            let words = c
+                .sides
+                .iter()
+                .map(|sd| {
+                    let (v, hb) = (format_ident!("{}", sd.var), format_ident!("{}", sd.hb));
+                    quote! { #v.#hb.slot() }
+                })
+                .chain(c.pairs.iter().map(|p| {
+                    let access = &p.access;
+                    quote! { #access.slot() }
+                }));
+            let slots = quote! { [#(#words),*] };
             let cond = c.filter.clone().unwrap_or_else(|| quote! { true });
             quote! {
                 {

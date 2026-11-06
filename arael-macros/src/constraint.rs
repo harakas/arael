@@ -7892,10 +7892,16 @@ pub fn generate_root_methods(
         let nested_at_root = !is_remote_block && !is_self_block && !is_triplet && !is_multi_cross
             && !is_root_level_cross && parent_cross.is_none() && mixed.is_none()
             && matches!(entity_location, EntityLocation::Collection { .. });
+        // a multi-cross constraint in a root-level collection over its own
+        // refs and its own cross blocks
+        let multi_at_root = is_multi_cross && !is_triplet && !is_remote_block && mixed.is_none()
+            && !has_root_entity && cross_prefix.is_empty()
+            && multi_cross_routing.iter().all(|r| !r.parent_owned);
         if device_unsupported.is_none()
             && !remote_at_root
             && !self_at_root
             && !nested_at_root
+            && !multi_at_root
             && (is_remote_block || is_self_block || is_triplet || is_multi_cross || !is_root_level_cross)
         {
             device_unsupported = Some(format!("{}: only root-level cross constraints and root-level constraints of one entity have a device form yet", sc.struct_name));
@@ -8108,10 +8114,9 @@ pub fn generate_root_methods(
                         device_constraints.len(),
                         group_key.clone(),
                         precision,
-                        side,
-                        None,
+                        vec![side],
+                        Vec::new(),
                         sc.struct_name.clone(),
-                        block_ident.clone(),
                         residual_exprs.len(),
                         (&gh_intermediates, &gh_simplified),
                         device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
@@ -8220,10 +8225,9 @@ pub fn generate_root_methods(
                             device_constraints.len(),
                             group_key.clone(),
                             precision,
-                            side,
-                            None,
+                            vec![side],
+                            Vec::new(),
                             sc.struct_name.clone(),
-                            block_ident.clone(),
                             residual_exprs.len(),
                             (&gh_intermediates, &gh_simplified),
                             device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
@@ -8519,6 +8523,71 @@ pub fn generate_root_methods(
             group.gh_entries.push(gh_entry);
             if let Some(ce) = claim_entry { group.claim_entries.push(ce); }
             if let Some(je) = jac_entry { group.jac_entries.push(je); }
+            // The device form of a multi-cross constraint: a side per
+            // participant (its partials in the participants' order), a pair
+            // per declared CrossBlock.
+            if device_unsupported.is_none() && multi_at_root {
+                let side_at = |start: usize| triplet_entities.iter().position(|(_, _, s, _)| *s == start);
+                let pairs: Option<Vec<crate::device::DevPair>> = multi_cross_routing
+                    .iter()
+                    .map(|route| {
+                        let (a, b) = (side_at(route.a_start)?, side_at(route.b_start)?);
+                        let block = &route.block_ident;
+                        Some(crate::device::DevPair {
+                            i: a.min(b),
+                            j: a.max(b),
+                            holder: sc.struct_name.clone(),
+                            block: block.to_string(),
+                            access: quote! { __frine.#block },
+                        })
+                    })
+                    .collect();
+                let why = if arm_writes.is_some() {
+                    Some("a select whose arms write apart")
+                } else if pairs.is_none() {
+                    Some("a cross block of an entity without parameters")
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    device_unsupported = Some(format!("{}: {why} has no device form yet", sc.struct_name));
+                } else {
+                    let sides: Vec<crate::device::DevSide> = triplet_entities
+                        .iter()
+                        .map(|(var, ty, start, count)| crate::device::DevSide {
+                            ty: ty.to_string(),
+                            var: var.to_string(),
+                            hb: registry_lookup(&ty.to_string()).and_then(|l| l.self_block_field.clone()).unwrap_or_default(),
+                            params: param_strs[*start..start + count].iter().map(|p| p.to_string()).collect(),
+                        })
+                        .collect();
+                    let device_key = format!("multi.{rc_ident}");
+                    match crate::device::device_constraint(
+                        device_constraints.len(),
+                        device_key.clone(),
+                        precision,
+                        sides,
+                        pairs.unwrap_or_default(),
+                        sc.struct_name.clone(),
+                        residual_exprs.len(),
+                        (&gh_intermediates, &gh_simplified),
+                        device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
+                        (&cost_intermediates, &cost_simplified),
+                        device_loss.as_ref(),
+                        &atom_caches,
+                        &root_var_name,
+                    ) {
+                        Ok(mut dc) => {
+                            dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
+                            device_constraints.push(dc);
+                            device_groups
+                                .entry(device_key)
+                                .or_insert_with(|| crate::device::DevGroup::flat(&rc_ident, &resolve_stmts, &root_var_ident));
+                        }
+                        Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
+                    }
+                }
+            }
         } else if is_root_level_cross {
             // Root-level CrossBlock: constraint struct is directly on root (e.g. PosePair, CoincidentPP)
             // Flat iteration, no nesting. Multiple #[arael(constraint(...))] attributes on the
@@ -8596,14 +8665,13 @@ pub fn generate_root_methods(
             group.cost_entries.push(cost_entry);
             group.gh_entries.push(gh_entry);
             if let Some(je) = jac_entry { group.jac_entries.push(je); }
-            // The device form: the two entities through refs, the holder's
-            // cross tile, the partials A's then B's.
+            // The device form: the two entities through refs (the
+            // instance's own or its parent's), the holder's cross tile or
+            // the parent's shared one, the partials A's then B's; walked as
+            // the cost sweep walks the group (the prefix's loops, then the
+            // collection).
             if device_unsupported.is_none() {
-                let why = if !cross_prefix.is_empty() {
-                    Some("a cross constraint below the root")
-                } else if parent_cross.is_some() {
-                    Some("a parent-owned cross block")
-                } else if arm_writes.is_some() {
+                let why = if arm_writes.is_some() {
                     Some("a select whose arms write apart")
                 } else if a_param_count == 0 || b_param_count == 0 || b_type.is_none() {
                     Some("an entity without parameters")
@@ -8628,14 +8696,25 @@ pub fn generate_root_methods(
                         ty: b_ty,
                         params: param_strs[a_param_count..a_param_count + b_param_count].iter().map(|p| p.to_string()).collect(),
                     };
+                    let pair = match &parent_cross {
+                        Some(pc) => {
+                            let (ctn, field) = (nested_container(&cross_prefix), &pc.field);
+                            crate::device::DevPair { i: 0, j: 1, holder: pc.parent_type.clone(), block: field.to_string(), access: quote! { #ctn.#field } }
+                        }
+                        None => crate::device::DevPair::own(&sc.struct_name, &block_ident),
+                    };
+                    let device_key = if cross_prefix.is_empty() {
+                        rc_ident.to_string()
+                    } else {
+                        format!("{}.{}", path_display(&cross_prefix), rc_ident)
+                    };
                     match crate::device::device_constraint(
                         device_constraints.len(),
-                        group.rc_ident.to_string(),
+                        device_key,
                         precision,
-                        side_a,
-                        Some(side_b),
+                        vec![side_a, side_b],
+                        vec![pair],
                         sc.struct_name.clone(),
-                        block_ident.clone(),
                         residual_exprs.len(),
                         (&gh_intermediates, &gh_simplified),
                         device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
@@ -8692,10 +8771,9 @@ pub fn generate_root_methods(
                         device_constraints.len(),
                         device_key.clone(),
                         precision,
-                        side_a,
-                        Some(side_b),
+                        vec![side_a, side_b],
+                        vec![crate::device::DevPair::own(&sc.struct_name, &block_ident)],
                         sc.struct_name.clone(),
-                        block_ident.clone(),
                         residual_exprs.len(),
                         (&gh_intermediates, &gh_simplified),
                         device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
@@ -10616,9 +10694,25 @@ pub fn generate_root_methods(
     let (device_items, device_why, device_accessor) = match &device_unsupported {
         Some(why) => (quote! {}, quote! { Some(#why) }, quote! {}),
         None => {
+            // a cross group's walk: its prefix's loops (the parents, bound
+            // as `__seg<i>`), then its collection
             let mut groups: std::collections::BTreeMap<String, crate::device::DevGroup> = cross_groups
-                .values()
-                .map(|g| (g.rc_ident.to_string(), crate::device::DevGroup::flat(&g.rc_ident, &g.resolve_stmts, &g.root_var_ident)))
+                .iter()
+                .map(|(key, g)| {
+                    let (prefix, rc, resolve, root_var) = (g.prefix.clone(), g.rc_ident.clone(), g.resolve_stmts.clone(), g.root_var_ident.clone());
+                    let walk = move |body: &TokenStream2| {
+                        let ctn = nested_container(&prefix);
+                        wrap_in_prefix_scoped(&prefix, false, quote! {
+                            for __frine in #ctn.#rc.iter() {
+                                #(#resolve)*
+                                #[allow(unused_variables)]
+                                let #root_var = &*self;
+                                #body
+                            }
+                        }, None, false)
+                    };
+                    (key.clone(), crate::device::DevGroup { walk: Box::new(walk) })
+                })
                 .collect();
             groups.append(&mut device_groups);
             let root_str = root_name.to_string();

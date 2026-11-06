@@ -7,10 +7,11 @@
 // H, the gradient and the cost are in W, the route's wide scalar, and no
 // write is atomic. A constraint's instance kernel writes, per instance, its
 // residual rows and their derivative rows (a record of RECW values of F,
-// row after row: the residual, the A entity's derivatives, the B entity's),
-// and per block of 256 instances its part of the cost. Then one kernel per
-// entity side sums the records of each entity's instances into its tile and
-// gradient, one per cross tile its instances' products, and one block the
+// row after row: the residual, then each of its entities' derivatives in
+// side order), and per block of 256 instances its part of the cost. Then
+// one kernel per side sums the records of each entity's instances into its
+// tile and gradient, one per pair of sides with a cross tile its instances'
+// products, and one block the
 // cost's parts: each output has one writer per launch, and the launches run
 // one after another, so constraints that share an output add into it in turn.
 //
@@ -646,9 +647,13 @@ DEVICE void reduce_entity(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRI
 // inst[off[x]..off[x + 1]] (one pair of entities, sa and sb those of the
 // first, per slot), into the cross tile `tile_x` of the slot, between the
 // live parameters of the entities (global indices idx_a, idx_b; first live
-// ones in tile_a, tile_b). An instance of the pair the other way round (its
-// A the first's B: two entities of one array, NA = NB) adds dA_j dB_i.
-template <u32 NA, u32 NB, u32 R, u32 STRIDE>
+// ones in tile_a, tile_b). A's derivatives sit at OFFA in each row, B's at
+// OFFB. An instance of the pair the other way round (its A the first's B:
+// two entities of one array, NA = NB) adds dA_j dB_i. A slot whose two
+// sides are one entity (aliased refs) sums into that entity's own tile,
+// the upper triangle: (i, j) and (j, i) land in one cell, which the thread
+// of i <= j sums, dA_i dB_j + dA_j dB_i (2 dA_i dB_i on the diagonal).
+template <u32 NA, u32 NB, u32 R, u32 STRIDE, u32 OFFA, u32 OFFB>
 DEVICE void reduce_cross(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRICT off, GLOBAL const u32* RESTRICT inst,
                          GLOBAL const u32* RESTRICT slot_a, GLOBAL const u32* RESTRICT slot_b,
                          GLOBAL const u32* RESTRICT idx_a, GLOBAL const u32* RESTRICT tile_a,
@@ -666,12 +671,31 @@ DEVICE void reduce_cross(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRIC
     u32 gi = idx_a[sa * NA + i];
     u32 gj = idx_b[sb * NB + j];
     if (gi == FIXED || gj == FIXED) return;
+    u32 start_a = tile_a[sa * 3 + 2], start_b = tile_b[sb * 3 + 2];
+    const bool alias = NA == NB && start_a == start_b;
+    if (alias && i > j) return;
     W acc = 0.0f;
+    u32 base = tile_x[x * 3], stride = tile_x[x * 3 + 1], flip = tile_x[x * 3 + 2];
+    if (alias) {
+        for (u32 q = q0; q < q1; q++) {
+            GLOBAL const F* r = rec + inst[q] * (R * STRIDE);
+#pragma unroll
+            for (u32 row = 0; row < R; row++) {
+                GLOBAL const F* rr = r + row * STRIDE;
+                acc = wide_fma(acc, rr[OFFA + i], rr[OFFB + j]);
+                acc = wide_fma(acc, rr[OFFA + j], rr[OFFB + i]);
+            }
+        }
+        acc += acc;
+        u32 lo = (gi < gj ? gi : gj) - start_a, hi = (gi < gj ? gj : gi) - start_a;
+        h[base + hi * stride + lo] += acc;
+        return;
+    }
     for (u32 q = q0; q < q1; q++) {
         GLOBAL const F* r = rec + inst[q] * (R * STRIDE);
         bool reversed = NA == NB && slot_a[inst[q]] != sa;
-        u32 ia = reversed ? 1 + j : 1 + i;
-        u32 jb = reversed ? 1 + NA + i : 1 + NA + j;
+        u32 ia = reversed ? OFFA + j : OFFA + i;
+        u32 jb = reversed ? OFFB + i : OFFB + j;
 #pragma unroll
         for (u32 row = 0; row < R; row++) {
             GLOBAL const F* rr = r + row * STRIDE;
@@ -679,9 +703,8 @@ DEVICE void reduce_cross(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRIC
         }
     }
     acc += acc;
-    u32 ra = gi - tile_a[sa * 3 + 2];
-    u32 cb = gj - tile_b[sb * 3 + 2];
-    u32 base = tile_x[x * 3], stride = tile_x[x * 3 + 1], flip = tile_x[x * 3 + 2];
+    u32 ra = gi - start_a;
+    u32 cb = gj - start_b;
     h[flip == 0 ? base + cb * stride + ra : base + ra * stride + cb] += acc;
 }
 

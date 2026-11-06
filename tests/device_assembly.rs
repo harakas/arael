@@ -1056,6 +1056,28 @@ fn a_pose_graph_with_a_prior_assembles_on_the_device_as_on_the_cpu() {
     }
 }
 
+/// Edges whose two refs name one pose: the cross block lands on the pose's
+/// own tile, each symmetric pair of entries in one cell and the diagonal
+/// twice, as the CPU writes an aliased cross block.
+#[test]
+fn an_edge_from_a_pose_to_itself_assembles_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
+    for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+        let (poses, mut edges, prior) = pose_graph::<f64>(20, 3);
+        for k in [3usize, 11, 11] {
+            edges.push(Edge2D { a: poses.ref_at(k), b: poses.ref_at(k), dx: 0.01, dy: -0.02, dth: 0.03, w: 5.0, hb: CrossBlock::new() });
+        }
+        let mut s = Graph2D { poses, edges, prior };
+        assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let x1 = perturbed(&x);
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+    }
+}
+
 /// The pose graph's whole-system solve through the device assembly reaches
 /// the CPU route's optimum.
 #[test]
@@ -1890,6 +1912,391 @@ fn a_robust_bundle_adjustment_assembles_and_solves_on_the_device_as_on_the_cpu()
         let (_, device) = run(Some(&d));
         assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
     }
+}
+
+/// A point held near where it was seen.
+#[arael::model]
+#[arael(constraint(hb, { [(ptm.pos.x - ptm.prior.x) * 0.1, (ptm.pos.y - ptm.prior.y) * 0.1] }))]
+#[derive(Clone)]
+pub struct PtM {
+    pub pos: Param<vect2<f64>>,
+    pub prior: vect2<f64>,
+    pub hb: SelfBlock<PtM>,
+}
+
+/// A line `n . p = d`, its normal held near unit length.
+#[arael::model]
+#[arael(constraint(hb, { [(lnm.n.x * lnm.n.x + lnm.n.y * lnm.n.y - 1.0) * 10.0] }))]
+#[derive(Clone)]
+pub struct LnM {
+    pub n: Param<vect2<f64>>,
+    pub d: Param<f64>,
+    pub hb: SelfBlock<LnM>,
+}
+
+/// A segment of a line: the midpoint of `a` and `b` on the line, `b - a`
+/// along it at length `len`. Three entities, a cross block per pair.
+#[arael::model]
+#[arael(constraint([hb_la, hb_lb, hb_ab], guard = self.on, loss = |s| loss_cauchy(s, 4.0), {
+    let mx = (a.pos.x + b.pos.x) * 0.5;
+    let my = (a.pos.y + b.pos.y) * 0.5;
+    let dx = b.pos.x - a.pos.x;
+    let dy = b.pos.y - a.pos.y;
+    [(ln.n.x * mx + ln.n.y * my - ln.d) * mid.w,
+     (sqrt(dx * dx + dy * dy) - mid.len) * mid.w,
+     (ln.n.x * dx + ln.n.y * dy) * mid.w]
+}))]
+#[derive(Clone)]
+pub struct Mid {
+    #[arael(ref = root.lines)]
+    pub ln: Ref<LnM>,
+    #[arael(ref = root.points)]
+    pub a: Ref<PtM>,
+    #[arael(ref = root.points)]
+    pub b: Ref<PtM>,
+    pub len: f64,
+    pub w: f64,
+    pub on: bool,
+    #[arael(cross = (ln, a))]
+    pub hb_la: CrossBlock<LnM, PtM>,
+    #[arael(cross = (ln, b))]
+    pub hb_lb: CrossBlock<LnM, PtM>,
+    #[arael(cross = (a, b))]
+    pub hb_ab: CrossBlock<PtM, PtM>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct MidWorld {
+    pub lines: refs::Vec<LnM>,
+    pub points: refs::Vec<PtM>,
+    pub mids: std::vec::Vec<Mid>,
+}
+
+/// Five lines with six segments each; every third segment the one before
+/// it with its points swapped (a pair of points on one cross tile both
+/// ways round), every seventh guarded off, one point fixed; the points and
+/// lines moved off the truth.
+fn mid_world(seed: u64) -> MidWorld {
+    let mut rng = Lcg(seed);
+    let mut lines = refs::Vec::new();
+    let mut points = refs::Vec::new();
+    let mut mids = std::vec::Vec::new();
+    for l in 0..5 {
+        let th = 0.6 * l as f64 + 0.2;
+        let (n, t) = ((th.cos(), th.sin()), (-th.sin(), th.cos()));
+        let d = 1.0 + l as f64;
+        let line = lines.push(LnM {
+            n: Param::new(vect2::new(n.0 + 0.05 * rng.uniform(), n.1 + 0.05 * rng.uniform())),
+            d: Param::new(d + 0.05 * rng.uniform()),
+            hb: SelfBlock::new(),
+        });
+        for k in 0..6 {
+            let (a, b, len) = if k % 3 == 2 {
+                let prev: &Mid = mids.last().unwrap();
+                (prev.b, prev.a, prev.len)
+            } else {
+                let s = k as f64 - 2.5;
+                let len = 1.0 + 0.1 * k as f64;
+                let c = (n.0 * d + t.0 * s, n.1 * d + t.1 * s);
+                let mut pt = |sign: f64, rng: &mut Lcg| {
+                    let p = vect2::new(c.0 + sign * t.0 * len / 2.0 + 0.05 * rng.uniform(), c.1 + sign * t.1 * len / 2.0 + 0.05 * rng.uniform());
+                    let pos = if points.len() == 3 { Param::fixed(p) } else { Param::new(p) };
+                    points.push(PtM { pos, prior: p, hb: SelfBlock::new() })
+                };
+                (pt(-1.0, &mut rng), pt(1.0, &mut rng), len)
+            };
+            let on = mids.len() % 7 != 4;
+            mids.push(Mid { ln: line, a, b, len, w: 3.0, on, hb_la: CrossBlock::new(), hb_lb: CrossBlock::new(), hb_ab: CrossBlock::new() });
+        }
+    }
+    MidWorld { lines, points, mids }
+}
+
+/// A constraint of three entities with a cross block per pair (a guard, a
+/// loss): one side per entity, one reducer per pair, the device assembles
+/// as the CPU does and solves to its optimum.
+#[test]
+fn a_multi_cross_constraint_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
+    let mut s = mid_world(5);
+    assert!(s.mids.iter().any(|m| !m.on));
+    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+    let shape = arael::__gpu::DeviceRoot::<f64>::device_shape(&s);
+    let mid = shape.constraints.iter().find(|k| k.sides.len() == 3).expect("the segment's three sides");
+    assert_eq!(mid.pairs.len(), 3);
+    assert_eq!(mid.sides[1], mid.sides[2], "both points in one entity table");
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x1 = perturbed(&x);
+    for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+    }
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut s = mid_world(5);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        (r.start_cost, r.end_cost, r.x.iter().copied().collect::<Vec<f64>>())
+    };
+    let (start, cpu, cpu_x) = run(None);
+    assert!(cpu < 0.05 * start, "the segments converge: {start} to {cpu}");
+    for d in devices() {
+        let (_, device, dx) = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+        assert_close(&dx, &cpu_x, 1e-7, &format!("{}: the solved parameters", label(&d)));
+    }
+}
+
+/// A node of the shared cross tile tests, held near where it was seen.
+#[arael::model]
+#[arael(constraint(hb, { [(nodep.x - nodep.px) * 0.3, (nodep.y - nodep.py) * 0.3] }))]
+#[derive(Clone)]
+pub struct NodeP {
+    pub x: Param<f64>,
+    pub y: Param<f64>,
+    pub px: f64,
+    pub py: f64,
+    pub hb: SelfBlock<NodeP>,
+}
+
+/// A link with refs of its own, written into its parent's cross block: one
+/// tile for every link the parent holds.
+#[arael::model]
+#[arael(constraint(parent.hb, guard = self.on, {
+    [(b.x - a.x - shlink.dx) * shlink.w, (b.y - a.y - shlink.dy) * shlink.w]
+}))]
+#[derive(Clone)]
+pub struct ShLink {
+    #[arael(ref = root.nodes)]
+    pub a: Ref<NodeP>,
+    #[arael(ref = root.nodes)]
+    pub b: Ref<NodeP>,
+    pub dx: f64,
+    pub dy: f64,
+    pub w: f64,
+    pub on: bool,
+}
+
+#[arael::model]
+#[derive(Clone)]
+pub struct ShPair {
+    pub links: std::vec::Vec<ShLink>,
+    pub hb: CrossBlock<NodeP, NodeP>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct ShNet {
+    pub nodes: refs::Vec<NodeP>,
+    pub pairs: std::vec::Vec<ShPair>,
+}
+
+/// A link of no refs: its parent's refs are its entities, its parent's
+/// cross block its tile, its parent's gain a factor.
+#[arael::model]
+#[arael(constraint(parent.hb, guard = self.on, {
+    [(parent.b.x - parent.a.x - prlink.dx) * prlink.w * parent.gain,
+     (parent.b.y - parent.a.y - prlink.dy) * prlink.w * parent.gain]
+}))]
+#[derive(Clone)]
+pub struct PrLink {
+    pub dx: f64,
+    pub dy: f64,
+    pub w: f64,
+    pub on: bool,
+}
+
+#[arael::model]
+#[derive(Clone)]
+pub struct PrPair {
+    #[arael(ref = root.nodes)]
+    pub a: Ref<NodeP>,
+    #[arael(ref = root.nodes)]
+    pub b: Ref<NodeP>,
+    pub gain: f64,
+    pub links: std::vec::Vec<PrLink>,
+    pub hb: CrossBlock<NodeP, NodeP>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct PrNet {
+    pub nodes: refs::Vec<NodeP>,
+    pub pairs: std::vec::Vec<PrPair>,
+}
+
+/// A link with refs and a cross block of its own, held below the root.
+#[arael::model]
+#[arael(constraint(hb, guard = self.on, {
+    [(b.x - a.x - ownlink.dx) * ownlink.w, (b.y - a.y - ownlink.dy) * ownlink.w]
+}))]
+#[derive(Clone)]
+pub struct OwnLink {
+    #[arael(ref = root.nodes)]
+    pub a: Ref<NodeP>,
+    #[arael(ref = root.nodes)]
+    pub b: Ref<NodeP>,
+    pub dx: f64,
+    pub dy: f64,
+    pub w: f64,
+    pub on: bool,
+    pub hb: CrossBlock<NodeP, NodeP>,
+}
+
+#[arael::model]
+#[derive(Clone)]
+pub struct OwnPair {
+    pub links: std::vec::Vec<OwnLink>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct OwnNet {
+    pub nodes: refs::Vec<NodeP>,
+    pub pairs: std::vec::Vec<OwnPair>,
+}
+
+/// One table for both nets: per pair its nodes, its gain and its links
+/// (dx, dy, w, on).
+type NetPairs = Vec<((usize, usize), f64, Vec<(f64, f64, f64, bool)>)>;
+
+/// Twelve nodes on a grid, moved off it; pairs of them with one to four
+/// links each (the measurements the truth plus noise, every fifth link
+/// guarded off), two pairs joining the same nodes in opposite orders, one
+/// pair joining a node to itself, one pair with no links.
+fn net_data(seed: u64) -> (Vec<(f64, f64)>, NetPairs) {
+    let mut rng = Lcg(seed);
+    let truth: Vec<(f64, f64)> = (0..12).map(|i| ((i % 4) as f64, (i / 4) as f64)).collect();
+    let nodes = truth.iter().map(|&(x, y)| (x + 0.1 * rng.uniform(), y + 0.1 * rng.uniform())).collect();
+    let mut ends: Vec<(usize, usize)> = (0..16).map(|k| (k % 12, (k * 5 + 3) % 12)).filter(|(i, j)| i != j).collect();
+    ends.extend([(1, 2), (2, 1), (5, 5), (0, 1)]);
+    let mut n = 0;
+    let pairs = ends
+        .iter()
+        .enumerate()
+        .map(|(k, &(i, j))| {
+            let count = if k + 1 == ends.len() { 0 } else { 1 + k % 4 };
+            let links = (0..count)
+                .map(|m| {
+                    n += 1;
+                    let (dx, dy) = (truth[j].0 - truth[i].0, truth[j].1 - truth[i].1);
+                    (dx + 0.01 * rng.uniform(), dy + 0.01 * rng.uniform(), 1.0 + 0.2 * m as f64, n % 5 != 3)
+                })
+                .collect();
+            ((i, j), 0.5 + 0.1 * k as f64, links)
+        })
+        .collect();
+    (nodes, pairs)
+}
+
+fn net_nodes(nodes: &[(f64, f64)]) -> refs::Vec<NodeP> {
+    let mut v = refs::Vec::new();
+    for &(x, y) in nodes {
+        v.push(NodeP { x: Param::new(x), y: Param::new(y), px: x, py: y, hb: SelfBlock::new() });
+    }
+    v
+}
+
+fn shared_net(seed: u64) -> ShNet {
+    let (nodes, pairs) = net_data(seed);
+    let nodes = net_nodes(&nodes);
+    let pairs = pairs
+        .into_iter()
+        .map(|((i, j), _, links)| ShPair {
+            links: links.into_iter().map(|(dx, dy, w, on)| ShLink { a: nodes.ref_at(i), b: nodes.ref_at(j), dx, dy, w, on }).collect(),
+            hb: CrossBlock::new(),
+        })
+        .collect();
+    ShNet { nodes, pairs }
+}
+
+fn parent_ref_net(seed: u64) -> PrNet {
+    let (nodes, pairs) = net_data(seed);
+    let nodes = net_nodes(&nodes);
+    let pairs = pairs
+        .into_iter()
+        .map(|((i, j), gain, links)| PrPair {
+            a: nodes.ref_at(i),
+            b: nodes.ref_at(j),
+            gain,
+            links: links.into_iter().map(|(dx, dy, w, on)| PrLink { dx, dy, w, on }).collect(),
+            hb: CrossBlock::new(),
+        })
+        .collect();
+    PrNet { nodes, pairs }
+}
+
+fn own_block_net(seed: u64) -> OwnNet {
+    let (nodes, pairs) = net_data(seed);
+    let nodes = net_nodes(&nodes);
+    let pairs = pairs
+        .into_iter()
+        .map(|((i, j), _, links)| OwnPair {
+            links: links.into_iter().map(|(dx, dy, w, on)| OwnLink { a: nodes.ref_at(i), b: nodes.ref_at(j), dx, dy, w, on, hb: CrossBlock::new() }).collect(),
+        })
+        .collect();
+    OwnNet { nodes, pairs }
+}
+
+/// `make`'s model assembles on the device as on the CPU in both wide
+/// scalars, and its whole-system solve on every device reaches the CPU's
+/// optimum.
+fn assembles_and_solves_as_on_the_cpu<P: LmProblemInternals<f64> + RootProblem<f64>>(make: impl Fn() -> P, what: &str) {
+    use arael::__gpu::Wide;
+    let mut s = make();
+    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None, "{what}");
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x1 = perturbed(&x);
+    for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{what} {wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{what} {wide:?}: {chk:?}");
+    }
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut s = make();
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some(), "{what}");
+        (r.start_cost, r.end_cost, r.x.to_vec())
+    };
+    let (start, cpu, cpu_x) = run(None);
+    assert!(cpu < 0.05 * start, "{what} converges: {start} to {cpu}");
+    for d in devices() {
+        let (_, device, dx) = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{what} {}: {device} against the CPU's {cpu}", label(&d));
+        assert_close(&dx, &cpu_x, 1e-7, &format!("{what} {}: the solved parameters", label(&d)));
+    }
+}
+
+/// Links writing into their parent's cross block, with refs of their own
+/// and with their parent's: every link under a parent sums into one tile,
+/// two parents of opposite orders into one tile of H, a node joined to
+/// itself into its own tile.
+#[test]
+fn parent_owned_cross_blocks_assemble_and_solve_on_the_device_as_on_the_cpu() {
+    assembles_and_solves_as_on_the_cpu(|| shared_net(9), "own refs");
+    assembles_and_solves_as_on_the_cpu(|| parent_ref_net(9), "parent refs");
+}
+
+/// The same links with cross blocks of their own, in collections below the
+/// root: walked through their parents' loops.
+#[test]
+fn cross_constraints_below_the_root_assemble_and_solve_on_the_device_as_on_the_cpu() {
+    assembles_and_solves_as_on_the_cpu(|| own_block_net(9), "own blocks");
 }
 
 /// A scale prior reading a `ScaledTransformParam`'s scale, which the CPU

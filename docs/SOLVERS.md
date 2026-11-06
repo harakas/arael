@@ -897,10 +897,13 @@ let cfg = LmConfig::default().with_device_observer_params(true)
 
 A root gets these kernels when its every
 constraint has a device form (today: constraints of the root's
-collections over one entity or two, reached through refs, an entity's
-constraints on itself, and constraints in a collection of an entity of
-the root's collections coupling that entity with a ref (`parent =`),
-over Euler-angle (simple and re-centred) and `QuaternionParam`
+collections over one entity reached through a ref, or over more with a
+cross block of their own per pair (`[hb_ab, hb_ac, hb_bc]`); constraints
+of two entities in any collection, reached through their own refs or
+their parent's, writing into their own cross block or their parent's
+(`parent.hb`); an entity's constraints on itself; and constraints in a
+collection of an entity of the root's collections coupling that entity
+with a ref (`parent =`); over Euler-angle (simple and re-centred) and `QuaternionParam`
 rotations, `TransformParam` poses, `UnitVecParam` directions and
 `AngleParam` headings, guards included, each evaluated once per
 structure, and robust losses, but no index `select` or `match`, in the
