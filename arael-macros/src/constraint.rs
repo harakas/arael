@@ -7889,13 +7889,18 @@ pub fn generate_root_methods(
                 // the walk: the instance (`__frine`), the assembly loop's
                 // `__item` (the instance, or its parent for a cross
                 // constraint nested in its parent entity), the self and
-                // parent names, the refs, the root
-                let paths = if is_self_block {
+                // parent names, the refs, the root. The root's own
+                // constraint has the root for its one instance, at the
+                // empty path.
+                let on_root = is_self_block && sc.struct_name == root_name.to_string();
+                let paths = if on_root {
+                    vec![Vec::new()]
+                } else if is_self_block {
                     containing_paths.clone()
                 } else {
                     containment_paths(root_fields, &root_name.to_string(), &sc.struct_name)
                 };
-                if paths.is_empty() || paths.iter().any(|p| p.is_empty()) {
+                if paths.is_empty() || (!on_root && paths.iter().any(|p| p.is_empty())) {
                     return Err("an instance outside the root's collections and fields has no device walk yet".into());
                 }
                 let item_is_parent = is_cross_block && !is_root_level_cross;
@@ -7919,6 +7924,17 @@ pub fn generate_root_methods(
                 let walk = move |body: &TokenStream2| -> TokenStream2 {
                     let walks = paths.iter().map(|path| {
                         let n = path.len();
+                        if n == 0 {
+                            return quote! {
+                                {
+                                    let __frine = &*self;
+                                    let __item = __frine;
+                                    #(#names)*
+                                    let #root_var = &*self;
+                                    #body
+                                }
+                            };
+                        }
                         let seg = |k: usize| syn::Ident::new(&format!("__seg{k}"), proc_macro2::Span::call_site());
                         let frine = seg(n - 1);
                         let item = if item_is_parent { seg(n - 2) } else { frine.clone() };

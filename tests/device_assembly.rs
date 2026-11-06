@@ -2731,6 +2731,72 @@ fn the_root_as_a_side_assembles_and_solves_on_the_device_as_on_the_cpu() {
     assembles_and_solves_as_on_the_cpu(offset_root, "the root as a side");
 }
 
+/// A point held near where it was seen.
+#[arael::model]
+#[arael(constraint(hb, { [(ownpt.x - ownpt.px) * 2.0] }))]
+#[derive(Clone)]
+pub struct OwnPt {
+    pub x: Param<f64>,
+    pub px: f64,
+    pub hb: SelfBlock<OwnPt>,
+}
+
+/// A sample of the line the root's scale and offset make, written into
+/// the root's self block.
+#[arael::model]
+#[arael(constraint(root.hb, { [(ownsample.y - root.scale * ownsample.x - root.offset) * 2.0] }))]
+#[derive(Clone)]
+pub struct OwnSample {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// A root with constraints of its own: a prior on its offset reading its
+/// own data, and two rows over both its parameters behind a guard on its
+/// own field; beside an entity collection and data instances writing its
+/// self block.
+#[arael::model]
+#[arael(root)]
+#[arael(constraint(hb, { [(ownroot.offset - ownroot.prior) * ownroot.isigma] }))]
+#[arael(constraint(hb, guard = self.use_scale, {
+    [(ownroot.scale * ownroot.scale - 2.0) * 0.5, (ownroot.scale - 1.4) * sin(ownroot.offset + 1.0)]
+}))]
+#[derive(Clone)]
+pub struct OwnRoot {
+    pub pts: refs::Vec<OwnPt>,
+    pub samples: std::vec::Vec<OwnSample>,
+    pub offset: Param<f64>,
+    pub scale: Param<f64>,
+    pub prior: f64,
+    pub isigma: f64,
+    pub use_scale: bool,
+    pub hb: SelfBlock<OwnRoot>,
+}
+
+fn own_root(use_scale: bool) -> OwnRoot {
+    let mut rng = Lcg(35);
+    let mut pts = refs::Vec::new();
+    for k in 0..5 {
+        pts.push(OwnPt { x: Param::new(k as f64 + 0.1 * rng.uniform()), px: k as f64, hb: SelfBlock::new() });
+    }
+    let samples = (0..9)
+        .map(|k| {
+            let x = 0.5 * k as f64 - 2.0;
+            OwnSample { x, y: 1.4 * x + 0.3 + 0.01 * rng.uniform() }
+        })
+        .collect();
+    OwnRoot { pts, samples, offset: Param::new(0.0), scale: Param::new(1.0), prior: 0.25, isigma: 3.0, use_scale, hb: SelfBlock::new() }
+}
+
+/// The root's own constraints, the root its own instance (no containment
+/// path), with its guard on and off: the device assembles as the CPU does
+/// and solves to its optimum.
+#[test]
+fn constraints_on_the_root_itself_assemble_and_solve_on_the_device_as_on_the_cpu() {
+    assembles_and_solves_as_on_the_cpu(|| own_root(true), "the root's own constraints");
+    assembles_and_solves_as_on_the_cpu(|| own_root(false), "the root's own constraints, the guarded one off");
+}
+
 /// A one-coordinate point held near where it was seen, and again under the
 /// loss its `kind` picks of `loss_select`'s six.
 #[arael::model]

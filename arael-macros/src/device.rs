@@ -15,9 +15,10 @@
 //! into a self block (an entity through a ref, the instance itself, its
 //! parent, an ancestor, the root), a pair per cross block between two of
 //! them (the instance's own or a parent's), whatever the constraint's form.
-//! Its instances are walked along the instance type's containment paths,
-//! the walk binding the names the plan's block places, the body's data
-//! leaves and the guard read. Guards are evaluated once per structure (a
+//! Its instances are walked along the instance type's containment paths
+//! (the root's own constraint has the root for its one instance), the walk
+//! binding the names the plan's block places, the body's data leaves and
+//! the guard read. Guards are evaluated once per structure (a
 //! guard does not change during a solve); a robust loss scales the record
 //! by `sqrt(rho'(s))`, as the CPU's Jacobian rows are. Over referenced fields
 //! (`SimpleEulerAngleParam` angles, computed and never re-centred; Euler-angle
