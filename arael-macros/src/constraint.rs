@@ -405,6 +405,10 @@ struct ConstraintCtx {
     // Integer and bool data fields: symbol -> (body path, type). They may
     // only pick a `match` arm; see `check_integer_reads`.
     int_fields: HashMap<String, (String, String)>,
+    // The atom caches' symbols (`a.rot.sin`) and the atoms they stand for,
+    // in the parameters' symbols (`sin(a.rot.angle.work())`): the CPU reads
+    // the cache, refreshed per iteration; the device computes the atom.
+    atom_caches: Vec<(String, arael_sym::E)>,
 }
 
 impl ConstraintCtx {
@@ -418,6 +422,7 @@ impl ConstraintCtx {
             typed_fn: Vec::new(),
             root: None,
             int_fields: HashMap::new(),
+            atom_caches: Vec::new(),
         }
     }
 
@@ -3144,8 +3149,9 @@ fn register_bindings_body(
                                     format!("atom `{}` on `{}.{}` must be a scalar, got {}",
                                         atom_src, type_name, fname, other.type_name()))),
                             };
-                            atom_map.push((atom_e,
-                                arael_sym::symbol(&format!("{}.{}", sym_prefix, cache_field))));
+                            let cache = format!("{}.{}", sym_prefix, cache_field);
+                            ctx.atom_caches.push((cache.clone(), atom_e.clone()));
+                            atom_map.push((atom_e, arael_sym::symbol(&cache)));
                         }
                         let dvars = dvars_for(by)?;
                         for (_, e) in &comps {
@@ -4782,6 +4788,9 @@ pub fn generate_root_methods(
     // The device head (docs/dev/GPU.md, E9 stage 3): the constraints with a
     // device form, and why the root has no device assembly when one lacks it.
     let mut device_constraints: Vec<crate::device::DevConstraint> = Vec::new();
+    // the walk groups of the device's constraints of one entity (the cross
+    // constraints' are their cross groups)
+    let mut device_groups: std::collections::BTreeMap<String, crate::device::DevGroup> = std::collections::BTreeMap::new();
     let mut device_unsupported: Option<String> = None;
     let root_var_name = root_name.to_string().to_lowercase();
     let root_var_ident = syn::Ident::new(&root_var_name, proc_macro2::Span::call_site());
@@ -6458,7 +6467,7 @@ pub fn generate_root_methods(
         // Re-process constraint body to get residual-only code and full code
         // We need the symbolic expressions again
         let root_name_str = root_name.to_string();
-        let (residual_exprs, param_symbols, loss_expr, component_subs) = interpret_constraint_body(
+        let (residual_exprs, param_symbols, loss_expr, component_subs, atom_caches) = interpret_constraint_body(
             &struct_ident, &fields.named, &constraint, &root_name_str,
             parent_cross.as_ref(), &parent_binding, mixed.as_ref(), cross_prefix.len())
             .map_err(|e| syn::Error::new(e.span(),
@@ -7857,10 +7866,20 @@ pub fn generate_root_methods(
             })
             .transpose()?;
 
+        // the device covers root-level cross constraints, root-level
+        // constraints of one entity reached through a ref, and constraints
+        // of an entity of a root-level collection on itself
+        let remote_at_root = is_remote_block && matches!(entity_location, EntityLocation::RootSelf) && !is_multi_cross && !is_triplet;
+        let self_at_root = is_self_block && !is_triplet && !is_multi_cross
+            && root_self_primary.is_none() && parent_self_primary.is_none()
+            && matches!(entity_location, EntityLocation::Collection { .. })
+            && containing_paths.len() == 1 && containing_paths[0].len() == 1;
         if device_unsupported.is_none()
+            && !remote_at_root
+            && !self_at_root
             && (is_remote_block || is_self_block || is_triplet || is_multi_cross || !is_root_level_cross)
         {
-            device_unsupported = Some(format!("{}: only root-level cross constraints have a device form yet", sc.struct_name));
+            device_unsupported = Some(format!("{}: only root-level cross constraints and root-level constraints of one entity have a device form yet", sc.struct_name));
         }
         if is_remote_block {
             // Remote block: iterate parent collection -> frines,
@@ -8044,6 +8063,59 @@ pub fn generate_root_methods(
             grad_hessian_loops.push(gh_loop);
 
 
+            // The device form of a root-level constraint of one entity: the
+            // referenced entity's parameters, its self block, the root's
+            // collection walked as the cost sweep walks it.
+            if device_unsupported.is_none() && remote_at_root {
+                let why = if guard_expr.is_some() {
+                    Some("a guard")
+                } else if loss_present {
+                    Some("a loss")
+                } else if arm_writes.is_some() {
+                    Some("a select whose arms write apart")
+                } else if param_strs.is_empty() {
+                    Some("an entity without parameters")
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    device_unsupported = Some(format!("{}: {why} has no device form yet", sc.struct_name));
+                } else {
+                    let (ref_field_name, target_block_field, target_type) = remote_block_info.as_ref().unwrap();
+                    let side = crate::device::DevSide {
+                        ty: target_type.clone(),
+                        var: ref_field_name.clone(),
+                        hb: target_block_field.clone(),
+                        params: param_strs.iter().map(|p| p.to_string()).collect(),
+                    };
+                    let group_key = frines_ident.to_string();
+                    match crate::device::device_constraint(
+                        device_constraints.len(),
+                        group_key.clone(),
+                        precision,
+                        side,
+                        None,
+                        sc.struct_name.clone(),
+                        block_ident.clone(),
+                        residual_exprs.len(),
+                        (&gh_intermediates, &gh_simplified),
+                        device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
+                        (&cost_intermediates, &cost_simplified),
+                        &atom_caches,
+                    ) {
+                        Ok(dc) => {
+                            device_constraints.push(dc);
+                            device_groups.entry(group_key).or_insert_with(|| crate::device::DevGroup {
+                                rc_ident: frines_ident.clone(),
+                                resolve_stmts: resolve_stmts.clone(),
+                                root_var_ident: root_var_ident.clone(),
+                            });
+                        }
+                        Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
+                    }
+                }
+            }
+
             // The remote form wires nothing at serialize: the store holds
             // the indices and the marker its slot.
             let _ = remote_target_write.as_ref().unwrap();
@@ -8103,6 +8175,63 @@ pub fn generate_root_methods(
                 };
                 Some(entry)
             } else { None };
+
+            // The device form of an entity's constraint on itself: its
+            // parameters, its self block, its collection walked as the cost
+            // sweep walks it, a guard over its data applied when packing.
+            if device_unsupported.is_none() && self_at_root {
+                let why = if loss_present {
+                    Err("a loss".to_string())
+                } else if arm_writes.is_some() {
+                    Err("a select whose arms write apart".to_string())
+                } else if param_strs.is_empty() {
+                    Err("an entity without parameters".to_string())
+                } else if !self_resolve_stmts.is_empty() {
+                    Err("data refs".to_string())
+                } else {
+                    guard_expr.as_ref()
+                        .map(|g| crate::device::guard_on_data(g, &self_var_name, &sc.struct_name).map(|()| quote! { #g }))
+                        .transpose()
+                };
+                match why {
+                    Err(why) => device_unsupported = Some(format!("{}: {why} has no device form yet", sc.struct_name)),
+                    Ok(filter) => {
+                        let side = crate::device::DevSide {
+                            ty: sc.struct_name.clone(),
+                            var: self_var_name.clone(),
+                            hb: constraint.primary_block_field().to_string(),
+                            params: param_strs.iter().map(|p| p.to_string()).collect(),
+                        };
+                        let coll = &containing_paths[0][0].field;
+                        let group_key = format!("self.{coll}");
+                        match crate::device::device_constraint(
+                            device_constraints.len(),
+                            group_key.clone(),
+                            precision,
+                            side,
+                            None,
+                            sc.struct_name.clone(),
+                            block_ident.clone(),
+                            residual_exprs.len(),
+                            (&gh_intermediates, &gh_simplified),
+                            device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
+                            (&cost_intermediates, &cost_simplified),
+                            &atom_caches,
+                        ) {
+                            Ok(mut dc) => {
+                                dc.filter = filter;
+                                device_constraints.push(dc);
+                                device_groups.entry(group_key).or_insert_with(|| crate::device::DevGroup {
+                                    rc_ident: syn::Ident::new(coll, proc_macro2::Span::call_site()),
+                                    resolve_stmts: vec![quote! { let #self_var = __frine; }],
+                                    root_var_ident: root_var_ident.clone(),
+                                });
+                            }
+                            Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
+                        }
+                    }
+                }
+            }
 
             match &entity_location {
                 EntityLocation::Collection { .. } | EntityLocation::Nested { .. } => {
@@ -8495,13 +8624,14 @@ pub fn generate_root_methods(
                         group.rc_ident.to_string(),
                         precision,
                         side_a,
-                        side_b,
+                        Some(side_b),
                         sc.struct_name.clone(),
                         block_ident.clone(),
                         residual_exprs.len(),
                         (&gh_intermediates, &gh_simplified),
                         device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
                         (&cost_intermediates, &cost_simplified),
+                        &atom_caches,
                     ) {
                         Ok(dc) => device_constraints.push(dc),
                         Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
@@ -10394,7 +10524,7 @@ pub fn generate_root_methods(
     let (device_items, device_why, device_accessor) = match &device_unsupported {
         Some(why) => (quote! {}, quote! { Some(#why) }, quote! {}),
         None => {
-            let groups: std::collections::BTreeMap<String, crate::device::DevGroup> = cross_groups
+            let mut groups: std::collections::BTreeMap<String, crate::device::DevGroup> = cross_groups
                 .values()
                 .map(|g| (g.rc_ident.to_string(), crate::device::DevGroup {
                     rc_ident: g.rc_ident.clone(),
@@ -10402,6 +10532,7 @@ pub fn generate_root_methods(
                     root_var_ident: g.root_var_ident.clone(),
                 }))
                 .collect();
+            groups.append(&mut device_groups);
             let items = crate::device::device_root(root_name, precision, &store_ty, &device_constraints, &groups, &store_array_ident);
             (items, quote! { None }, quote! {
                 ::arael::__gpu_items! {
@@ -10557,8 +10688,13 @@ pub fn generate_root_methods(
 /// verbatim.
 pub const LOSS_ARG_SYM: &str = "__block_cost";
 
-/// Interpret constraint body and return (residual expressions, param symbols,
-/// optional robust-loss expression rho(s) in terms of [`LOSS_ARG_SYM`]).
+/// A constraint body interpreted: its residual expressions, its parameter
+/// symbols, its robust loss rho(s) in terms of [`LOSS_ARG_SYM`], its
+/// components' substitutions and its atom caches (see
+/// `ConstraintCtx::atom_caches`).
+type BodyParts = (Vec<E>, Vec<String>, Option<E>, Vec<(E, E)>, Vec<(String, E)>);
+
+/// Interpret a constraint body into its [`BodyParts`].
 fn interpret_constraint_body(
     struct_name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
@@ -10575,7 +10711,7 @@ fn interpret_constraint_body(
     // collection below the root (the ancestor binds as `__seg{depth-2}`).
     mixed: Option<&MixedParent>,
     prefix_len: usize,
-) -> syn::Result<(Vec<E>, Vec<String>, Option<E>, Vec<(E, E)>)> {
+) -> syn::Result<BodyParts> {
     // `root.<selfblock>` primary: the entity supplies only data, every param
     // is the root's. Deep validation lives in the traversal side (which sees
     // the real field types); here it only shapes the symbol environment.
@@ -11129,7 +11265,7 @@ fn interpret_constraint_body(
     check_integer_reads(struct_name,
         residuals.iter().chain(loss_expr.iter()), &ctx.int_fields)?;
 
-    Ok((residuals, param_symbols, loss_expr, ctx.subs))
+    Ok((residuals, param_symbols, loss_expr, ctx.subs, ctx.atom_caches))
 }
 
 /// An integer or bool type, by the last segment of its spelling.

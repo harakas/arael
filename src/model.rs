@@ -263,13 +263,34 @@ pub trait Model {
     /// nesting depth are advanced.
     fn advance_params<F: crate::utils::Float>(&mut self, _params: &mut [F]) {}
 
-    /// Set the reference rotation of each optimized `EulerAngleParam` (and
-    /// `MixedEulerAngleParam`) that `refs` knows, keyed by the rotation's
-    /// first parameter index (row-major), and zero its delta: the device
-    /// solve's re-centring handed back in place of `advance_params`.
-    /// Recurses like `advance_params`.
+    /// Set the reference of each optimized `EulerAngleParam`,
+    /// `MixedEulerAngleParam` and `QuaternionParam` that `refs` knows,
+    /// keyed by the rotation's first parameter index, and zero its delta:
+    /// the device solve's re-centring handed back in place of
+    /// `advance_params`. Recurses like `advance_params`.
     #[doc(hidden)]
-    fn set_references(&mut self, _refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {}
+    fn set_references(&mut self, _refs: &mut dyn FnMut(u32) -> Option<Reference>) {}
+}
+
+/// A rotation's reference as a device solve hands it back to
+/// [`Model::set_references`].
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Reference {
+    /// A rotation matrix, row-major: an Euler-angle parameter's.
+    Matrix([f64; 9]),
+    /// A unit quaternion (w, x, y, z): a `QuaternionParam`'s.
+    Quaternion([f64; 4]),
+}
+
+impl Reference {
+    /// The rotation matrix of an Euler-angle parameter's reference.
+    fn matrix<T: crate::utils::Float>(self) -> matrix3<T> {
+        match self {
+            Reference::Matrix(m) => matrix_from_rows(m),
+            Reference::Quaternion(_) => panic!("an Euler-angle parameter's reference is a matrix"),
+        }
+    }
 }
 
 /// The [`collect_param_blocks`](Model::collect_param_blocks) of a parameter
@@ -869,9 +890,9 @@ impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamT
         }
     }
 
-    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
-        if self.index != u32::MAX && let Some(m) = refs(self.index) {
-            self.ref_rotation = matrix_from_rows(m);
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<Reference>) {
+        if self.index != u32::MAX && let Some(r) = refs(self.index) {
+            self.ref_rotation = r.matrix();
             self.delta = vect3::<T>::default();
         }
     }
@@ -1102,9 +1123,9 @@ impl<T: crate::utils::Float, H: crate::utils::Wide<T>> Model for MixedEulerAngle
         }
     }
 
-    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
-        if self.index != u32::MAX && let Some(m) = refs(self.index) {
-            self.ref_rotation = matrix_from_rows(m);
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<Reference>) {
+        if self.index != u32::MAX && let Some(r) = refs(self.index) {
+            self.ref_rotation = r.matrix();
             self.delta = vect3::<H>::default();
         }
     }
@@ -1210,6 +1231,14 @@ impl<T: crate::utils::Float> QuaternionParam<T> {
             * crate::quatern::quatern::<T>::from_rotation_vector_small(self.delta)).unit();
         self.ref_rotation = self.ref_value.rotation_matrix();
         self.delta = vect3::<T>::default();
+    }
+    /// The reference quaternion (w, x, y, z) in f64: what the device
+    /// assembly's pack walk reads.
+    #[doc(hidden)]
+    pub fn __reference_quaternion(&self) -> [f64; 4] {
+        let q = self.ref_value;
+        let f = |v: T| v.to_f64().unwrap();
+        [f(q.t), f(q.v.x), f(q.v.y), f(q.v.z)]
     }
     /// Precompute the composed rotation R_ref * R(delta) and derived euler
     /// angles from the current delta + ref_rotation, where R(delta) is the
@@ -1333,6 +1362,19 @@ impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamT
             params[i] = F::zero(); params[i + 1] = F::zero(); params[i + 2] = F::zero();
         }
     }
+
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<Reference>) {
+        if self.index != u32::MAX && let Some(r) = refs(self.index) {
+            let Reference::Quaternion([w, x, y, z]) = r else {
+                panic!("a QuaternionParam's reference is a quaternion");
+            };
+            let c = |v: f64| T::from(v).unwrap();
+            self.ref_value = crate::quatern::quatern::new(c(w), vect3::new(c(x), c(y), c(z))).unit();
+            self.ref_rotation = self.ref_value.rotation_matrix();
+            self.delta = vect3::<T>::default();
+        }
+    }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1396,7 +1438,7 @@ macro_rules! impl_model_collection {
             fn advance_params<F: crate::utils::Float>(&mut self, params: &mut [F]) {
                 for item in self.$iter_mut() { item.advance_params(params); }
             }
-            fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+            fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<Reference>) {
                 for item in self.$iter_mut() { item.set_references(refs); }
             }
             fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
@@ -1433,7 +1475,7 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn advance_params<F: crate::utils::Float>(&mut self, params: &mut [F]) {
         for item in self.iter_mut() { item.advance_params(params); }
     }
-    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<Reference>) {
         for item in self.iter_mut() { item.set_references(refs); }
     }
     fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
@@ -1463,7 +1505,7 @@ impl<T: Model> Model for Option<T> {
     fn advance_params<F: crate::utils::Float>(&mut self, params: &mut [F]) {
         if let Some(inner) = self { inner.advance_params(params); }
     }
-    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<Reference>) {
         if let Some(inner) = self { inner.set_references(refs); }
     }
     fn serialize_size(&self) -> u32 {

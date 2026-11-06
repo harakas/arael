@@ -29,27 +29,74 @@ pub struct DeviceShape {
     /// Per entity type with a self block, in the store's order: the
     /// parameters of one entity.
     pub entities: Vec<usize>,
-    /// Per Euler-angle rotation field a constraint reads: its entity
-    /// array and the offset of its step among that entity's parameters.
-    pub rotations: Vec<(usize, usize)>,
+    /// Per rotation field a constraint reads.
+    pub rotations: Vec<DeviceRotation>,
     /// How many cross arrays the store holds.
     pub crosses: usize,
     pub constraints: Vec<DeviceConstraint>,
 }
 
-/// One constraint of a [`DeviceShape`].
+/// One rotation field of a [`DeviceShape`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceRotation {
+    /// Its entity array.
+    pub entity: usize,
+    /// The offset of its step among the entity's parameters.
+    pub step: usize,
+    pub kind: RotationKind,
+}
+
+/// How a rotation field composes its reference with its step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RotationKind {
+    /// `EulerAngleParam`: a rotation matrix (row-major) and Euler angles.
+    Euler,
+    /// `QuaternionParam`: a unit quaternion (w, x, y, z) and a rotation
+    /// vector.
+    Quaternion,
+}
+
+impl RotationKind {
+    /// The values of one reference.
+    pub fn reference_len(self) -> usize {
+        match self {
+            RotationKind::Euler => 9,
+            RotationKind::Quaternion => 4,
+        }
+    }
+
+    /// The identity reference.
+    fn identity(self) -> &'static [f64] {
+        match self {
+            RotationKind::Euler => &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            RotationKind::Quaternion => &[1.0, 0.0, 0.0, 0.0],
+        }
+    }
+}
+
+/// One constraint of a [`DeviceShape`]: of one entity, which it writes into
+/// its own tile and gradient, or of two and their cross tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceConstraint {
-    /// The words of one instance: its entities' slots and its cross slot.
+    /// The words of one instance: its entities' slots and its cross slot
+    /// (3), or its one entity's slot (1).
     pub words: usize,
     /// Its data leaves.
     pub data: usize,
     /// Its residual rows.
     pub rows: usize,
-    /// The entity arrays of its two sides, and its cross array.
+    /// The entity array of its first side.
     pub a: usize,
-    pub b: usize,
-    pub cross: usize,
+    /// Of a constraint of two entities: the entity array of its second
+    /// side and its cross array.
+    pub pair: Option<(usize, usize)>,
+}
+
+impl DeviceConstraint {
+    /// The parameters of its entities, the first side's then the second's.
+    fn params(&self, shape: &DeviceShape) -> usize {
+        shape.entities[self.a] + self.pair.map_or(0, |(b, _)| shape.entities[b])
+    }
 }
 
 /// A root's block store against a tiled pattern, slot by slot: per entity
@@ -70,26 +117,30 @@ pub fn leaf_f64<V: num::ToPrimitive>(v: V) -> f64 {
 }
 
 /// What a root's pack walk reads from the model: per entity array the
-/// values of its fixed parameters, per rotation field the reference
-/// rotations (row-major, f64), per constraint its instances and their
-/// data leaves.
+/// values of its fixed parameters, per rotation field the references
+/// ([`RotationKind::reference_len`] values each, f64) and which slots the
+/// walk wrote them for, per constraint its instances and their data leaves.
 #[derive(Clone, Debug)]
 pub struct DevicePack<T> {
     pub fixed: Vec<Vec<T>>,
     pub refr: Vec<Vec<f64>>,
+    /// The slots of a rotation field an instance packed reads, whose
+    /// references are the model's; the others keep the identity, and the
+    /// device leaves the model's alone.
+    pub packed: Vec<Vec<bool>>,
     pub inst: Vec<Vec<u32>>,
     pub data: Vec<Vec<T>>,
 }
 
 impl<T: Copy + Default> DevicePack<T> {
     /// Empty, for `shape` with `slots[e]` entities in entity array `e`:
-    /// fixed values zero and reference rotations the identity until the
-    /// walk writes them.
+    /// fixed values zero and references the identity until the walk
+    /// writes them.
     pub fn new(shape: &DeviceShape, slots: &[usize]) -> Self {
-        const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
         DevicePack {
             fixed: shape.entities.iter().zip(slots).map(|(&n, &s)| vec![T::default(); n * s]).collect(),
-            refr: shape.rotations.iter().map(|&(e, _)| IDENTITY.repeat(slots[e])).collect(),
+            refr: shape.rotations.iter().map(|r| r.kind.identity().repeat(slots[r.entity])).collect(),
+            packed: shape.rotations.iter().map(|r| vec![false; slots[r.entity]]).collect(),
             inst: shape.constraints.iter().map(|_| Vec::new()).collect(),
             data: shape.constraints.iter().map(|_| Vec::new()).collect(),
         }
@@ -110,10 +161,10 @@ pub trait DeviceRoot<T> {
     /// `arael-gpu/kernels/assembly.cpp` with the layout table's slots
     /// (`ARAEL_COL_*`) defined in front.
     fn device_cpp(&self) -> &'static str;
-    /// Set the reference rotations of the model's optimized rotations from
-    /// `refs`, keyed by a rotation's first parameter index (row-major), and
-    /// zero their steps: a device solve's re-centring handed back.
-    fn device_restore(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>);
+    /// Set the references of the model's optimized rotations from `refs`,
+    /// keyed by a rotation's first parameter index, and zero their steps: a
+    /// device solve's re-centring handed back.
+    fn device_restore(&mut self, refs: &mut dyn FnMut(u32) -> Option<crate::model::Reference>);
 }
 
 /// What [`device_check`] found: the CPU's and the device's cost, and the
@@ -150,7 +201,7 @@ fn parts(n: usize) -> usize {
 /// entities' derivatives.
 fn record_width(shape: &DeviceShape, c: usize) -> usize {
     let k = shape.constraints[c];
-    k.rows * (1 + shape.entities[k.a] + shape.entities[k.b])
+    k.rows * (1 + k.params(shape))
 }
 
 /// The columns of a root, in the layout table's order, and how many of
@@ -170,17 +221,18 @@ fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: 
         v.push(col(format!("E{e}_TILE"), 4, 3 * s));
         v.push(col(format!("E{e}_FIXED"), ts, n * s));
     }
-    for (r, &(e, _)) in shape.rotations.iter().enumerate() {
-        let s = slots[e];
+    for (r, rot) in shape.rotations.iter().enumerate() {
+        let s = slots[rot.entity];
         v.push(col(format!("R{r}_AT"), 4, s));
-        v.push(col(format!("R{r}_REFR"), 8, 9 * s));
+        v.push(col(format!("R{r}_REFR"), 8, rot.kind.reference_len() * s));
     }
     for (x, &s) in cross_slots.iter().enumerate() {
         v.push(col(format!("X{x}_TILE"), 4, 3 * s));
     }
     for (c, k) in shape.constraints.iter().enumerate() {
         let n = counts[c];
-        for w in ["SA", "SB", "SX"] {
+        let words: &[&str] = if k.pair.is_some() { &["SA", "SB", "SX"] } else { &["SA"] };
+        for w in words {
             v.push(col(format!("C{c}_{w}"), 4, n));
         }
         for j in 0..k.data {
@@ -188,17 +240,19 @@ fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: 
         }
         v.push(col(format!("C{c}_AOFF"), 4, slots[k.a] + 1));
         v.push(col(format!("C{c}_AINST"), 4, n));
-        v.push(col(format!("C{c}_BOFF"), 4, slots[k.b] + 1));
-        v.push(col(format!("C{c}_BINST"), 4, n));
-        v.push(col(format!("C{c}_XOFF"), 4, cross_slots[k.cross] + 1));
-        v.push(col(format!("C{c}_XINST"), 4, n));
+        if let Some((b, x)) = k.pair {
+            v.push(col(format!("C{c}_BOFF"), 4, slots[b] + 1));
+            v.push(col(format!("C{c}_BINST"), 4, n));
+            v.push(col(format!("C{c}_XOFF"), 4, cross_slots[x] + 1));
+            v.push(col(format!("C{c}_XINST"), 4, n));
+        }
     }
     let host = v.len();
     for (e, &n) in shape.entities.iter().enumerate() {
         v.push(col(format!("E{e}_EV"), ts, n * slots[e]));
     }
-    for (r, &(e, _)) in shape.rotations.iter().enumerate() {
-        let s = slots[e];
+    for (r, rot) in shape.rotations.iter().enumerate() {
+        let s = slots[rot.entity];
         v.push(col(format!("R{r}_ROT"), ts, 9 * s));
         v.push(col(format!("R{r}_ROTW"), 8, 9 * s));
         v.push(col(format!("R{r}_DROT"), ts, 27 * s));
@@ -247,27 +301,43 @@ impl Layout {
 }
 
 /// A constraint's kernels: the instance kernel (records and cost parts),
-/// the sums of its records per entity side and per cross tile, the sum of
-/// its cost parts, and the cost alone.
+/// the sums of its records per entity side and (of two entities) per cross
+/// tile, the sum of its cost parts, and the cost alone.
 struct ConstraintKernels<K> {
     gh: K,
     ra: K,
-    rb: K,
-    rx: K,
+    /// The second side's and the cross tiles' sums.
+    pair: Option<(K, K)>,
     csum: K,
     cost: K,
+}
+
+/// The kernels of one [`RotationKind`]: the composed rotations, with
+/// their derivatives, and the references moved by their steps.
+struct RotationKernels<K> {
+    values: K,
+    rotations: K,
+    advance: K,
 }
 
 /// The kernels of a root, compiled once per device, wide scalar and layout
 /// of slots.
 struct Kernels<K> {
     gather: K,
-    euler_values: K,
-    euler_rotations: K,
-    euler_advance: K,
+    euler: RotationKernels<K>,
+    quaternion: RotationKernels<K>,
     zero: K,
     zero_steps: K,
     constraints: Vec<ConstraintKernels<K>>,
+}
+
+impl<K> Kernels<K> {
+    fn rotation(&self, kind: RotationKind) -> &RotationKernels<K> {
+        match kind {
+            RotationKind::Euler => &self.euler,
+            RotationKind::Quaternion => &self.quaternion,
+        }
+    }
 }
 
 /// A buffer the assembly writes or reads that is not its own: a block and a
@@ -293,6 +363,8 @@ pub struct DeviceAssembly<T, D: Device> {
     /// Per rotation field, per slot: the global index of the rotation's
     /// first parameter, [`FIXED`] when fixed.
     rot_index: Vec<Vec<u32>>,
+    /// The last pack's [`DevicePack::packed`].
+    packed: Vec<Vec<bool>>,
     /// Per cross array, per slot: the first slot on the same tile of H
     /// (two instances of one pair of entities, each with a cross block of
     /// its own, share a tile).
@@ -373,10 +445,16 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         let tables = root.device_tables(resolve);
         let slots: Vec<usize> = shape.entities.iter().zip(&tables.idx).map(|(&n, ix)| ix.len() / n.max(1)).collect();
         let cross_slots: Vec<usize> = tables.cross.iter().map(|c| c.len() / 3).collect();
-        let at: Vec<Vec<u32>> =
-            shape.rotations.iter().map(|&(e, off)| (0..slots[e]).map(|s| (s * shape.entities[e] + off) as u32).collect()).collect();
-        let rot_index =
-            shape.rotations.iter().map(|&(e, off)| (0..slots[e]).map(|s| tables.idx[e][s * shape.entities[e] + off]).collect()).collect();
+        let at: Vec<Vec<u32>> = shape
+            .rotations
+            .iter()
+            .map(|r| (0..slots[r.entity]).map(|s| (s * shape.entities[r.entity] + r.step) as u32).collect())
+            .collect();
+        let rot_index = shape
+            .rotations
+            .iter()
+            .map(|r| (0..slots[r.entity]).map(|s| tables.idx[r.entity][s * shape.entities[r.entity] + r.step]).collect())
+            .collect();
         let tile_owner = tables.cross.iter().map(|t| tile_owners(t)).collect();
         let mut pack = DevicePack::<T>::new(&shape, &slots);
         root.device_pack(&mut pack);
@@ -385,25 +463,34 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         let scalar = if ts == 8 { "double" } else { "float" };
         let defines = format!("{}#define SCALAR {scalar}\n{}", wide.defines(), layout.defines());
         let source = format!("{WIDE}\n{}\n{}", arael_gpu::ASSEMBLY, root.device_cpp());
-        let k = |entry: &str| dev.compile(&source, &defines, entry);
-        let constraint = |c: usize| -> Result<ConstraintKernels<D::Kernel>, GpuError> {
-            Ok(ConstraintKernels {
-                gh: k(&format!("__dk{c}_gh"))?,
-                ra: k(&format!("__dk{c}_ra"))?,
-                rb: k(&format!("__dk{c}_rb"))?,
-                rx: k(&format!("__dk{c}_rx"))?,
-                csum: k(&format!("__dk{c}_csum"))?,
-                cost: k(&format!("__dk{c}_cost"))?,
-            })
-        };
+        // every entry point in one lookup of the source, in the order the
+        // kernels take them below
+        let mut entries: Vec<String> = [
+            "k_gather_params", "k_euler_values", "k_euler_rotations", "k_euler_advance",
+            "k_quat_values", "k_quat_rotations", "k_quat_advance", "k_zero_wide", "k_zero_steps",
+        ]
+        .map(String::from)
+        .to_vec();
+        for (c, k) in shape.constraints.iter().enumerate() {
+            entries.extend(["gh", "ra", "csum", "cost"].map(|e| format!("__dk{c}_{e}")));
+            if k.pair.is_some() {
+                entries.extend(["rb", "rx"].map(|e| format!("__dk{c}_{e}")));
+            }
+        }
+        let entries: Vec<&str> = entries.iter().map(String::as_str).collect();
+        let mut compiled = dev.compile_many(&source, &defines, &entries)?.into_iter();
+        let mut k = || compiled.next().expect("a kernel per entry point");
         let kernels = Kernels {
-            gather: k("k_gather_params")?,
-            euler_values: k("k_euler_values")?,
-            euler_rotations: k("k_euler_rotations")?,
-            euler_advance: k("k_euler_advance")?,
-            zero: k("k_zero_wide")?,
-            zero_steps: k("k_zero_steps")?,
-            constraints: (0..shape.constraints.len()).map(constraint).collect::<Result<_, _>>()?,
+            gather: k(),
+            euler: RotationKernels { values: k(), rotations: k(), advance: k() },
+            quaternion: RotationKernels { values: k(), rotations: k(), advance: k() },
+            zero: k(),
+            zero_steps: k(),
+            constraints: shape
+                .constraints
+                .iter()
+                .map(|c| ConstraintKernels { gh: k(), ra: k(), csum: k(), cost: k(), pair: c.pair.map(|_| (k(), k())) })
+                .collect(),
         };
         let block = dev.alloc(layout.bytes)?;
         let offset = layout.index();
@@ -419,6 +506,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             cross: tables.cross,
             at,
             rot_index,
+            packed: Vec::new(),
             tile_owner,
             layout,
             offset,
@@ -463,6 +551,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     /// columns the kernels write after it are not.
     fn write(&mut self, pack: &DevicePack<T>) -> Result<(), GpuError> {
         use arael_gpu::bytemuck::{cast_slice, cast_slice_mut};
+        self.packed.clone_from(&pack.packed);
         // in words, so every column (on a 256-byte boundary) is a typed slice
         let mut words = vec![0u64; self.layout.host_bytes / 8];
         for (k, &o) in self.layout.offsets.iter().enumerate() {
@@ -493,12 +582,13 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         let ts = core::mem::size_of::<T>();
         for (c, k) in self.shape.constraints.iter().enumerate() {
             let n = self.counts[c];
-            assert_eq!(k.words, 3, "an instance is two entity slots and a cross slot");
+            let words: &[&str] = if k.pair.is_some() { &["SA", "SB", "SX"] } else { &["SA"] };
+            assert_eq!(k.words, words.len(), "an instance is two entity slots and a cross slot, or one entity slot");
             let inst = &pack.inst[c];
-            for (w, name) in ["SA", "SB", "SX"].iter().enumerate() {
+            for (w, name) in words.iter().enumerate() {
                 let r = col(&format!("C{c}_{name}"), 4 * n);
                 let dst: &mut [u32] = cast_slice_mut(&mut image[r]);
-                for (d, rec) in dst.iter_mut().zip(inst.chunks_exact(3)) {
+                for (d, rec) in dst.iter_mut().zip(inst.chunks_exact(k.words)) {
                     *d = rec[w];
                 }
             }
@@ -511,17 +601,23 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
                     transpose::<u32>(&mut image[r], data, j, k.data);
                 }
             }
-            for (side, w, slots) in [("A", 0, self.slots[k.a]), ("B", 1, self.slots[k.b])] {
-                let (ptr, list) = by_slot(inst.chunks_exact(3).map(|rec| rec[w]), slots);
+            let mut sides = vec![("A", 0, self.slots[k.a])];
+            if let Some((b, _)) = k.pair {
+                sides.push(("B", 1, self.slots[b]));
+            }
+            for (side, w, slots) in sides {
+                let (ptr, list) = by_slot(inst.chunks_exact(k.words).map(|rec| rec[w]), slots);
                 put(image, &format!("C{c}_{side}OFF"), cast_slice(&ptr));
                 put(image, &format!("C{c}_{side}INST"), cast_slice(&list));
             }
-            // every instance in the list of its tile's first slot, so a tile
-            // has one summing thread per entry, the other slots none
-            let owner = &self.tile_owner[k.cross];
-            let (ptr, list) = by_slot(inst.chunks_exact(3).map(|rec| owner[rec[2] as usize]), self.cross_slots[k.cross]);
-            put(image, &format!("C{c}_XOFF"), cast_slice(&ptr));
-            put(image, &format!("C{c}_XINST"), cast_slice(&list));
+            if let Some((_, x)) = k.pair {
+                // every instance in the list of its tile's first slot, so a
+                // tile has one summing thread per entry, the other slots none
+                let owner = &self.tile_owner[x];
+                let (ptr, list) = by_slot(inst.as_chunks::<3>().0.iter().map(|rec| owner[rec[2] as usize]), self.cross_slots[x]);
+                put(image, &format!("C{c}_XOFF"), cast_slice(&ptr));
+                put(image, &format!("C{c}_XINST"), cast_slice(&list));
+            }
         }
         self.dev.write(&mut self.block, 0, cast_slice(&words))
     }
@@ -561,15 +657,15 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             let args = [Arg::Block(x.0, x.1), self.col(&format!("E{e}_IDX")), self.col(&format!("E{e}_FIXED")), self.col(&format!("E{e}_EV")), Arg::U32(len as u32)];
             self.run(&self.kernels.gather, len, &args)?;
         }
-        for (r, &(e, _)) in self.shape.rotations.iter().enumerate() {
-            let s = self.slots[e];
+        for (r, ro) in self.shape.rotations.iter().enumerate() {
+            let (e, s, k) = (ro.entity, self.slots[ro.entity], self.kernels.rotation(ro.kind));
             let (refr, ev, at, rotw, rot) =
                 (self.col(&format!("R{r}_REFR")), self.col(&format!("E{e}_EV")), self.col(&format!("R{r}_AT")), self.col(&format!("R{r}_ROTW")), self.col(&format!("R{r}_ROT")));
             if derivatives {
                 let args = [refr, ev, at, rotw, rot, self.col(&format!("R{r}_DROT")), Arg::U32(s as u32)];
-                self.run(&self.kernels.euler_rotations, s, &args)?;
+                self.run(&k.rotations, s, &args)?;
             } else {
-                self.run(&self.kernels.euler_values, s, &[refr, ev, at, rotw, rot, Arg::U32(s as u32)])?;
+                self.run(&k.values, s, &[refr, ev, at, rotw, rot, Arg::U32(s as u32)])?;
             }
         }
         Ok(())
@@ -597,13 +693,15 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
                 continue;
             }
             let (k, shape) = (&self.kernels.constraints[c], self.shape.constraints[c]);
-            let (na, nb) = (self.shape.entities[shape.a], self.shape.entities[shape.b]);
-            let (sa, sb, sx) = (self.slots[shape.a], self.slots[shape.b], self.cross_slots[shape.cross]);
+            let (na, sa) = (self.shape.entities[shape.a], self.slots[shape.a]);
             self.run(&k.gh, n, &[b, Arg::U32(n as u32)])?;
             self.dev.launch(&k.csum, Launch::linear(THREADS, THREADS), &[b, cost, Arg::U32(parts(n) as u32)])?;
             self.run(&k.ra, sa * (na * (na + 1) / 2 + na), &[b, h, g, Arg::U32(sa as u32)])?;
-            self.run(&k.rb, sb * (nb * (nb + 1) / 2 + nb), &[b, h, g, Arg::U32(sb as u32)])?;
-            self.run(&k.rx, sx * na * nb, &[b, h, Arg::U32(sx as u32)])?;
+            if let (Some((rb, rx)), Some((eb, x))) = (&k.pair, shape.pair) {
+                let (nb, sb, sx) = (self.shape.entities[eb], self.slots[eb], self.cross_slots[x]);
+                self.run(rb, sb * (nb * (nb + 1) / 2 + nb), &[b, h, g, Arg::U32(sb as u32)])?;
+                self.run(rx, sx * na * nb, &[b, h, Arg::U32(sx as u32)])?;
+            }
         }
         Ok(())
     }
@@ -628,8 +726,8 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     /// The rotation steps of the parameters `x` zeroed, as re-centring
     /// after [`advance`](Self::advance) leaves them.
     pub fn zero_steps(&self, x: Target<'_, D::Block>) -> Result<(), GpuError> {
-        for (r, &(e, _)) in self.shape.rotations.iter().enumerate() {
-            let s = self.slots[e];
+        for (r, ro) in self.shape.rotations.iter().enumerate() {
+            let (e, s) = (ro.entity, self.slots[ro.entity]);
             let args = [Arg::Block(x.0, x.1), self.col(&format!("E{e}_IDX")), self.col(&format!("R{r}_AT")), Arg::U32(s as u32)];
             self.run(&self.kernels.zero_steps, s, &args)?;
         }
@@ -639,30 +737,31 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     /// The reference rotations moved by the steps of the last gathered `x`
     /// (an accepted step's), as the model's `advance_params` moves its own.
     pub fn advance(&self) -> Result<(), GpuError> {
-        for (r, &(e, _)) in self.shape.rotations.iter().enumerate() {
-            let s = self.slots[e];
+        for (r, ro) in self.shape.rotations.iter().enumerate() {
+            let (e, s) = (ro.entity, self.slots[ro.entity]);
             let args = [self.col(&format!("R{r}_REFR")), self.col(&format!("E{e}_EV")), self.col(&format!("R{r}_AT")), Arg::U32(s as u32)];
-            self.run(&self.kernels.euler_advance, s, &args)?;
+            self.run(&self.kernels.rotation(ro.kind).advance, s, &args)?;
         }
         Ok(())
     }
 
-    /// Write the device's reference rotations into the model's optimized
-    /// rotations ([`DeviceRoot::device_restore`]), one read per rotation
-    /// field.
+    /// Write the device's references into the model's optimized rotations
+    /// ([`DeviceRoot::device_restore`]), one read per rotation field.
     pub fn restore(&self, root: &mut dyn DeviceRoot<T>) -> Result<(), GpuError> {
+        use crate::model::Reference;
         let mut refr: Vec<Vec<f64>> = Vec::new();
-        for (r, &(e, _)) in self.shape.rotations.iter().enumerate() {
-            let mut bytes = vec![0u8; 8 * 9 * self.slots[e]];
+        for (r, ro) in self.shape.rotations.iter().enumerate() {
+            let n = ro.kind.reference_len() * self.slots[ro.entity];
+            let mut bytes = vec![0u8; 8 * n];
             self.dev.read(&self.block, self.offset[&format!("R{r}_REFR")], &mut bytes)?;
-            let mut v = vec![0f64; 9 * self.slots[e]];
+            let mut v = vec![0f64; n];
             self.wide.decode(&bytes, &mut v);
             refr.push(v);
         }
         let mut at = HashMap::new();
         for (r, ix) in self.rot_index.iter().enumerate() {
             for (s, &g) in ix.iter().enumerate() {
-                if g != FIXED {
+                if g != FIXED && self.packed[r][s] {
                     at.insert(g, (r, s));
                 }
             }
@@ -671,7 +770,11 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         root.device_restore(&mut |g| {
             let &(r, s) = at.get(&g)?;
             found.insert(g);
-            Some(refr[r][9 * s..9 * s + 9].try_into().unwrap())
+            let v = &refr[r];
+            Some(match self.shape.rotations[r].kind {
+                RotationKind::Euler => Reference::Matrix(v[9 * s..9 * s + 9].try_into().unwrap()),
+                RotationKind::Quaternion => Reference::Quaternion(v[4 * s..4 * s + 4].try_into().unwrap()),
+            })
         });
         assert_eq!(found.len(), at.len(), "the model's walk reaches every rotation the device re-centred");
         Ok(())
@@ -684,8 +787,11 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
 }
 
 /// Assemble `problem` at `x` on the CPU and on `dev` in `wide` against one
-/// tiled pattern (the reduced route's), and compare (for tests).
-pub fn device_check<T, D>(problem: &mut dyn crate::simple_lm::LmProblemInternals<T>, x: &[T], dev: &Arc<D>, wide: Wide) -> DeviceCheck
+/// tiled pattern (the reduced route's), and compare (for tests). The device
+/// is laid out from the model at `x0`, as a solve lays it out at its start
+/// and assembles at the points it moves to: what it computes at `x` must
+/// not lean on the model's caches at `x0`.
+pub fn device_check<T, D>(problem: &mut dyn crate::simple_lm::LmProblemInternals<T>, x0: &[T], x: &[T], dev: &Arc<D>, wide: Wide) -> DeviceCheck
 where
     T: crate::utils::Float + 'static,
     D: Device,
@@ -706,6 +812,8 @@ where
     let nv = hsym.val_count();
     let (mut grad, mut vals) = (vec![T::zero(); n], vec![T::zero(); nv]);
     let cpu_cost = problem.calc_grad_hessian_sparse_indexed(x, &mut grad, &mut vals, &positions, &mut ctx).to_f64().unwrap();
+    // the device laid out from the model at x0
+    problem.update_params(x0);
     let root = problem.device_root().expect("the root has a device assembly");
     let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
     let asm = DeviceAssembly::<T, D>::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize), wide)

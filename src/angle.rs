@@ -127,7 +127,7 @@ where
         Model::advance_params(&mut self.angle, params);
     }
 
-    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<crate::model::Reference>) {
         Model::set_references(&mut self.angle, refs);
     }
 

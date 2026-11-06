@@ -5,7 +5,8 @@
 #![cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
 
 use arael::df32;
-use arael::model::{CrossBlock, MixedEulerAngleParam, Param, QuaternionParam, SelfBlock};
+use arael::angle::AngleParam;
+use arael::model::{CrossBlock, MixedEulerAngleParam, Param, QuaternionParam, SelfBlock, VarSelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{GpuDevice, LmProblem, LmProblemInternals, RootProblem};
 use arael::utils::Float;
@@ -112,9 +113,9 @@ pub struct SceneW {
     pub observations: std::vec::Vec<ObsW>,
 }
 
-/// A point prior: a self-block constraint, which has no device form yet.
+/// A point prior with a loss, which has no device form yet.
 #[arael::model]
-#[arael(constraint(hb, { [priorpoint.pos.x - 1.0, priorpoint.pos.y, priorpoint.pos.z] }))]
+#[arael(constraint(hb, loss = |s| loss_huber(s, 1.0), { [priorpoint.pos.x - 1.0, priorpoint.pos.y, priorpoint.pos.z] }))]
 #[derive(Clone)]
 pub struct PriorPoint {
     pub pos: Param<vect3<f64>>,
@@ -326,24 +327,29 @@ fn a_root_with_a_constraint_without_a_device_form_says_which() {
     let mut points = refs::Vec::new();
     points.push(PriorPoint { pos: Param::new(vect3::new(0.0, 0.0, 0.0)), hb: SelfBlock::new() });
     let s = Priors { points };
-    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a self-block constraint has no device form yet");
-    assert!(why.contains("PriorPoint"), "{why}");
+    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a loss has no device form yet");
+    assert!(why.contains("PriorPoint") && why.contains("loss"), "{why}");
 }
 
-/// A camera turned by a quaternion: its rotation has no device form (the
-/// device composes Euler-angle steps).
+/// A camera turned by a `QuaternionParam`: the device composes its
+/// reference quaternion with its rotation-vector step.
 #[arael::model]
 #[derive(Clone)]
 pub struct QCamera {
     pub t: Param<vect3<f64>>,
     pub q: QuaternionParam<f64>,
+    pub intr: Param<vect3<f64>>,
     pub hb: SelfBlock<QCamera>,
 }
 
 #[arael::model]
 #[arael(constraint(hb, {
     let pc = cam.q.rotation_matrix() * pt.pos + cam.t;
-    [-pc.x / pc.z - qobs.xy.x, -pc.y / pc.z - qobs.xy.y]
+    let px = -pc.x / pc.z;
+    let py = -pc.y / pc.z;
+    let r2 = px * px + py * py;
+    let d = 1.0 + r2 * (cam.intr.y + cam.intr.z * r2);
+    [cam.intr.x * d * px - qobs.xy.x, cam.intr.x * d * py - qobs.xy.y]
 }))]
 #[derive(Clone)]
 pub struct QObs {
@@ -364,11 +370,65 @@ pub struct QScene {
     pub observations: std::vec::Vec<QObs>,
 }
 
+/// [`consistent_scene`] with the cameras turned by quaternions.
+fn quaternion_scene() -> QScene {
+    let (cams, points, obs) = consistent_scene::<f64>();
+    let mut cameras = refs::Vec::new();
+    for c in cams.iter() {
+        cameras.push(QCamera { t: c.t.clone(), q: QuaternionParam::from_euler_angles(c.ea.value), intr: c.intr.clone(), hb: SelfBlock::new() });
+    }
+    let observations = obs
+        .iter()
+        .map(|o| QObs { cam: cameras.ref_at(o.cam.index() as usize), pt: points.ref_at(o.pt.index() as usize), xy: o.xy, hb: CrossBlock::new() })
+        .collect();
+    QScene { cameras, points, observations }
+}
+
+/// The parameter values of a [`QScene`], the rotations as quaternions.
+fn quaternion_state(s: &QScene) -> Vec<f64> {
+    let mut v = Vec::new();
+    for c in s.cameras.iter() {
+        let q = c.q.value;
+        v.extend([c.t.value.x, c.t.value.y, c.t.value.z, q.t, q.v.x, q.v.y, q.v.z, c.intr.value.x, c.intr.value.y, c.intr.value.z]);
+    }
+    for p in s.points.iter() {
+        v.extend([p.pos.value.x, p.pos.value.y, p.pos.value.z]);
+    }
+    v
+}
+
+/// Cameras turned by quaternions assemble on the device as on the CPU, and
+/// the solve re-centres them there and leaves the model where the CPU's
+/// does.
 #[test]
-fn a_quaternion_rotation_has_no_device_form() {
-    let s = QScene { cameras: refs::Vec::new(), points: refs::Vec::new(), observations: std::vec::Vec::new() };
-    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a quaternion rotation has no device form");
-    assert!(why.contains("cam.q") && why.contains("EulerAngleParam"), "{why}");
+fn a_quaternion_scene_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
+    use arael::simple_lm::{LmConfig, SparseFaer};
+    let mut s = quaternion_scene();
+    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x1 = perturbed(&x);
+    for (wide, tol) in [(Wide::F64, 1e-11), (Wide::Df32, 1e-10)] {
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+    }
+    let cfg = LmConfig::<f64> { max_iters: 50, ..Default::default() };
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut s = quaternion_scene();
+        let mut solver = SparseFaer::<f64>::from_options(&options(gpu, true));
+        let r = s.solve_with(&mut solver, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        (r.end_cost, r.iterations, quaternion_state(&s))
+    };
+    let (cpu, iters, cpu_state) = run(None);
+    assert!(iters > 2, "accepted steps re-centre the rotations: {iters} iterations");
+    for d in devices() {
+        let (device, _, state) = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+        assert_close(&state, &cpu_state, 1e-7, &format!("{}: the solved model", label(&d)));
+    }
 }
 
 /// `parts` as a [`SceneW`]: the rotations' state moved into df32.
@@ -800,8 +860,8 @@ fn the_f64_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
         assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
         let mut x = Vec::new();
         s.serialize(&mut x);
-        let x = perturbed(&x);
-        let chk = arael::__gpu::device_check(&mut s, &x, &device(), wide);
+        let x1 = perturbed(&x);
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
         assert!(chk.values > 0);
         assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
         assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
@@ -817,8 +877,8 @@ fn the_f32_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
         assert_eq!(LmProblemInternals::<f32>::device_unsupported(&s), None);
         let mut x = Vec::new();
         s.serialize(&mut x);
-        let x = perturbed(&x);
-        let chk = arael::__gpu::device_check(&mut s, &x, &device(), wide);
+        let x1 = perturbed(&x);
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
         // the CPU sums its f32 products in f32, the device in its wide scalar
         assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-5 * chk.cpu_cost, "{wide:?}: {chk:?}");
         assert!(chk.grad_err < 1e-4 && chk.hess_err < 1e-4, "{wide:?}: {chk:?}");
@@ -840,4 +900,603 @@ fn a_gpu_solver_moves_between_threads() {
         let cost = std::thread::spawn(move || s.solve_with(&mut solver, &LmConfig::<f64>::default()).unwrap().end_cost).join().unwrap();
         assert!(cost.is_finite(), "{}", label(&d));
     }
+}
+
+/// A 2D pose graph (benchmarks/pgo's): poses of a position and a heading,
+/// relative-pose edges, and a prior on one pose, a root-level constraint of
+/// one entity written into its own block.
+#[arael::model]
+#[derive(Clone)]
+pub struct Pose2D<T: Float> {
+    pub pos: Param<vect2<T>>,
+    pub th: Param<T>,
+    pub hb: SelfBlock<Pose2D<T>, T>,
+}
+
+#[arael::model]
+#[arael(constraint(p.hb, {
+    [p.pos.x - prior2d.pos.x, p.pos.y - prior2d.pos.y, p.th - prior2d.th]
+}))]
+#[derive(Clone)]
+pub struct Prior2D<T: Float> {
+    #[arael(ref = root.poses)]
+    pub p: Ref<Pose2D<T>>,
+    pub pos: vect2<T>,
+    pub th: T,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let c = cos(a.th);
+    let s = sin(a.th);
+    let dx = b.pos.x - a.pos.x;
+    let dy = b.pos.y - a.pos.y;
+    [(c * dx + s * dy - edge2d.dx) * edge2d.w,
+     (c * dy - s * dx - edge2d.dy) * edge2d.w,
+     rad_diff(b.th - a.th, edge2d.dth) * edge2d.w]
+}))]
+#[derive(Clone)]
+pub struct Edge2D<T: Float> {
+    #[arael(ref = root.poses)]
+    pub a: Ref<Pose2D<T>>,
+    #[arael(ref = root.poses)]
+    pub b: Ref<Pose2D<T>>,
+    pub dx: T,
+    pub dy: T,
+    pub dth: T,
+    pub w: T,
+    pub hb: CrossBlock<Pose2D<T>, Pose2D<T>, T>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct Graph2D {
+    pub poses: refs::Vec<Pose2D<f64>>,
+    pub edges: std::vec::Vec<Edge2D<f64>>,
+    pub prior: Option<Prior2D<f64>>,
+}
+
+#[arael::model]
+#[arael(root, f32)]
+#[derive(Clone)]
+pub struct Graph2DF {
+    pub poses: refs::Vec<Pose2D<f32>>,
+    pub edges: std::vec::Vec<Edge2D<f32>>,
+    pub prior: Option<Prior2D<f32>>,
+}
+
+type Graph2DParts<T> = (refs::Vec<Pose2D<T>>, std::vec::Vec<Edge2D<T>>, Option<Prior2D<T>>);
+
+/// A loop of `n` poses on a circle, odometry between neighbours and a loop
+/// closure every fifth pose, the measurements the truth plus noise, the
+/// poses moved off it; the prior holds the first pose where it starts.
+fn pose_graph<T: Float>(n: usize, seed: u64) -> Graph2DParts<T> {
+    let mut rng = Lcg(seed);
+    let c = |v: f64| T::from(v).unwrap();
+    let truth: Vec<(f64, f64, f64)> = (0..n)
+        .map(|k| {
+            let a = 2.0 * std::f64::consts::PI * k as f64 / n as f64;
+            (5.0 * a.cos(), 5.0 * a.sin(), a + std::f64::consts::FRAC_PI_2)
+        })
+        .collect();
+    let mut poses = refs::Vec::new();
+    for (k, &(x, y, th)) in truth.iter().enumerate() {
+        let off = if k == 0 { 0.0 } else { 1.0 };
+        poses.push(Pose2D {
+            pos: Param::new(vect2::new(c(x + off * 0.1 * rng.uniform()), c(y + off * 0.1 * rng.uniform()))),
+            th: Param::new(c(th + off * 0.05 * rng.uniform())),
+            hb: SelfBlock::new(),
+        });
+    }
+    let mut edges = std::vec::Vec::new();
+    let mut edge = |i: usize, j: usize, rng: &mut Lcg| {
+        let ((xa, ya, ta), (xb, yb, tb)) = (truth[i], truth[j]);
+        let (dx, dy) = (xb - xa, yb - ya);
+        edges.push(Edge2D {
+            a: poses.ref_at(i),
+            b: poses.ref_at(j),
+            dx: c(ta.cos() * dx + ta.sin() * dy + 0.01 * rng.uniform()),
+            dy: c(ta.cos() * dy - ta.sin() * dx + 0.01 * rng.uniform()),
+            dth: c(tb - ta + 0.005 * rng.uniform()),
+            w: c(10.0),
+            hb: CrossBlock::new(),
+        });
+    };
+    for k in 0..n {
+        edge(k, (k + 1) % n, &mut rng);
+        if k % 5 == 0 {
+            edge(k, (k + n / 2) % n, &mut rng);
+        }
+    }
+    let (x0, y0, t0) = truth[0];
+    let prior = Some(Prior2D { p: poses.ref_at(0), pos: vect2::new(c(x0), c(y0)), th: c(t0) });
+    (poses, edges, prior)
+}
+
+/// The whole-system supernodal route, on `gpu` when it is given.
+fn whole_options(gpu: Option<&GpuDevice>) -> arael::simple_lm::SparseFaerOptions {
+    arael::simple_lm::SparseFaerOptions::default()
+        .with_policy(arael::simple_lm::SchurPolicy::Never)
+        .with_block_supernodal(arael::simple_lm::BlockSupernodalMode::Always)
+        .with_gpu(gpu.cloned())
+}
+
+/// A pose graph with a prior, a root-level constraint of one entity, has a
+/// device assembly, and it matches the CPU's, in f64 and f32 and both wide
+/// scalars. Some pairs of poses are joined both ways, two edges of opposite
+/// orientation on one cross tile of H.
+#[test]
+fn a_pose_graph_with_a_prior_assembles_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
+    let (_, edges, _) = pose_graph::<f64>(40, 3);
+    let pairs: std::collections::HashSet<(u32, u32)> = edges.iter().map(|e| (e.a.index(), e.b.index())).collect();
+    assert!(pairs.iter().any(|&(a, b)| pairs.contains(&(b, a))), "the graph joins some pair both ways");
+    for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+        let (poses, edges, prior) = pose_graph::<f64>(40, 3);
+        let mut s = Graph2D { poses, edges, prior };
+        assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let x1 = perturbed(&x);
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!(chk.values > 0);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+        let (poses, edges, prior) = pose_graph::<f32>(40, 3);
+        let mut s = Graph2DF { poses, edges, prior };
+        assert_eq!(LmProblemInternals::<f32>::device_unsupported(&s), None);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let x1 = perturbed(&x);
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-5 * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < 1e-4 && chk.hess_err < 1e-4, "{wide:?}: {chk:?}");
+    }
+}
+
+/// The pose graph's whole-system solve through the device assembly reaches
+/// the CPU route's optimum.
+#[test]
+fn a_pose_graph_solves_through_the_device_assembly_as_on_the_cpu() {
+    let run = |gpu: Option<&GpuDevice>| {
+        let (poses, edges, prior) = pose_graph::<f64>(40, 3);
+        let mut s = Graph2D { poses, edges, prior };
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        let plan = solver.plan().expect("a plan");
+        assert!(!plan.reduced && plan.gpu_factor == gpu.is_some());
+        assert_eq!(plan.gpu_assembly, gpu.is_some());
+        (r.start_cost, r.end_cost)
+    };
+    let (start, cpu) = run(None);
+    assert!(cpu < 0.05 * start, "the graph converges to its noise: {start} to {cpu}");
+    for d in devices() {
+        let (_, device) = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+    }
+}
+
+/// The pose graph of benchmarks/pgo, the heading an `AngleParam`: the
+/// constraints read its rotation matrix, whose sin and cos the CPU caches
+/// per iteration and the device computes from the angle.
+#[arael::model]
+#[derive(Clone)]
+pub struct PoseA<T: Float> {
+    pub pos: Param<vect2<T>>,
+    pub rot: AngleParam<T>,
+    pub hb: SelfBlock<PoseA<T>, T>,
+}
+
+#[arael::model]
+#[arael(constraint(p.hb, {
+    [p.pos.x - priora.pos.x, p.pos.y - priora.pos.y, p.rot.angle - priora.th]
+}))]
+#[derive(Clone)]
+pub struct PriorA<T: Float> {
+    #[arael(ref = root.poses)]
+    pub p: Ref<PoseA<T>>,
+    pub pos: vect2<T>,
+    pub th: T,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let local = b.rot.rotation_matrix.transpose()
+        * (a.pos + a.rot.rotation_matrix * edgea.delta - b.pos);
+    [local.x * edgea.wt,
+     local.y * edgea.wt,
+     rad_diff(a.rot.angle + edgea.dth, b.rot.angle) * edgea.wr]
+}))]
+#[derive(Clone)]
+pub struct EdgeA<T: Float> {
+    #[arael(ref = root.poses)]
+    pub a: Ref<PoseA<T>>,
+    #[arael(ref = root.poses)]
+    pub b: Ref<PoseA<T>>,
+    pub delta: vect2<T>,
+    pub dth: T,
+    pub wt: T,
+    pub wr: T,
+    pub hb: CrossBlock<PoseA<T>, PoseA<T>, T>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct GraphA {
+    pub poses: refs::Vec<PoseA<f64>>,
+    pub edges: std::vec::Vec<EdgeA<f64>>,
+    pub prior: Option<PriorA<f64>>,
+}
+
+/// [`pose_graph`] with `AngleParam` headings.
+fn angle_graph(n: usize, seed: u64) -> GraphA {
+    let (poses, edges, prior) = pose_graph::<f64>(n, seed);
+    let mut pa = refs::Vec::new();
+    for p in poses.iter() {
+        pa.push(PoseA { pos: p.pos.clone(), rot: AngleParam::new(p.th.value), hb: SelfBlock::new() });
+    }
+    let edges = edges
+        .iter()
+        .map(|e| {
+            // the edge's delta in a's frame and the heading change, as pgo's
+            EdgeA {
+                a: pa.ref_at(e.a.index() as usize),
+                b: pa.ref_at(e.b.index() as usize),
+                delta: vect2::new(e.dx, e.dy),
+                dth: e.dth,
+                wt: e.w,
+                wr: e.w,
+                hb: CrossBlock::new(),
+            }
+        })
+        .collect();
+    let prior = prior.map(|q| PriorA { p: pa.ref_at(q.p.index() as usize), pos: q.pos, th: q.th });
+    GraphA { poses: pa, edges, prior }
+}
+
+/// The `AngleParam` pose graph assembles on the device as on the CPU at a
+/// point away from the one its caches were computed for, and solves there
+/// to the CPU's optimum.
+#[test]
+fn an_angle_pose_graph_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
+    let mut s = angle_graph(40, 3);
+    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x1 = perturbed(&x);
+    for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+    }
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut s = angle_graph(40, 3);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        r.end_cost
+    };
+    let cpu = run(None);
+    for d in devices() {
+        let device = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+    }
+}
+
+/// The 2D pose graph with its poses' blocks stored at their live sizes
+/// (`VarSelfBlock`), one pose's position fixed and one pose fixed whole.
+#[arael::model]
+#[derive(Clone)]
+pub struct PoseV<T: Float> {
+    pub pos: Param<vect2<T>>,
+    pub th: Param<T>,
+    pub hb: VarSelfBlock<PoseV<T>, T>,
+}
+
+#[arael::model]
+#[arael(constraint(p.hb, {
+    [p.pos.x - priorv.pos.x, p.pos.y - priorv.pos.y, p.th - priorv.th]
+}))]
+#[derive(Clone)]
+pub struct PriorV<T: Float> {
+    #[arael(ref = root.poses)]
+    pub p: Ref<PoseV<T>>,
+    pub pos: vect2<T>,
+    pub th: T,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let c = cos(a.th);
+    let s = sin(a.th);
+    let dx = b.pos.x - a.pos.x;
+    let dy = b.pos.y - a.pos.y;
+    [(c * dx + s * dy - edgev.dx) * edgev.w,
+     (c * dy - s * dx - edgev.dy) * edgev.w,
+     rad_diff(b.th - a.th, edgev.dth) * edgev.w]
+}))]
+#[derive(Clone)]
+pub struct EdgeV<T: Float> {
+    #[arael(ref = root.poses)]
+    pub a: Ref<PoseV<T>>,
+    #[arael(ref = root.poses)]
+    pub b: Ref<PoseV<T>>,
+    pub dx: T,
+    pub dy: T,
+    pub dth: T,
+    pub w: T,
+    pub hb: CrossBlock<PoseV<T>, PoseV<T>, T>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct GraphV {
+    pub poses: refs::Vec<PoseV<f64>>,
+    pub edges: std::vec::Vec<EdgeV<f64>>,
+    pub prior: Option<PriorV<f64>>,
+}
+
+/// [`pose_graph`] over `PoseV`, pose 7's position and pose 11 fixed.
+fn var_graph(n: usize, seed: u64) -> GraphV {
+    let (poses, edges, prior) = pose_graph::<f64>(n, seed);
+    let mut pv = refs::Vec::new();
+    for (k, p) in poses.iter().enumerate() {
+        pv.push(PoseV {
+            pos: if k == 7 || k == 11 { Param::fixed(p.pos.value) } else { p.pos.clone() },
+            th: if k == 11 { Param::fixed(p.th.value) } else { p.th.clone() },
+            hb: VarSelfBlock::new(),
+        });
+    }
+    let edges = edges
+        .iter()
+        .map(|e| EdgeV {
+            a: pv.ref_at(e.a.index() as usize),
+            b: pv.ref_at(e.b.index() as usize),
+            dx: e.dx,
+            dy: e.dy,
+            dth: e.dth,
+            w: e.w,
+            hb: CrossBlock::new(),
+        })
+        .collect();
+    let prior = prior.map(|q| PriorV { p: pv.ref_at(q.p.index() as usize), pos: q.pos, th: q.th });
+    GraphV { poses: pv, edges, prior }
+}
+
+/// Entities with blocks at their live sizes, some parameters fixed,
+/// assemble on the device as on the CPU and solve there to the CPU's
+/// optimum.
+#[test]
+fn a_var_self_block_pose_graph_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
+    let mut s = var_graph(40, 3);
+    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    assert_eq!(x.len(), 3 * 40 - 2 - 3);
+    let x1 = perturbed(&x);
+    for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+    }
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut s = var_graph(40, 3);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        r.end_cost
+    };
+    let cpu = run(None);
+    for d in devices() {
+        let device = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+    }
+}
+
+/// A 3D pose graph (benchmarks/pgo's): poses of a position and a
+/// `QuaternionParam` rotation, the first held by a prior written as the
+/// pose's own constraint behind a guard over its data, relative-pose edges
+/// with the quaternion-vector rotation residual.
+#[arael::model]
+#[arael(constraint(hb, guard = self.has_prior, {
+    let rerr = pose3.prior_rot_t * pose3.ea.rotation_matrix();
+    let s = rerr - rerr.transpose();
+    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
+    [pose3.pos.x - pose3.prior.x,
+     pose3.pos.y - pose3.prior.y,
+     pose3.pos.z - pose3.prior.z,
+     s[2].y / denom,
+     s[0].z / denom,
+     s[1].x / denom]
+}))]
+#[derive(Clone)]
+pub struct Pose3 {
+    pub pos: Param<vect3<f64>>,
+    pub ea: QuaternionParam<f64>,
+    pub prior: vect3<f64>,
+    pub prior_rot_t: arael::matrix::matrix3<f64>,
+    pub has_prior: bool,
+    pub hb: SelfBlock<Pose3>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let ra = a.ea.rotation_matrix();
+    let rerr = edge3.rmeas_t * (ra.transpose() * b.ea.rotation_matrix());
+    let s = rerr - rerr.transpose();
+    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
+    let terr = ra.transpose() * (b.pos - a.pos) - edge3.dt;
+    [terr.x * edge3.wt, terr.y * edge3.wt, terr.z * edge3.wt,
+     s[2].y / denom * edge3.wr, s[0].z / denom * edge3.wr, s[1].x / denom * edge3.wr]
+}))]
+#[derive(Clone)]
+pub struct Edge3 {
+    #[arael(ref = root.poses)]
+    pub a: Ref<Pose3>,
+    #[arael(ref = root.poses)]
+    pub b: Ref<Pose3>,
+    pub dt: vect3<f64>,
+    pub rmeas_t: arael::matrix::matrix3<f64>,
+    pub wt: f64,
+    pub wr: f64,
+    pub hb: CrossBlock<Pose3, Pose3>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct Graph3 {
+    pub poses: refs::Vec<Pose3>,
+    pub edges: std::vec::Vec<Edge3>,
+}
+
+/// A loop of `n` poses on a tilted circle, each turned along it,
+/// odometry between neighbours and a closure every fifth pose, the
+/// measurements the truth plus noise, the poses moved off it.
+fn pose_graph3(n: usize, seed: u64) -> Graph3 {
+    use arael::matrix::matrix3d;
+    use arael::vect::vect3d;
+    let mut rng = Lcg(seed);
+    let truth: Vec<(vect3d, matrix3d)> = (0..n)
+        .map(|k| {
+            let a = 2.0 * std::f64::consts::PI * k as f64 / n as f64;
+            (vect3d::new(5.0 * a.cos(), 5.0 * a.sin(), a.sin()), matrix3d::rotation_from_euler_angles(vect3d::new(0.1 * a.cos(), 0.2 * a.sin(), a)))
+        })
+        .collect();
+    let mut poses = refs::Vec::new();
+    for (k, (t, r)) in truth.iter().enumerate() {
+        let off = if k == 0 { 0.0 } else { 1.0 };
+        let dr = matrix3d::rotation_from_euler_angles(vect3d::new(0.03 * rng.uniform(), 0.03 * rng.uniform(), 0.03 * rng.uniform()) * off);
+        poses.push(Pose3 {
+            pos: Param::new(*t + vect3d::new(0.1 * rng.uniform(), 0.1 * rng.uniform(), 0.1 * rng.uniform()) * off),
+            ea: QuaternionParam::from_rotation_matrix(*r * dr),
+            prior: *t,
+            prior_rot_t: r.transpose(),
+            has_prior: k == 0,
+            hb: SelfBlock::new(),
+        });
+    }
+    let mut edges = std::vec::Vec::new();
+    let mut edge = |i: usize, j: usize, rng: &mut Lcg| {
+        let ((ta, ra), (tb, rb)) = (truth[i], truth[j]);
+        let noise = matrix3d::rotation_from_euler_angles(vect3d::new(0.005 * rng.uniform(), 0.005 * rng.uniform(), 0.005 * rng.uniform()));
+        edges.push(Edge3 {
+            a: poses.ref_at(i),
+            b: poses.ref_at(j),
+            dt: ra.transpose() * (tb - ta) + vect3d::new(0.01 * rng.uniform(), 0.01 * rng.uniform(), 0.01 * rng.uniform()),
+            rmeas_t: (ra.transpose() * rb * noise).transpose(),
+            wt: 10.0,
+            wr: 20.0,
+            hb: CrossBlock::new(),
+        });
+    };
+    for k in 0..n {
+        edge(k, (k + 1) % n, &mut rng);
+        if k % 5 == 0 {
+            edge(k, (k + n / 2) % n, &mut rng);
+        }
+    }
+    Graph3 { poses, edges }
+}
+
+/// The 3D pose graph assembles on the device as on the CPU, its prior
+/// packed for the one pose its guard keeps, and solves there to the CPU's
+/// optimum, the model's rotations where the CPU leaves them.
+#[test]
+fn a_3d_pose_graph_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
+    let mut s = pose_graph3(40, 5);
+    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x1 = perturbed(&x);
+    for (wide, tol) in [(Wide::F64, 1e-11), (Wide::Df32, 1e-10)] {
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+    }
+    let state = |s: &Graph3| -> Vec<f64> {
+        s.poses.iter().flat_map(|p| [p.pos.value.x, p.pos.value.y, p.pos.value.z, p.ea.value.t, p.ea.value.v.x, p.ea.value.v.y, p.ea.value.v.z]).collect()
+    };
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut s = pose_graph3(40, 5);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        s.deserialize(&r.x);
+        (r.start_cost, r.end_cost, state(&s))
+    };
+    let (start, cpu, cpu_state) = run(None);
+    assert!(cpu < 0.05 * start, "the graph converges to its noise: {start} to {cpu}");
+    for d in devices() {
+        let (_, device, st) = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+        assert_close(&st, &cpu_state, 1e-7, &format!("{}: the solved model", label(&d)));
+    }
+}
+
+/// A pose's constraint on itself whose guard reads a parameter: the guard
+/// changes with the solve, so the device cannot apply it when packing.
+#[arael::model]
+#[arael(constraint(hb, guard = self.pos.value.x > 0.0, { [guarded.pos.x - 1.0] }))]
+#[derive(Clone)]
+pub struct Guarded {
+    pub pos: Param<vect3<f64>>,
+    pub hb: SelfBlock<Guarded>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct GuardedRoot {
+    pub items: refs::Vec<Guarded>,
+}
+
+#[test]
+fn a_guard_reading_a_parameter_has_no_device_form() {
+    let s = GuardedRoot { items: refs::Vec::new() };
+    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a guard over a parameter has no device form");
+    assert!(why.contains("Guarded") && why.contains("guarded.pos"), "{why}");
+}
+
+/// A direction prior reading a `UnitVecParam`'s unit vector, which the CPU
+/// computes per iteration from the direction's chart and step and the
+/// device does not compute.
+#[arael::model]
+#[arael(constraint(hb, { [heading.dir.unit.z - 0.5] }))]
+#[derive(Clone)]
+pub struct Heading {
+    pub dir: arael::unitvec::UnitVecParam,
+    pub hb: SelfBlock<Heading>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct Headings {
+    pub items: refs::Vec<Heading>,
+}
+
+#[test]
+fn a_constraint_reading_state_the_device_does_not_compute_has_no_device_form() {
+    let s = Headings { items: refs::Vec::new() };
+    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a read of the unit vector has no device form");
+    assert!(why.contains("Heading") && why.contains("heading.dir"), "{why}");
 }

@@ -2656,6 +2656,26 @@ impl<const N: usize, T: crate::utils::Float, P: GradPolicy<T>> VarSelfBlockArray
     /// remainder when the policy compensates.
     const GPER: usize = if P::KAHAN { 2 } else { 1 };
 
+    /// The device assembly's table of this array, as
+    /// [`SelfBlockArray::device_table`]'s: per slot the entity's `N`
+    /// global parameter indices (`u32::MAX` for a fixed one) and its tile
+    /// `(base, stride, start)`. Over a slab holding every entity.
+    pub fn device_table(&self, resolve: &mut dyn FnMut(u32, u32) -> (usize, usize, usize)) -> (std::vec::Vec<u32>, std::vec::Vec<u32>) {
+        assert!(self.map.is_empty(), "a device table is built from a slab holding every entity");
+        let mut idx = std::vec::Vec::with_capacity(N * self.meta.len());
+        let mut tile = std::vec::Vec::with_capacity(3 * self.meta.len());
+        for m in &self.meta {
+            idx.extend(m.pos.iter().map(|&p| if p == VAR_NO_POS { u32::MAX } else { m.s + p as u32 }));
+            if m.w == 0 {
+                tile.extend_from_slice(&[0, 0, 0]);
+            } else {
+                let (base, stride, _) = resolve(m.s, m.s);
+                tile.extend_from_slice(&[device_word(base), device_word(stride), m.s]);
+            }
+        }
+        (idx, tile)
+    }
+
     /// An empty slab.
     pub fn new() -> Self {
         let () = Self::CHECK_WIDTH;
@@ -3922,6 +3942,27 @@ mod tests {
     #[should_panic(expected = "form one run")]
     fn a_gap_in_an_entitys_live_indices_is_refused() {
         tile_extent(&[0, u32::MAX, 2]);
+    }
+
+    /// A slab stored at the live sizes gives the device the table the
+    /// full-size slab gives: the indices with the fixed ones marked, the
+    /// tiles, zeros for an entity fixed throughout.
+    #[test]
+    fn var_self_device_table_matches_the_full_slab() {
+        let rows: [[u32; 3]; 4] = [[0, 1, 2], [u32::MAX, 3, 4], [u32::MAX; 3], [5, u32::MAX, u32::MAX]];
+        let mut full: SelfBlockArray<3, 6, f64> = SelfBlockArray::default();
+        let mut var: VarSelfBlockArray<3, f64> = VarSelfBlockArray::default();
+        for (e, ix) in rows.iter().enumerate() {
+            full.push(e as u32, ix);
+            var.push(e as u32, ix);
+        }
+        full.finish();
+        var.finish();
+        let mut resolve = |r: u32, c: u32| (100 * r as usize + c as usize, 7, 0);
+        let expect = full.device_table(&mut resolve);
+        assert_eq!(var.device_table(&mut resolve), expect);
+        assert_eq!(expect.0[3..6], [u32::MAX, 3, 4]);
+        assert_eq!(expect.1[6..9], [0, 0, 0]);
     }
 
     #[test]

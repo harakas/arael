@@ -2567,7 +2567,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 #(#advance_stmts)*
                 #comp_advance
             }
-            fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+            fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<arael::model::Reference>) {
                 let _ = &refs;
                 #(#set_references_stmts)*
             }
