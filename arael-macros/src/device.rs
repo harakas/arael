@@ -17,7 +17,8 @@
 //! itself, and cross constraints in a collection of an entity of a
 //! root-level collection coupling that entity with a ref (`parent =`), with
 //! guards (evaluated once per structure: a guard does not change during a
-//! solve) and without a loss or an index `select`; over referenced fields
+//! solve) and robust losses (the record scaled by `sqrt(rho'(s))`, as the
+//! CPU's Jacobian rows are), without an index `select`; over referenced fields
 //! (`SimpleEulerAngleParam` angles, computed and never re-centred; Euler-angle
 //! and `QuaternionParam` rotations, `TransformParam` poses, `UnitVecParam`
 //! directions, whose references the device keeps and moves), atom caches
@@ -221,14 +222,27 @@ impl RefKind {
 }
 
 /// A CSE temporary's name: `__x3`, `__w1`, `__m2`.
+/// A robust loss of a device constraint, over the squared norm of its
+/// instance's rows ([`LOSS_ARG_SYM`]): `rho(s)` for the cost kernel, and
+/// `rho(s)` and the weight `rho'(s)` with shared statements for the
+/// assembly kernel.
+pub(crate) struct DevLoss {
+    pub cost: (Vec<Intermediate>, E),
+    pub gh: (Vec<Intermediate>, E, E),
+}
+
+use crate::constraint::LOSS_ARG_SYM;
+
 fn is_temp(s: &str) -> bool {
     let rest = s.strip_prefix("__x").or_else(|| s.strip_prefix("__w")).or_else(|| s.strip_prefix("__m"));
     rest.is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// The leaves `e` reads: its symbols but the CSE's temporaries and the
+/// loss's argument, which the kernel computes.
 fn syms_of(e: &E, out: &mut BTreeSet<String>) {
     for s in e.symbols() {
-        if !is_temp(&s) {
+        if !is_temp(&s) && s != LOSS_ARG_SYM {
             out.insert(s);
         }
     }
@@ -340,6 +354,7 @@ pub(crate) fn device_constraint(
     gh: (&[Intermediate], &[E]),
     guard: Option<(&[Intermediate], &E)>,
     cost: (&[Intermediate], &[E]),
+    loss: Option<&DevLoss>,
     atoms: &[(String, E)],
     root_var: &str,
 ) -> Result<DevConstraint, String> {
@@ -358,6 +373,12 @@ pub(crate) fn device_constraint(
     let mut cost_syms = BTreeSet::new();
     syms_of_inters(cost.0, &mut cost_syms);
     cost.1.iter().for_each(|e| syms_of(e, &mut cost_syms));
+    if let Some(l) = loss {
+        syms_of_inters(&l.gh.0, &mut gh_syms);
+        [&l.gh.1, &l.gh.2].into_iter().for_each(|e| syms_of(e, &mut gh_syms));
+        syms_of_inters(&l.cost.0, &mut cost_syms);
+        syms_of(&l.cost.1, &mut cost_syms);
+    }
     // a kernel computing an atom reads its parameters
     let atom = |s: &str| atoms.iter().find(|(c, _)| c == s).map(|(_, e)| e);
     for syms in [&mut gh_syms, &mut cost_syms] {
@@ -426,7 +447,7 @@ pub(crate) fn device_constraint(
         leaf.insert(s.clone(), l);
     }
     let names: std::collections::BTreeMap<String, String> = leaf.keys().enumerate().map(|(i, s)| (s.clone(), format!("__l{i}"))).collect();
-    let cpp = cpp_kernels(cid, ft, (na, nb), rows, &leaf, &names, &refs, (&gh_syms, &cost_syms), gh, guard, cost)?;
+    let cpp = cpp_kernels(cid, ft, (na, nb), rows, &leaf, &names, &refs, (&gh_syms, &cost_syms), gh, guard, cost, loss)?;
     Ok(DevConstraint { group_key, a, b, holder, block, inst, ent, root, refs, cpp, cid, rows, filter: None })
 }
 
@@ -447,12 +468,20 @@ fn cpp_kernels(
     gh: (&[Intermediate], &[E]),
     guard: Option<(&[Intermediate], &E)>,
     cost: (&[Intermediate], &[E]),
+    loss: Option<&DevLoss>,
 ) -> Result<String, String> {
     if na == 0 {
         return Err("a device constraint's entities have parameters".into());
     }
     let pair = nb > 0;
-    let map = |s: &str| -> Option<String> { names.get(s).cloned() };
+    // the loss's argument is the kernel's local of that name
+    let map = |s: &str| -> Option<String> {
+        if s == LOSS_ARG_SYM {
+            Some(s.to_string())
+        } else {
+            names.get(s).cloned()
+        }
+    };
     // a leaf's type and the read that gives it
     let read = |l: &Leaf| -> Result<(&'static str, String), String> {
         Ok(match *l {
@@ -510,11 +539,34 @@ fn cpp_kernels(
             body.push_str(&format!("rec[{}] = {d};\n", ri * stride + 1 + p));
         }
     }
+    // Under a loss the cost is rho(s) of the rows' squared norm s, and the
+    // record is scaled by
+    // sqrt(rho'(s)) (zero where rho' is not positive, as the CPU's
+    // Jacobian rows are): the reducers' sums of its products are then the
+    // CPU's rho'(s)-weighted gradient and Hessian. In a block of its own,
+    // so the loss's temporaries do not meet the body's. Behind the guard,
+    // as the CPU's assembly skips the loss where the rows are off.
+    let costs = match loss {
+        Some(l) => {
+            body.push_str(&format!("F {LOSS_ARG_SYM} = (F)0.0f;\n"));
+            for ri in 0..rows {
+                body.push_str(&format!("{LOSS_ARG_SYM} += rec[{0}] * rec[{0}];\n", ri * stride));
+            }
+            body.push_str(&format!(
+                "{{\n{}c += (W)({});\nconst F __lw = {};\nconst F __sw = __lw > (F)0.0f ? sqrt(__lw) : (F)0.0f;\n\
+                 #pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) rec[k] *= __sw;\n}}\n",
+                stmts(&l.gh.0)?,
+                expr(&l.gh.1)?,
+                expr(&l.gh.2)?
+            ));
+            String::new()
+        }
+        None => (0..rows).map(|ri| format!("c += (W)rec[{0}] * (W)rec[{0}];\n", ri * stride)).collect(),
+    };
     let gh_code = match guard {
         Some((pre, q)) => format!("{}if ({} >= 0.0f) {{\n{body}}}\n", stmts(pre)?, expr(q)?),
         None => body,
     };
-    let costs: String = (0..rows).map(|ri| format!("c += (W)rec[{0}] * (W)rec[{0}];\n", ri * stride)).collect();
     let gh_kernel = format!(
         "KERNEL_THREADS(256) void __dk{cid}_gh(GLOBAL u8* RESTRICT B, u32 n) {{\n{}{}\
          F rec[{recw}];\n#pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) rec[k] = (F)0.0f;\n{gh_code}{costs}\
@@ -543,11 +595,20 @@ fn cpp_kernels(
             1 + na
         ));
     }
-    // the cost: the rows alone
+    // the cost: the rows alone, or rho of their squared norm
     let mut cbody = stmts(cost.0)?;
+    if loss.is_some() {
+        cbody.push_str(&format!("F {LOSS_ARG_SYM} = (F)0.0f;\n"));
+    }
     for (ri, r) in cost.1.iter().enumerate() {
         let r = expr(r)?;
-        cbody.push_str(&format!("const F r{ri} = {r};\nc += (W)r{ri} * (W)r{ri};\n"));
+        cbody.push_str(&match loss {
+            Some(_) => format!("const F r{ri} = {r};\n{LOSS_ARG_SYM} += r{ri} * r{ri};\n"),
+            None => format!("const F r{ri} = {r};\nc += (W)r{ri} * (W)r{ri};\n"),
+        });
+    }
+    if let Some(l) = loss {
+        cbody.push_str(&format!("{{\n{}c += (W)({});\n}}\n", stmts(&l.cost.0)?, expr(&l.cost.1)?));
     }
     let cost_kernel = format!(
         "KERNEL_THREADS(256) void __dk{cid}_cost(GLOBAL u8* RESTRICT B, u32 n) {{\n{}{}{cbody}}}\ncost_partial(COL_MUT(B, W, C{cid}_PART), c);\n}}\n",

@@ -900,10 +900,11 @@ constraint has a device form (today: constraints of the root's
 collections over one entity or two, reached through refs, an entity's
 constraints on itself, and constraints in a collection of an entity of
 the root's collections coupling that entity with a ref (`parent =`),
-without a loss or an index `select`, over Euler-angle (simple and
-re-centred) and `QuaternionParam` rotations, `TransformParam` poses,
-`UnitVecParam` directions and `AngleParam` headings, guards included,
-each evaluated once per structure);
+over Euler-angle (simple and re-centred) and `QuaternionParam`
+rotations, `TransformParam` poses, `UnitVecParam` directions and
+`AngleParam` headings, guards included, each evaluated once per
+structure, and robust losses, but no index `select` or `match`, in the
+body or picking the loss);
 `LmProblemInternals::device_unsupported` says why a root has none, and
 then the CPU assembles and the Hessian's values are uploaded per damped
 solve. `SparseFaerOptions::with_gpu_assembly(false)` keeps the assembly

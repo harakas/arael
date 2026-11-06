@@ -6876,6 +6876,19 @@ pub fn generate_root_methods(
         };
         let loss_cost_finalize = emit_loss(false)?;
         let loss_gh_finalize = emit_loss(true)?;
+        // The same loss for the device head: rho for its cost kernel, rho
+        // and the weight for its assembly kernel.
+        let device_loss: Option<crate::device::DevLoss> = loss_expr.as_ref().map(|loss_e| {
+            let cse = |mut exprs: Vec<arael_sym::E>| {
+                apply_substitutions(&mut exprs, &all_subs);
+                if fast_atan { replace_atan_fast(&mut exprs); }
+                arael_sym::cse_scoped_wide(&exprs, wide)
+            };
+            let (cost_ints, mut rho) = cse(vec![loss_e.clone()]);
+            let (gh_ints, mut gh) = cse(vec![loss_e.clone(), loss_e.diff(LOSS_ARG_SYM)]);
+            let w = gh.pop().unwrap();
+            crate::device::DevLoss { cost: (cost_ints, rho.pop().unwrap()), gh: (gh_ints, gh.pop().unwrap(), w) }
+        });
         // calc_cost_table twin of a finished cost blob: identical
         // statements with the accumulator shadowed, so this constraint's
         // robustified cost (rho(s) under a loss, the raw row sum without)
@@ -8073,9 +8086,7 @@ pub fn generate_root_methods(
             // referenced entity's parameters, its self block, the root's
             // collection walked as the cost sweep walks it.
             if device_unsupported.is_none() && remote_at_root {
-                let why = if loss_present {
-                    Some("a loss")
-                } else if arm_writes.is_some() {
+                let why = if arm_writes.is_some() {
                     Some("a select whose arms write apart")
                 } else if param_strs.is_empty() {
                     Some("an entity without parameters")
@@ -8105,6 +8116,7 @@ pub fn generate_root_methods(
                         (&gh_intermediates, &gh_simplified),
                         device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
                         (&cost_intermediates, &cost_simplified),
+                        device_loss.as_ref(),
                         &atom_caches,
                         &root_var_name,
                     ) {
@@ -8184,9 +8196,7 @@ pub fn generate_root_methods(
             // parameters, its self block, its collection walked as the cost
             // sweep walks it, a guard over its data applied when packing.
             if device_unsupported.is_none() && self_at_root {
-                let why = if loss_present {
-                    Err("a loss".to_string())
-                } else if arm_writes.is_some() {
+                let why = if arm_writes.is_some() {
                     Err("a select whose arms write apart".to_string())
                 } else if param_strs.is_empty() {
                     Err("an entity without parameters".to_string())
@@ -8218,6 +8228,7 @@ pub fn generate_root_methods(
                             (&gh_intermediates, &gh_simplified),
                             device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
                             (&cost_intermediates, &cost_simplified),
+                            device_loss.as_ref(),
                             &atom_caches,
                             &root_var_name,
                         ) {
@@ -8592,8 +8603,6 @@ pub fn generate_root_methods(
                     Some("a cross constraint below the root")
                 } else if parent_cross.is_some() {
                     Some("a parent-owned cross block")
-                } else if loss_present {
-                    Some("a loss")
                 } else if arm_writes.is_some() {
                     Some("a select whose arms write apart")
                 } else if a_param_count == 0 || b_param_count == 0 || b_type.is_none() {
@@ -8631,6 +8640,7 @@ pub fn generate_root_methods(
                         (&gh_intermediates, &gh_simplified),
                         device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
                         (&cost_intermediates, &cost_simplified),
+                        device_loss.as_ref(),
                         &atom_caches,
                         &root_var_name,
                     ) {
@@ -8652,9 +8662,7 @@ pub fn generate_root_methods(
             // the instance's cross tile, walked as the cost sweep walks
             // them (the entity's collection, then its instances).
             if device_unsupported.is_none() && nested_at_root {
-                let why = if loss_present {
-                    Some("a loss")
-                } else if arm_writes.is_some() {
+                let why = if arm_writes.is_some() {
                     Some("a select whose arms write apart")
                 } else if a_param_count == 0 || b_param_count == 0 || b_type.is_none() {
                     Some("an entity without parameters")
@@ -8692,6 +8700,7 @@ pub fn generate_root_methods(
                         (&gh_intermediates, &gh_simplified),
                         device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
                         (&cost_intermediates, &cost_simplified),
+                        device_loss.as_ref(),
                         &atom_caches,
                         &root_var_name,
                     ) {

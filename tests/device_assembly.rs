@@ -113,12 +113,13 @@ pub struct SceneW {
     pub observations: std::vec::Vec<ObsW>,
 }
 
-/// A point prior with a loss, which has no device form yet.
+/// A point prior whose loss an index picks, which has no device form yet.
 #[arael::model]
-#[arael(constraint(hb, loss = |s| loss_huber(s, 1.0), { [priorpoint.pos.x - 1.0, priorpoint.pos.y, priorpoint.pos.z] }))]
+#[arael(constraint(hb, loss = |s| loss_select(priorpoint.kind, s, 1.0), { [priorpoint.pos.x - 1.0, priorpoint.pos.y, priorpoint.pos.z] }))]
 #[derive(Clone)]
 pub struct PriorPoint {
     pub pos: Param<vect3<f64>>,
+    pub kind: u32,
     pub hb: SelfBlock<PriorPoint>,
 }
 
@@ -325,10 +326,10 @@ fn an_f32_solve_through_the_device_assembly_reaches_the_cpu_optimum() {
 #[test]
 fn a_root_with_a_constraint_without_a_device_form_says_which() {
     let mut points = refs::Vec::new();
-    points.push(PriorPoint { pos: Param::new(vect3::new(0.0, 0.0, 0.0)), hb: SelfBlock::new() });
+    points.push(PriorPoint { pos: Param::new(vect3::new(0.0, 0.0, 0.0)), kind: 1, hb: SelfBlock::new() });
     let s = Priors { points };
-    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a loss has no device form yet");
-    assert!(why.contains("PriorPoint") && why.contains("loss"), "{why}");
+    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a loss picked by an index has no device form yet");
+    assert!(why.contains("PriorPoint") && why.contains("select"), "{why}");
 }
 
 /// A camera turned by a `QuaternionParam`: the device composes its
@@ -1580,6 +1581,313 @@ fn guards_on_every_form_keep_on_the_device_what_they_keep_on_the_cpu() {
     let cpu = run(None);
     for d in devices() {
         let device = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+    }
+}
+
+/// The 2D pose graph with a robust loss on every form: a Cauchy heading
+/// prior on the pose itself, a soft-L1 position prior through a ref at the
+/// root's scale, Huber odometry and Tukey loop closures at their own
+/// scales, and Geman-McClure observations of landmarks, nested in them
+/// (`parent = lm`).
+#[arael::model]
+#[arael(constraint(hb, loss = |s| loss_cauchy(s, 0.04), { [(posel.th - posel.heading) * 2.0] }))]
+#[derive(Clone)]
+pub struct PoseL {
+    pub pos: Param<vect2<f64>>,
+    pub th: Param<f64>,
+    pub heading: f64,
+    pub hb: SelfBlock<PoseL>,
+}
+
+#[arael::model]
+#[arael(constraint(p.hb, loss = |s| loss_soft_l1(s, root.prior_k2), {
+    [p.pos.x - priorl.pos.x, p.pos.y - priorl.pos.y, p.th - priorl.th]
+}))]
+#[derive(Clone)]
+pub struct PriorL {
+    #[arael(ref = root.poses)]
+    pub p: Ref<PoseL>,
+    pub pos: vect2<f64>,
+    pub th: f64,
+}
+
+#[arael::model]
+#[arael(constraint(hb, loss = |s| loss_huber(s, odol.k2), {
+    let cs = cos(a.th);
+    let sn = sin(a.th);
+    let dx = b.pos.x - a.pos.x;
+    let dy = b.pos.y - a.pos.y;
+    [(cs * dx + sn * dy - odol.dx) * 10.0, (cs * dy - sn * dx - odol.dy) * 10.0, rad_diff(b.th - a.th, odol.dth) * 10.0]
+}))]
+#[derive(Clone)]
+pub struct OdoL {
+    #[arael(ref = root.poses)]
+    pub a: Ref<PoseL>,
+    #[arael(ref = root.poses)]
+    pub b: Ref<PoseL>,
+    pub dx: f64,
+    pub dy: f64,
+    pub dth: f64,
+    pub k2: f64,
+    pub hb: CrossBlock<PoseL, PoseL>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, loss = |s| loss_tukey(s, loopl.k2), {
+    let cs = cos(a.th);
+    let sn = sin(a.th);
+    let dx = b.pos.x - a.pos.x;
+    let dy = b.pos.y - a.pos.y;
+    [(cs * dx + sn * dy - loopl.dx) * 10.0, (cs * dy - sn * dx - loopl.dy) * 10.0, rad_diff(b.th - a.th, loopl.dth) * 10.0]
+}))]
+#[derive(Clone)]
+pub struct LoopL {
+    #[arael(ref = root.poses)]
+    pub a: Ref<PoseL>,
+    #[arael(ref = root.poses)]
+    pub b: Ref<PoseL>,
+    pub dx: f64,
+    pub dy: f64,
+    pub dth: f64,
+    pub k2: f64,
+    pub hb: CrossBlock<PoseL, PoseL>,
+}
+
+#[arael::model]
+#[derive(Clone)]
+pub struct LmL {
+    pub pos: Param<vect2<f64>>,
+    pub sights: std::vec::Vec<SightL>,
+    pub hb: SelfBlock<LmL>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, parent = lm, loss = |s| loss_geman_mcclure(s, 1.0), {
+    let cs = cos(pose.th);
+    let sn = sin(pose.th);
+    let dx = lm.pos.x - pose.pos.x;
+    let dy = lm.pos.y - pose.pos.y;
+    [(cs * dx + sn * dy - sightl.x) * 10.0, (cs * dy - sn * dx - sightl.y) * 10.0]
+}))]
+#[derive(Clone)]
+pub struct SightL {
+    #[arael(ref = root.poses)]
+    pub pose: Ref<PoseL>,
+    pub x: f64,
+    pub y: f64,
+    pub hb: CrossBlock<LmL, PoseL>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct GraphL {
+    pub poses: refs::Vec<PoseL>,
+    pub landmarks: refs::Vec<LmL>,
+    pub odometry: std::vec::Vec<OdoL>,
+    pub loops: std::vec::Vec<LoopL>,
+    pub priors: std::vec::Vec<PriorL>,
+    pub prior_k2: f64,
+}
+
+/// [`pose_graph`] under losses: every third loop closure and the odometry
+/// out of pose 7 metres off, far past their scales, as is every fourth
+/// landmark's first sighting; the landmarks on a ring outside the poses',
+/// each seen by the poses within a twelfth of a turn of it.
+fn lossy_graph(n: usize, m: usize, seed: u64) -> GraphL {
+    let (poses, edges, prior) = pose_graph::<f64>(n, seed);
+    let mut rng = Lcg(seed + 1);
+    let mut pl = refs::Vec::new();
+    for p in poses.iter() {
+        pl.push(PoseL { pos: p.pos.clone(), th: p.th.clone(), heading: p.th.value + 0.01, hb: SelfBlock::new() });
+    }
+    let (mut odometry, mut loops) = (std::vec::Vec::new(), std::vec::Vec::new());
+    for e in edges.iter() {
+        let (a, b) = (e.a.index() as usize, e.b.index() as usize);
+        if b == (a + 1) % n {
+            let off = if a == 7 { 1.0 } else { 0.0 };
+            odometry.push(OdoL { a: pl.ref_at(a), b: pl.ref_at(b), dx: e.dx + off, dy: e.dy, dth: e.dth, k2: 0.25, hb: CrossBlock::new() });
+        } else {
+            let off = if loops.len() % 3 == 1 { 1.0 } else { 0.0 };
+            loops.push(LoopL { a: pl.ref_at(a), b: pl.ref_at(b), dx: e.dx + off, dy: e.dy - off, dth: e.dth, k2: 25.0, hb: CrossBlock::new() });
+        }
+    }
+    let mut landmarks = refs::Vec::new();
+    for j in 0..m {
+        let a = 2.0 * std::f64::consts::PI * (j as f64 + 0.5) / m as f64;
+        let l = (7.0 * a.cos(), 7.0 * a.sin());
+        let mut sights = std::vec::Vec::new();
+        for k in 0..n {
+            let t = 2.0 * std::f64::consts::PI * k as f64 / n as f64;
+            let turn = (t - a).rem_euclid(2.0 * std::f64::consts::PI);
+            if turn.min(2.0 * std::f64::consts::PI - turn) > std::f64::consts::PI / 6.0 {
+                continue;
+            }
+            let (x, y, th) = (5.0 * t.cos(), 5.0 * t.sin(), t + std::f64::consts::FRAC_PI_2);
+            let (dx, dy) = (l.0 - x, l.1 - y);
+            let off = if j % 4 == 0 && sights.is_empty() { 1.0 } else { 0.0 };
+            sights.push(SightL {
+                pose: pl.ref_at(k),
+                x: th.cos() * dx + th.sin() * dy + 0.01 * rng.uniform() + off,
+                y: th.cos() * dy - th.sin() * dx + 0.01 * rng.uniform(),
+                hb: CrossBlock::new(),
+            });
+        }
+        landmarks.push(LmL { pos: Param::new(vect2::new(l.0 + 0.1 * rng.uniform(), l.1 + 0.1 * rng.uniform())), sights, hb: SelfBlock::new() });
+    }
+    let priors = prior.iter().map(|q| PriorL { p: pl.ref_at(q.p.index() as usize), pos: q.pos, th: q.th }).collect();
+    GraphL { poses: pl, landmarks, odometry, loops, priors, prior_k2: 0.01 }
+}
+
+/// Losses on every form, some residuals far in their tails (Tukey's weight
+/// zero there): the device assembles as the CPU does and solves to its
+/// optimum.
+#[test]
+fn losses_on_every_form_assemble_and_solve_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
+    let mut s = lossy_graph(40, 12, 3);
+    assert!(s.landmarks.iter().all(|l| l.sights.len() >= 2));
+    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x1 = perturbed(&x);
+    for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+    }
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut s = lossy_graph(40, 12, 3);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        s.deserialize(&r.x);
+        let st: Vec<f64> = s.poses.iter().flat_map(|p| [p.pos.value.x, p.pos.value.y, p.th.value]).collect();
+        (r.start_cost, r.end_cost, st)
+    };
+    let (start, cpu, cpu_state) = run(None);
+    // the outliers keep about 38 of the cost: Tukey's c2 / 3 per closure,
+    // Huber's 2 sqrt(k2 s) - k2, Geman-McClure's c2 s / (c2 + s)
+    assert!(cpu < 40.0 && cpu < 0.6 * start, "the graph converges past its outliers: {start} to {cpu}");
+    for d in devices() {
+        let (_, device, st) = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+        assert_close(&st, &cpu_state, 1e-7, &format!("{}: the solved poses", label(&d)));
+    }
+}
+
+/// The bundle-adjustment observation under a Huber loss of two pixels.
+#[arael::model]
+#[arael(constraint(hb, loss = |s| loss_huber(s, obsr.k2), {
+    let pc = cam.ea.rotation_matrix() * pt.pos + cam.t;
+    let keep = -pc.z - cam.zdrop;
+    let px = -pc.x / pc.z;
+    let py = -pc.y / pc.z;
+    let r2 = px * px + py * py;
+    let d = 1.0 + r2 * (cam.intr.y + cam.intr.z * r2);
+    [branch(keep, with_wide(cam.intr.x * d * px - obsr.xy.x), 0.0),
+     branch(keep, with_wide(cam.intr.x * d * py - obsr.xy.y), 0.0)]
+}))]
+#[derive(Clone)]
+pub struct ObsR<T: Float> {
+    #[arael(ref = root.cameras)]
+    pub cam: Ref<Camera<T>>,
+    #[arael(ref = root.points)]
+    pub pt: Ref<Point<T>>,
+    pub xy: vect2<T>,
+    pub k2: T,
+    pub hb: CrossBlock<Camera<T>, Point<T>, T>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct SceneR {
+    pub cameras: refs::Vec<Camera<f64>>,
+    pub points: refs::Vec<Point<f64>>,
+    pub observations: std::vec::Vec<ObsR<f64>>,
+}
+
+#[arael::model]
+#[arael(root, f32)]
+#[derive(Clone)]
+pub struct SceneRF {
+    pub cameras: refs::Vec<Camera<f32>>,
+    pub points: refs::Vec<Point<f32>>,
+    pub observations: std::vec::Vec<ObsR<f32>>,
+}
+
+type RobustParts<T> = (refs::Vec<Camera<T>>, refs::Vec<Point<T>>, std::vec::Vec<ObsR<T>>);
+
+/// [`consistent_scene`] under the Huber loss: every fifth observation
+/// thirty pixels off, camera 4's observations of points less than five
+/// units deep dropped by its depth guard (the loss skipped with the rows).
+fn robust_scene<T: Float>() -> RobustParts<T> {
+    let (mut cameras, points, observations) = consistent_scene::<T>();
+    cameras[4usize].zdrop = T::from(5.0).unwrap();
+    let observations = observations
+        .into_iter()
+        .enumerate()
+        .map(|(k, o)| {
+            let off = T::from(if k % 5 == 2 { 30.0 } else { 0.0 }).unwrap();
+            ObsR { cam: o.cam, pt: o.pt, xy: vect2::new(o.xy.x + off, o.xy.y), k2: T::from(4.0).unwrap(), hb: CrossBlock::new() }
+        })
+        .collect();
+    (cameras, points, observations)
+}
+
+/// A loss behind a guard of the body (the depth's `branch`): the device
+/// assembles as the CPU does in f64 and f32, and solves to its optimum.
+#[test]
+fn a_robust_bundle_adjustment_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
+    let (cameras, points, observations) = robust_scene::<f64>();
+    let c4 = &cameras[4usize];
+    let depths: Vec<f64> = observations
+        .iter()
+        .filter(|o| o.cam.index() == 4)
+        .map(|o| -(arael::matrix::matrix3d::rotation_from_euler_angles(c4.ea.value) * points[o.pt].pos.value + c4.t.value).z)
+        .collect();
+    assert!(depths.iter().any(|&d| d < 5.0) && depths.iter().any(|&d| d > 5.0), "camera 4 keeps some observations: {depths:?}");
+    for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+        let (cameras, points, observations) = robust_scene::<f64>();
+        let mut s = SceneR { cameras, points, observations };
+        assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let x1 = perturbed(&x);
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+        let (cameras, points, observations) = robust_scene::<f32>();
+        let mut s = SceneRF { cameras, points, observations };
+        assert_eq!(LmProblemInternals::<f32>::device_unsupported(&s), None);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let x1 = perturbed(&x);
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-5 * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < 1e-4 && chk.hess_err < 1e-4, "{wide:?}: {chk:?}");
+    }
+    let run = |gpu: Option<&GpuDevice>| {
+        let (cameras, points, observations) = robust_scene::<f64>();
+        let mut s = SceneR { cameras, points, observations };
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&options(gpu, true));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        (r.start_cost, r.end_cost)
+    };
+    let (start, cpu) = run(None);
+    assert!(cpu < 0.5 * start, "the scene converges past its outliers: {start} to {cpu}");
+    for d in devices() {
+        let (_, device) = run(Some(&d));
         assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
     }
 }
