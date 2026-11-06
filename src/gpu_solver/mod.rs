@@ -10,7 +10,7 @@ use arael_gpu::GpuError;
 use arael_gpu::{GpuPrecision, RefineStats};
 
 use crate::device::DeviceRoot;
-use crate::simple_lm::{LmProblemInternals, ResidentAttempt};
+use crate::simple_lm::{DeviceFailure, LmProblemInternals, ResidentAttempt};
 
 pub(crate) mod solver;
 
@@ -27,8 +27,10 @@ pub(crate) mod solver;
 ///   the device ([`ResidentLoop`](crate::simple_lm::ResidentLoop)), the
 ///   parameters f64 there whatever `T`.
 ///
-/// A device failure past setup panics: the LM loop has no way to report it.
-/// `Send`, so a solver moves between threads as on the CPU.
+/// Every device operation can fail with a [`DeviceFailure`], which ends
+/// the solve; the inner results of a factorization or a damped solve are
+/// the numerical outcomes the loop raises lambda on. `Send`, so a solver
+/// moves between threads as on the CPU.
 pub(crate) trait GpuSolver<T>: Send {
     /// The device's runtime and the wide scalar, for the verbose log:
     /// `cuda`, `cuda df32`, `hip`, `hip df32`.
@@ -37,12 +39,13 @@ pub(crate) trait GpuSolver<T>: Send {
     fn precision(&self) -> GpuPrecision;
 
     /// Factorize the matrix whose tile values are `vals`, in the storage
-    /// order of the structure the factor was built for.
-    fn factorize(&mut self, vals: &[T]) -> Result<(), SupernodalError>;
+    /// order of the structure the factor was built for; the inner `Err`
+    /// for a matrix that is not positive definite.
+    fn factorize(&mut self, vals: &[T]) -> Result<Result<(), SupernodalError>, DeviceFailure>;
     /// Solve in place with the last factorization.
-    fn solve(&mut self, x: &mut [T]);
+    fn solve(&mut self, x: &mut [T]) -> Result<(), DeviceFailure>;
     /// [`solve`](Self::solve) of an f64 vector: a refinement's correction.
-    fn solve_f64(&mut self, x: &mut [f64]);
+    fn solve_f64(&mut self, x: &mut [f64]) -> Result<(), DeviceFailure>;
 
     /// Build the reduction by `schur` of matrices with the structure
     /// `hsym`, or with `None` the whole system (nothing eliminated), on the
@@ -57,9 +60,7 @@ pub(crate) trait GpuSolver<T>: Send {
     /// the gradient, refined under `refine` (`(max_steps, tolerance)`), the
     /// step into `delta`; `None` when an eliminated block or S is not
     /// positive definite.
-    fn solve_reduced(&mut self, hvals: &[T], grad: &[T], refine: Option<(usize, f64)>, delta: &mut [T]) -> Option<RefineStats>;
-    /// H's values on the device that are not finite.
-    fn h_nonfinite(&self) -> usize;
+    fn solve_reduced(&mut self, hvals: &[T], grad: &[T], refine: Option<(usize, f64)>, delta: &mut [T]) -> Result<Option<RefineStats>, DeviceFailure>;
 
     /// Lay `root` out for the device assembly against the reduction's
     /// structure `hsym`, whose scalar diagonal is at `bdiag_pos` in its
@@ -76,28 +77,28 @@ pub(crate) trait GpuSolver<T>: Send {
     /// Assemble at `params` on the device into the reduction's inputs,
     /// returning the cost; the gradient and the undamped diagonal come back
     /// to the host.
-    fn route_compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T]) -> T;
+    fn route_compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T]) -> Result<T, DeviceFailure>;
     /// The undamped diagonal of the last [`route_compute`](Self::route_compute).
     fn route_diagonal(&self, diagonal: &mut [T]);
 
     /// [`ResidentLoop::start`](crate::simple_lm::ResidentLoop::start).
-    fn start(&mut self, x: &[T], floor: Option<f64>);
+    fn start(&mut self, x: &[T], floor: Option<f64>) -> Result<(), DeviceFailure>;
     /// [`ResidentLoop::linearize`](crate::simple_lm::ResidentLoop::linearize).
-    fn linearize(&mut self);
+    fn linearize(&mut self) -> Result<(), DeviceFailure>;
     /// [`ResidentLoop::attempt`](crate::simple_lm::ResidentLoop::attempt)
     /// at `lambda`, refined under `refine`, with the refinement's outcome
     /// (`None` for a system that is not positive definite).
-    fn attempt(&mut self, lambda: f64, refine: Option<(usize, f64)>) -> (Option<RefineStats>, ResidentAttempt);
+    fn attempt(&mut self, lambda: f64, refine: Option<(usize, f64)>) -> Result<(Option<RefineStats>, ResidentAttempt), DeviceFailure>;
     /// [`ResidentLoop::accept`](crate::simple_lm::ResidentLoop::accept).
     fn accept(&mut self);
     /// [`ResidentLoop::params`](crate::simple_lm::ResidentLoop::params).
-    fn params(&mut self, x: &mut [T]);
+    fn params(&mut self, x: &mut [T]) -> Result<(), DeviceFailure>;
     /// [`ResidentLoop::vectors`](crate::simple_lm::ResidentLoop::vectors).
-    fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]);
+    fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]) -> Result<(), DeviceFailure>;
     /// [`ResidentLoop::nonfinite`](crate::simple_lm::ResidentLoop::nonfinite).
-    fn nonfinite(&mut self) -> [usize; 4];
+    fn nonfinite(&mut self) -> Result<[usize; 4], DeviceFailure>;
     /// [`ResidentLoop::finish`](crate::simple_lm::ResidentLoop::finish).
-    fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]);
+    fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]) -> Result<(), DeviceFailure>;
 }
 
 /// The scalars of an attempt as [`ResidentAttempt`], `solved` from its outcome.

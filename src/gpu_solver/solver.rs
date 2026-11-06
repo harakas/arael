@@ -15,7 +15,7 @@ use arael_gpu::{GpuPrecision, RefineStats};
 use super::{GpuSolver, narrow, resident_attempt};
 use crate::device::DeviceRoot;
 use crate::device::DeviceAssembly;
-use crate::simple_lm::{LmProblemInternals, ResidentAttempt};
+use crate::simple_lm::{DeviceFailure, LmProblemInternals, ResidentAttempt};
 
 /// The factor, the reduction and the route on one [`Device`]; the route
 /// first, so its graphs are dropped before the blocks they record.
@@ -58,9 +58,9 @@ struct Route<T, D: Device> {
     accept_due: bool,
 }
 
-/// `r`'s value; a device failure past setup has nowhere to go but a panic.
-fn on_device<V>(r: Result<V, GpuError>, what: &str) -> V {
-    r.unwrap_or_else(|e| panic!("the GPU {what} failed: {e}"))
+/// `r`'s value, or the failure of the device operation `operation`.
+fn on_device<V>(r: Result<V, GpuError>, operation: &'static str) -> Result<V, DeviceFailure> {
+    r.map_err(|e| DeviceFailure { operation, message: e.to_string() })
 }
 
 impl<T, D: Device> DeviceSolver<T, D> {
@@ -135,11 +135,12 @@ fn run_graph<D: Device, K: PartialEq>(
 
 impl<T: crate::utils::Float, D: Device> DeviceSolver<T, D> {
     /// The pending accept applied, without waiting.
-    fn settle(&mut self) {
+    fn settle(&mut self) -> Result<(), DeviceFailure> {
         let r = self.route.as_mut().expect("a device route");
         if std::mem::take(&mut r.accept_due) {
-            on_device(accept_on_device(&r.asm, &r.vec), "accept");
+            on_device(accept_on_device(&r.asm, &r.vec), "accept")?;
         }
+        Ok(())
     }
 }
 
@@ -155,19 +156,19 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         self.factor.precision()
     }
 
-    fn factorize(&mut self, vals: &[T]) -> Result<(), SupernodalError> {
+    fn factorize(&mut self, vals: &[T]) -> Result<Result<(), SupernodalError>, DeviceFailure> {
         match self.factor.factorize(vals) {
-            Ok(()) => Ok(()),
-            Err(FactorizeError::NotPositiveDefinite) => Err(SupernodalError::NotPositiveDefinite),
-            Err(FactorizeError::Device(e)) => panic!("the GPU factorization failed: {e}"),
+            Ok(()) => Ok(Ok(())),
+            Err(FactorizeError::NotPositiveDefinite) => Ok(Err(SupernodalError::NotPositiveDefinite)),
+            Err(FactorizeError::Device(e)) => on_device(Err(e), "factorization"),
         }
     }
 
-    fn solve(&mut self, x: &mut [T]) {
+    fn solve(&mut self, x: &mut [T]) -> Result<(), DeviceFailure> {
         on_device(self.factor.solve(x), "solve")
     }
 
-    fn solve_f64(&mut self, x: &mut [f64]) {
+    fn solve_f64(&mut self, x: &mut [f64]) -> Result<(), DeviceFailure> {
         on_device(self.factor.solve(x), "solve")
     }
 
@@ -191,18 +192,13 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         self.schur.is_some()
     }
 
-    fn solve_reduced(&mut self, hvals: &[T], grad: &[T], refine: Option<(usize, f64)>, delta: &mut [T]) -> Option<RefineStats> {
+    fn solve_reduced(&mut self, hvals: &[T], grad: &[T], refine: Option<(usize, f64)>, delta: &mut [T]) -> Result<Option<RefineStats>, DeviceFailure> {
         let gs = self.schur.as_mut().expect("the device reduction is built with the Schur symbolic");
         match gs.solve(&mut self.factor, hvals, grad, refine, delta) {
-            Ok(stats) => Some(stats),
-            Err(GpuSchurError::Eliminated { .. } | GpuSchurError::Reduced) => None,
-            Err(GpuSchurError::Device(e)) => panic!("the GPU reduced solve failed: {e}"),
+            Ok(stats) => Ok(Some(stats)),
+            Err(GpuSchurError::Eliminated { .. } | GpuSchurError::Reduced) => Ok(None),
+            Err(GpuSchurError::Device(e)) => on_device(Err(e), "reduced solve"),
         }
-    }
-
-    fn h_nonfinite(&self) -> usize {
-        let gs = self.schur.as_ref().expect("a device route has its reduction");
-        on_device(gs.h_values(), "read of H").iter().filter(|v| !v.is_finite()).count()
     }
 
     fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex], threads: usize) -> Result<(), GpuError> {
@@ -243,47 +239,50 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         }
     }
 
-    fn route_compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T]) -> T {
+    fn route_compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T]) -> Result<T, DeviceFailure> {
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a device route");
+        // what the device holds is the last compute's only once this one
+        // ends
+        r.live = false;
         if r.stale {
             problem.update_params(params);
-            on_device(r.asm.refresh(problem.device_root().expect("a device route's problem has a device root")), "upload of the model's data");
+            on_device(r.asm.refresh(problem.device_root().expect("a device route's problem has a device root")), "upload of the model's data")?;
             r.stale = false;
         }
         let n = grad.len();
         r.host.clear();
         r.host.extend(params.iter().map(|&v| SchurReal::to_f64(v)));
-        on_device(r.vec.write_x(&r.host), "upload of the parameters");
+        on_device(r.vec.write_x(&r.host), "upload of the parameters")?;
         let (g, h, cost) = (gs.rhs_target(), gs.h_target(), r.vec.slot(S_COST_X));
         let queued = r.asm.assemble_at(r.vec.x(), g, n, h, r.nh, cost).and_then(|()| r.vec.gather_diag(h));
-        on_device(queued, "assembly");
+        on_device(queued, "assembly")?;
         let diag = r.vec.diag();
         let read = read_values(&**r.asm.device(), self.wide, &[(g.0, g.1, n), (diag.0, diag.1, n), (cost.0, cost.1, 1)], &mut r.bytes, &mut r.host);
-        on_device(read, "read of the gradient");
+        on_device(read, "read of the gradient")?;
         narrow(grad, &r.host[..n]);
         narrow(&mut r.diag_host, &r.host[n..2 * n]);
         r.live = true;
-        T::from(r.host[2 * n]).unwrap()
+        Ok(T::from(r.host[2 * n]).unwrap())
     }
 
     fn route_diagonal(&self, diagonal: &mut [T]) {
         diagonal.copy_from_slice(&self.route.as_ref().expect("a device route").diag_host);
     }
 
-    fn start(&mut self, x: &[T], floor: Option<f64>) {
+    fn start(&mut self, x: &[T], floor: Option<f64>) -> Result<(), DeviceFailure> {
         let r = self.route.as_mut().expect("a resident solve has its device route");
         r.floor = floor;
         r.accept_due = false;
         r.host.clear();
         r.host.extend(x.iter().map(|&v| SchurReal::to_f64(v)));
-        on_device(r.vec.write_x(&r.host), "upload of the parameters");
+        on_device(r.vec.write_x(&r.host), "upload of the parameters")?;
         if r.live {
             // this linearization was assembled there: its diagonal pass only
             let gs = self.schur.as_ref().expect("a device route has its reduction");
-            on_device(r.vec.linearized(gs.rhs_target(), gs.h_target(), r.floor), "linearization");
+            on_device(r.vec.linearized(gs.rhs_target(), gs.h_target(), r.floor), "linearization")
         } else {
-            self.linearize();
+            self.linearize()
         }
     }
 
@@ -291,9 +290,10 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
     /// parameters after it (the assembly and the pass over the diagonal and
     /// the gradient), without waiting. An accept with its linearization is
     /// one captured graph.
-    fn linearize(&mut self) {
+    fn linearize(&mut self) -> Result<(), DeviceFailure> {
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a device route");
+        r.live = false;
         let accept = std::mem::take(&mut r.accept_due);
         let key = (gs.graph_key(&self.factor, None), r.asm.generation(), r.floor.map_or(u64::MAX, f64::to_bits));
         let (asm, vec, nh, floor) = (&r.asm, &r.vec, r.nh, r.floor);
@@ -306,15 +306,16 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
             vec.linearized(g, h, floor)
         };
         let queued = if accept { run_graph(&**asm.device(), &mut r.step_graph, key, launches) } else { launches() };
-        on_device(queued, "linearization");
+        on_device(queued, "linearization")?;
         r.live = true;
+        Ok(())
     }
 
-    fn attempt(&mut self, lambda: f64, refine: Option<(usize, f64)>) -> (Option<RefineStats>, ResidentAttempt) {
+    fn attempt(&mut self, lambda: f64, refine: Option<(usize, f64)>) -> Result<(Option<RefineStats>, ResidentAttempt), DeviceFailure> {
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let gf = &self.factor;
         let r = self.route.as_mut().expect("a resident solve has its device route");
-        on_device(r.vec.set_lambda(lambda), "upload of the damping");
+        on_device(r.vec.set_lambda(lambda), "upload of the damping")?;
         let key = (gs.graph_key(gf, refine), r.asm.generation());
         let (asm, vec) = (&r.asm, &r.vec);
         let launches = || {
@@ -323,18 +324,18 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
             vec.step(gs.step_view(), gs.rhs_target())?;
             asm.cost_at(vec.x_try(), vec.slot(S_COST_TRY))
         };
-        on_device(run_graph(&**asm.device(), &mut r.attempt_graph, key, launches), "attempt");
+        on_device(run_graph(&**asm.device(), &mut r.attempt_graph, key, launches), "attempt")?;
         let (mut status, mut scalars) = ([0u8; STATUS_BYTES], [0u8; 8 * N_SCALARS]);
         let (st, sc) = (gs.status_view(), vec.scalars());
-        on_device(asm.device().read_many(&mut [(st.0, st.1, &mut status[..]), (sc.0, sc.1, &mut scalars[..])]), "read of the attempt");
+        on_device(asm.device().read_many(&mut [(st.0, st.1, &mut status[..]), (sc.0, sc.1, &mut scalars[..])]), "read of the attempt")?;
         let solved = match gs.outcome(&status, refine) {
             Ok(stats) => Some(stats),
             Err(GpuSchurError::Eliminated { .. } | GpuSchurError::Reduced) => None,
-            Err(GpuSchurError::Device(e)) => panic!("the GPU attempt failed: {e}"),
+            Err(GpuSchurError::Device(e)) => return on_device(Err(e), "attempt"),
         };
         let mut values = [0.0f64; N_SCALARS];
         self.wide.decode(&scalars, &mut values);
-        (solved, resident_attempt(solved.is_some(), &Scalars::from_values(&values)))
+        Ok((solved, resident_attempt(solved.is_some(), &Scalars::from_values(&values))))
     }
 
     fn accept(&mut self) {
@@ -342,41 +343,43 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         self.route.as_mut().expect("a resident solve has its device route").accept_due = true;
     }
 
-    fn params(&mut self, x: &mut [T]) {
-        self.settle();
+    fn params(&mut self, x: &mut [T]) -> Result<(), DeviceFailure> {
+        self.settle()?;
         let r = self.route.as_mut().expect("a resident solve has its device route");
         let at = r.vec.x();
-        on_device(read_values(&**r.asm.device(), self.wide, &[(at.0, at.1, x.len())], &mut r.bytes, &mut r.host), "read of the parameters");
+        on_device(read_values(&**r.asm.device(), self.wide, &[(at.0, at.1, x.len())], &mut r.bytes, &mut r.host), "read of the parameters")?;
         narrow(x, &r.host);
+        Ok(())
     }
 
-    fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]) {
+    fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]) -> Result<(), DeviceFailure> {
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a resident solve has its device route");
         let n = grad.len();
         let (g, d, s) = (gs.rhs_target(), r.vec.diag(), gs.step_view());
         let read = read_values(&**r.asm.device(), self.wide, &[(g.0, g.1, n), (d.0, d.1, n), (s.0, s.1, n)], &mut r.bytes, &mut r.host);
-        on_device(read, "read of the vectors");
+        on_device(read, "read of the vectors")?;
         narrow(grad, &r.host[..n]);
         narrow(diagonal, &r.host[n..2 * n]);
         narrow(step, &r.host[2 * n..]);
+        Ok(())
     }
 
-    fn nonfinite(&mut self) -> [usize; 4] {
+    fn nonfinite(&mut self) -> Result<[usize; 4], DeviceFailure> {
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a resident solve has its device route");
         let n = r.vec.len();
         let (g, d, x, h) = (gs.rhs_target(), r.vec.diag(), r.vec.x(), gs.h_target());
         let read = read_values(&**r.asm.device(), self.wide, &[(g.0, g.1, n), (d.0, d.1, n), (x.0, x.1, n), (h.0, h.1, r.nh)], &mut r.bytes, &mut r.host);
-        on_device(read, "read of the vectors");
+        on_device(read, "read of the vectors")?;
         let count = |v: &[f64]| v.iter().filter(|v| !v.is_finite()).count();
         let v = &r.host;
-        [count(&v[..n]), count(&v[n..2 * n]), count(&v[2 * n..3 * n]), count(&v[3 * n..])]
+        Ok([count(&v[..n]), count(&v[n..2 * n]), count(&v[2 * n..3 * n]), count(&v[3 * n..])])
     }
 
-    fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]) {
-        self.params(x);
+    fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]) -> Result<(), DeviceFailure> {
+        self.params(x)?;
         let r = self.route.as_ref().expect("a resident solve has its device route");
-        on_device(r.asm.restore(problem.device_root_mut().expect("a device route's problem has a device root")), "read of the rotations");
+        on_device(r.asm.restore(problem.device_root_mut().expect("a device route's problem has a device root")), "read of the rotations")
     }
 }

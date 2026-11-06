@@ -401,7 +401,7 @@ where
         .iter()
         .map(|&lambda| {
             let mut delta = vec![T::zero(); n];
-            solver.solve_damped(n, &mut m, &diag, &diag, lambda, &grad, &mut delta).then_some(delta)
+            solver.solve_damped(n, &mut m, &diag, &diag, lambda, &grad, &mut delta).expect("a CPU solve has no device to fail").then_some(delta)
         })
         .collect()
 }

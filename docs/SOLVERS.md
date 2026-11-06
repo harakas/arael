@@ -636,9 +636,15 @@ pub struct SolveFailure<T> {
 pub enum SolveFailureKind {
     Setup(SetupError),  // the linear system could not be built or factored
     DegenerateDiagonal { param: usize, fault: DiagonalFault },
+    Device(DeviceFailure),  // a GPU operation failed
 }
 
 pub enum DiagonalFault { Nan, Negative, Zero }
+
+pub struct DeviceFailure {
+    pub operation: &'static str,  // "assembly", "attempt", "setup of the reduction", ...
+    pub message: String,          // the error as the device's runtime reported it
+}
 ```
 
 `Setup(SetupError)` is a structural failure: a band element outside the
@@ -653,6 +659,14 @@ is poisoned (the diagonal is a sum of squares, so neither can happen in
 healthy arithmetic); `Zero` means no constraint curvature reaches the
 parameter -- see `LmConfig::min_diagonal` for damping through the
 transient case.
+
+`Device` means a GPU operation failed: setting the route up (a kernel
+compile, an allocation) or a step of the solve (an upload, a launch, a
+read). The solve stops there. On the route that runs the LM loop on the
+device, the device's state is not read back after a failure (an accept
+may be half applied), so `partial` holds the parameters and the cost
+where the device took over, which agree with the model's own references.
+The next solve on the same device starts afresh.
 
 When the solve broke after accepted steps, `partial` carries a full
 `LmResult` with `status = LmStatus::Aborted` -- the best accepted
@@ -1027,7 +1041,9 @@ Separately created values have their own streams and memory, and their
 solves can run at the same time. `SchurPlan::gpu_factor` reports the
 route. A device whose runtime is not compiled in fails the solve with
 `SetupError::SolverUnavailable`, parameters untouched, like the other
-optional backends. It pays where the factor is large: the reduced system
+optional backends; a device that fails during the solve, setup included,
+fails it with `SolveFailureKind::Device` (see Solve failures). It pays
+where the factor is large: the reduced system
 of a bundle adjustment from a few hundred cameras up, SLAM maps with
 landmarks. A whole system of tens of thousands of tiny supernodes stays
 faster on the CPU, as do pose graphs.

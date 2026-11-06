@@ -155,7 +155,7 @@ fn status_reports_max_iterations() {
 // ---------------------------------------------------------------------------
 
 use arael::simple_lm::{
-    Dense, LambdaDriver, LambdaState, LambdaStep, LmSolver, SetupError, SolverReport,
+    Dense, LambdaDriver, LambdaState, LambdaStep, LmSolver, SolveFailureKind, SolverReport,
 };
 use std::time::Duration;
 
@@ -263,7 +263,7 @@ impl LmSolver<f64> for NeverFactorizes {
     fn compute(
         &mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64],
         grad: &mut [f64], m: &mut Vec<f64>, ctx: &mut arael::threads::Context,
-    ) -> Result<f64, SetupError> {
+    ) -> Result<f64, SolveFailureKind> {
         <Dense as LmSolver<f64>>::compute(&mut self.0, problem, params, grad, m, ctx)
     }
     fn extract_diagonal(&self, m: &Vec<f64>, d: &mut [f64]) {
@@ -272,8 +272,8 @@ impl LmSolver<f64> for NeverFactorizes {
     fn solve_damped(
         &mut self, _n: usize, _m: &mut Vec<f64>, _d: &[f64], _damp: &[f64],
         _lambda: f64, _g: &[f64], _delta: &mut [f64],
-    ) -> bool {
-        false // "not positive definite", every time
+    ) -> Result<bool, SolveFailureKind> {
+        Ok(false) // "not positive definite", every time
     }
     fn matrix_nonfinite_count(&self, m: &Vec<f64>) -> usize {
         <Dense as LmSolver<f64>>::matrix_nonfinite_count(&self.0, m)

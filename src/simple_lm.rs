@@ -587,7 +587,7 @@ pub enum DiagonalFault {
 }
 
 /// What broke a solve (see [`SolveFailure`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SolveFailureKind {
     /// The linear system could not be built or factored ([`SetupError`]).
     Setup(SetupError),
@@ -599,7 +599,47 @@ pub enum SolveFailureKind {
         /// How its diagonal was bad.
         fault: DiagonalFault,
     },
+    /// A GPU operation failed: its setup (a compile, an allocation) or a
+    /// step of the solve on it.
+    Device(DeviceFailure),
 }
+
+impl From<SetupError> for SolveFailureKind {
+    fn from(e: SetupError) -> Self {
+        SolveFailureKind::Setup(e)
+    }
+}
+
+impl From<DeviceFailure> for SolveFailureKind {
+    fn from(e: DeviceFailure) -> Self {
+        SolveFailureKind::Device(e)
+    }
+}
+
+/// A GPU operation that failed during a solve (see
+/// [`SolveFailureKind::Device`]).
+///
+/// ```
+/// use arael::simple_lm::DeviceFailure;
+/// let f = DeviceFailure { operation: "assembly", message: "out of memory".to_string() };
+/// assert_eq!(f.to_string(), "the GPU assembly failed: out of memory");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceFailure {
+    /// What the solve asked of the device: `"assembly"`, `"attempt"`,
+    /// `"setup of the factor"`, ...
+    pub operation: &'static str,
+    /// The error as the device's runtime reported it.
+    pub message: String,
+}
+
+impl std::fmt::Display for DeviceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the GPU {} failed: {}", self.operation, self.message)
+    }
+}
+
+impl std::error::Error for DeviceFailure {}
 
 /// A failed solve: what broke, and the best ACCEPTED state before the
 /// break when there is one. `partial` is `None` when the very first
@@ -634,6 +674,7 @@ impl<T> std::fmt::Display for SolveFailure<T> {
                 };
                 write!(f, "degenerate Hessian diagonal at parameter {}: {}", param, why)?;
             }
+            SolveFailureKind::Device(e) => write!(f, "{e}")?,
         }
         match &self.partial {
             Some(p) => write!(f, " (after {} accepted steps)", p.accepted_iterations),
@@ -2014,17 +2055,20 @@ pub trait LmSolver<T: Float> {
     /// cost at `params` (a free byproduct of assembly); the LM loop uses
     /// it for the first evaluation of a solve.
     ///
-    /// Returns [`SetupError`] when the linear system cannot be built or its
-    /// structure factored (band overflow, an unconstrained parameter, a failed
-    /// symbolic factorization, an illegal marginalization). The loop turns that
-    /// into [`SolveFailureKind::Setup`] and stops without a step.
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T], matrix: &mut Self::Matrix, ctx: &mut crate::threads::Context) -> Result<T, SetupError>;
+    /// Returns [`SolveFailureKind::Setup`] when the linear system cannot be
+    /// built or its structure factored (band overflow, an unconstrained
+    /// parameter, a failed symbolic factorization, an illegal
+    /// marginalization; a [`SetupError`] converts with `?`), and
+    /// [`SolveFailureKind::Device`] when a GPU operation fails. The loop
+    /// stops on it without a step.
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T], matrix: &mut Self::Matrix, ctx: &mut crate::threads::Context) -> Result<T, SolveFailureKind>;
 
     /// Extract all diagonal elements from the matrix.
     fn extract_diagonal(&self, matrix: &Self::Matrix, diagonal: &mut [T]);
 
-    /// Apply LM damping and solve. Returns false if the system is not positive
-    /// definite.
+    /// Apply LM damping and solve. Returns `Ok(false)` if the system is not
+    /// positive definite, and [`SolveFailureKind::Device`] when a GPU
+    /// operation fails, which stops the loop.
     ///
     /// Sets the matrix diagonal to `diagonal[i] + lambda * damp[i]`, where
     /// `diagonal` is the undamped Gauss-Newton diagonal (captured once per
@@ -2044,7 +2088,7 @@ pub trait LmSolver<T: Float> {
         lambda: T,
         grad: &[T],
         delta: &mut [T],
-    ) -> bool;
+    ) -> Result<bool, SolveFailureKind>;
 
     /// Count non-finite (NaN / inf) entries in the matrix. Used by the
     /// main loop for diagnostic output when Cholesky rejects a solve.
@@ -2122,25 +2166,26 @@ pub trait LmSolver<T: Float> {
 pub trait ResidentLoop<T> {
     /// Take the loop over at `x`, whose linearization the host has checked;
     /// `floor` is [`LmConfig::min_diagonal`].
-    fn start(&mut self, x: &[T], floor: Option<T>);
+    fn start(&mut self, x: &[T], floor: Option<T>) -> Result<(), DeviceFailure>;
     /// Linearize at the device's parameters, without waiting: the
     /// linearization's checks come with the next attempt.
-    fn linearize(&mut self);
+    fn linearize(&mut self) -> Result<(), DeviceFailure>;
     /// One damped attempt at `lambda`: the step, the trial point and its
     /// cost, read back in one wait with the last linearization's checks.
-    fn attempt(&mut self, lambda: T) -> ResidentAttempt;
-    /// The last attempt's trial point becomes the parameters, re-centred.
+    fn attempt(&mut self, lambda: T) -> Result<ResidentAttempt, DeviceFailure>;
+    /// The last attempt's trial point becomes the parameters, re-centred
+    /// (on the device with the next linearization or read).
     fn accept(&mut self);
     /// The parameters, read back.
-    fn params(&mut self, x: &mut [T]);
+    fn params(&mut self, x: &mut [T]) -> Result<(), DeviceFailure>;
     /// The gradient, the undamped diagonal and the last step, read back.
-    fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]);
+    fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]) -> Result<(), DeviceFailure>;
     /// The non-finite entries of the gradient, the diagonal, the
     /// parameters and H.
-    fn nonfinite(&mut self) -> [usize; 4];
+    fn nonfinite(&mut self) -> Result<[usize; 4], DeviceFailure>;
     /// End the solve: the parameters read back into `x`, the reference
     /// rotations into the model.
-    fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]);
+    fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]) -> Result<(), DeviceFailure>;
 }
 
 /// What a [`ResidentLoop::attempt`] read back.
@@ -2175,16 +2220,16 @@ pub struct Dense;
 impl LmSolver<f64> for Dense {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; n * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], hessian: &mut Vec<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], hessian: &mut Vec<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveFailureKind> {
         Ok(problem.calc_grad_hessian_dense_with_context(params, grad, hessian, ctx))
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
         let n = diagonal.len();
         for i in 0..n { diagonal[i] = matrix[i * n + i]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> Result<bool, SolveFailureKind> {
         for i in 0..n { matrix[i * n + i] = diagonal[i] + lambda * damp[i]; }
-        solve_spd(n, matrix, grad, delta)
+        Ok(solve_spd(n, matrix, grad, delta))
     }
     fn matrix_nonfinite_count(&self, matrix: &Vec<f64>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
@@ -2195,16 +2240,16 @@ impl LmSolver<f64> for Dense {
 impl LmSolver<f32> for Dense {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; n * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f32>, params: &[f32], grad: &mut [f32], hessian: &mut Vec<f32>, ctx: &mut crate::threads::Context) -> Result<f32, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f32>, params: &[f32], grad: &mut [f32], hessian: &mut Vec<f32>, ctx: &mut crate::threads::Context) -> Result<f32, SolveFailureKind> {
         Ok(problem.calc_grad_hessian_dense_with_context(params, grad, hessian, ctx))
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
         let n = diagonal.len();
         for i in 0..n { diagonal[i] = matrix[i * n + i]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], damp: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], damp: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> Result<bool, SolveFailureKind> {
         for i in 0..n { matrix[i * n + i] = diagonal[i] + lambda * damp[i]; }
-        solve_spd_f32(n, matrix, grad, delta)
+        Ok(solve_spd_f32(n, matrix, grad, delta))
     }
     fn matrix_nonfinite_count(&self, matrix: &Vec<f32>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
@@ -2234,14 +2279,14 @@ impl Band {
 impl LmSolver<f64> for Band {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveFailureKind> {
         Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd, ctx)?)
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
         let ldab = self.kd + 1;
         for i in 0..diagonal.len() { diagonal[i] = matrix[self.kd + i * ldab]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> Result<bool, SolveFailureKind> {
         // Band Cholesky destroys the matrix, so factor a copy -- in the
         // reused scratch buffer, not a fresh allocation per retry.
         let ldab = self.kd + 1;
@@ -2249,7 +2294,7 @@ impl LmSolver<f64> for Band {
         self.scratch64.copy_from_slice(matrix);
         for i in 0..n { self.scratch64[self.kd + i * ldab] = diagonal[i] + lambda * damp[i]; }
         delta.copy_from_slice(grad);
-        solve_spd_band(n, self.kd, &mut self.scratch64, delta)
+        Ok(solve_spd_band(n, self.kd, &mut self.scratch64, delta))
     }
     fn matrix_nonfinite_count(&self, matrix: &Vec<f64>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
@@ -2260,20 +2305,20 @@ impl LmSolver<f64> for Band {
 impl LmSolver<f32> for Band {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>, ctx: &mut crate::threads::Context) -> Result<f32, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>, ctx: &mut crate::threads::Context) -> Result<f32, SolveFailureKind> {
         Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd, ctx)?)
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
         let ldab = self.kd + 1;
         for i in 0..diagonal.len() { diagonal[i] = matrix[self.kd + i * ldab]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], damp: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], damp: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> Result<bool, SolveFailureKind> {
         let ldab = self.kd + 1;
         self.scratch32.resize(matrix.len(), 0.0);
         self.scratch32.copy_from_slice(matrix);
         for i in 0..n { self.scratch32[self.kd + i * ldab] = diagonal[i] + lambda * damp[i]; }
         delta.copy_from_slice(grad);
-        solve_spd_band_f32(n, self.kd, &mut self.scratch32, delta)
+        Ok(solve_spd_band_f32(n, self.kd, &mut self.scratch32, delta))
     }
     fn matrix_nonfinite_count(&self, matrix: &Vec<f32>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
@@ -2303,20 +2348,20 @@ impl BandLapack {
 impl LmSolver<f64> for BandLapack {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveFailureKind> {
         Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd, ctx)?)
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
         let ldab = self.kd + 1;
         for i in 0..diagonal.len() { diagonal[i] = matrix[self.kd + i * ldab]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> Result<bool, SolveFailureKind> {
         let ldab = self.kd + 1;
         self.scratch64.resize(matrix.len(), 0.0);
         self.scratch64.copy_from_slice(matrix);
         for i in 0..n { self.scratch64[self.kd + i * ldab] = diagonal[i] + lambda * damp[i]; }
         delta.copy_from_slice(grad);
-        solve_spd_band_lapack(n, self.kd, &mut self.scratch64, delta)
+        Ok(solve_spd_band_lapack(n, self.kd, &mut self.scratch64, delta))
     }
     fn matrix_nonfinite_count(&self, matrix: &Vec<f64>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
@@ -2328,20 +2373,20 @@ impl LmSolver<f64> for BandLapack {
 impl LmSolver<f32> for BandLapack {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>, ctx: &mut crate::threads::Context) -> Result<f32, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>, ctx: &mut crate::threads::Context) -> Result<f32, SolveFailureKind> {
         Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd, ctx)?)
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
         let ldab = self.kd + 1;
         for i in 0..diagonal.len() { diagonal[i] = matrix[self.kd + i * ldab]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], damp: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], damp: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> Result<bool, SolveFailureKind> {
         let ldab = self.kd + 1;
         self.scratch32.resize(matrix.len(), 0.0);
         self.scratch32.copy_from_slice(matrix);
         for i in 0..n { self.scratch32[self.kd + i * ldab] = diagonal[i] + lambda * damp[i]; }
         delta.copy_from_slice(grad);
-        solve_spd_band_lapack_f32(n, self.kd, &mut self.scratch32, delta)
+        Ok(solve_spd_band_lapack_f32(n, self.kd, &mut self.scratch32, delta))
     }
     fn matrix_nonfinite_count(&self, matrix: &Vec<f32>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
@@ -2986,6 +3031,8 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     // linearization's checks come with its first attempt's read, made at
     // iteration `lin_iter`.
     let mut resident = false;
+    // The parameters and the cost where the device took over.
+    let mut handover: Option<(Vec<T>, T)> = None;
     let mut lin_pending = false;
     let mut lin_iter = 0usize;
     // What the driver and the observer see of the vectors on such a solve.
@@ -3007,7 +3054,10 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             // In place on the device, no wait. Only the first
             // linearization's cost is used, and that one comes from
             // `compute`.
-            solver.resident().expect("a resident solver keeps its loop").linearize();
+            if let Err(e) = solver.resident().expect("a resident solver keeps its loop").linearize() {
+                failure = Some(SolveFailureKind::Device(e));
+                break;
+            }
             lin_pending = true;
             lin_iter = iter;
             T::nan()
@@ -3015,10 +3065,11 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             match solver.compute(problem, &cur_x, &mut grad, matrix, ctx) {
                 Ok(c) => c,
                 Err(e) => {
-                    // The linear system could not be built or factored, so no
-                    // step is possible. On the first assembly nothing was
-                    // evaluated and there is no partial state.
-                    failure = Some(SolveFailureKind::Setup(e));
+                    // The linear system could not be built or factored, or
+                    // a device failed, so no step is possible. On the first
+                    // assembly nothing was evaluated and there is no partial
+                    // state.
+                    failure = Some(e);
                     if first {
                         start_cost = T::nan();
                         end_cost = T::nan();
@@ -3170,10 +3221,15 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         }
 
         // The handover: from this linearization on, a solver that can keeps
-        // the loop on its device.
+        // the loop on its device. Where it took over is what a device
+        // failure ends the solve at.
         if !resident && let Some(r) = solver.resident() {
-            r.start(&cur_x, floor);
+            if let Err(e) = r.start(&cur_x, floor) {
+                failure = Some(SolveFailureKind::Device(e));
+                break;
+            }
             resident = true;
+            handover = Some((cur_x.clone(), end_cost));
         }
 
         if !started {
@@ -3208,7 +3264,14 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             // On the device the attempt is the damped solve, the trial point
             // and its cost, read back with the pending checks in one wait.
             let dev = if resident {
-                Some(solver.resident().expect("a resident solver keeps its loop").attempt(lambda))
+                match solver.resident().expect("a resident solver keeps its loop").attempt(lambda) {
+                    Ok(a) => Some(a),
+                    Err(e) => {
+                        failure = Some(SolveFailureKind::Device(e));
+                        done = true;
+                        break;
+                    }
+                }
             } else {
                 None
             };
@@ -3217,7 +3280,14 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 None => {
                     // Both are shared refs, so with no floor the same slice serves for both.
                     let scale: &[T] = if floor.is_some() { &damp } else { &diagonal };
-                    solver.solve_damped(n, matrix, &diagonal, scale, lambda, &grad, &mut delta)
+                    match solver.solve_damped(n, matrix, &diagonal, scale, lambda, &grad, &mut delta) {
+                        Ok(solved) => solved,
+                        Err(e) => {
+                            failure = Some(e);
+                            done = true;
+                            break;
+                        }
+                    }
                 }
             };
             let mut ls_dt = Duration::ZERO;
@@ -3259,8 +3329,12 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                         break;
                     }
                 }
-                if config.device_driver_vectors {
-                    solver.resident().expect("a resident solver keeps its loop").vectors(&mut grad, &mut diagonal, &mut delta);
+                if config.device_driver_vectors
+                    && let Err(e) = solver.resident().expect("a resident solver keeps its loop").vectors(&mut grad, &mut diagonal, &mut delta)
+                {
+                    failure = Some(SolveFailureKind::Device(e));
+                    done = true;
+                    break;
                 }
             }
             let (hide_v, hide_x) = (hide_vectors(resident), hide_params(resident));
@@ -3272,7 +3346,14 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                     let step_us = timer.map_or(0, |t| t.elapsed().as_micros());
                     timer = Some(Instant::now());
                     let [n_nan_g, n_nan_d, n_nan_x, n_nan_m] = match resident {
-                        true => solver.resident().expect("a resident solver keeps its loop").nonfinite(),
+                        true => match solver.resident().expect("a resident solver keeps its loop").nonfinite() {
+                            Ok(counts) => counts,
+                            Err(e) => {
+                                failure = Some(SolveFailureKind::Device(e));
+                                done = true;
+                                break;
+                            }
+                        },
                         false => [
                             grad.iter().filter(|v| !v.is_finite()).count(),
                             diagonal.iter().filter(|v| !v.is_finite()).count(),
@@ -3426,8 +3507,13 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 if resident {
                     let r = solver.resident().expect("a resident solver keeps its loop");
                     r.accept();
-                    if config.device_observer_params && observer.is_some() {
-                        r.params(&mut cur_x);
+                    if config.device_observer_params
+                        && observer.is_some()
+                        && let Err(e) = r.params(&mut cur_x)
+                    {
+                        failure = Some(SolveFailureKind::Device(e));
+                        done = true;
+                        break;
                     }
                 } else {
                     problem.advance(&mut cur_x);
@@ -3644,9 +3730,27 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         }
     }
 
-    // The device's parameters and reference rotations come home.
+    // The device's parameters and reference rotations come home. After a
+    // device failure its state is not trusted (an accept may be applied in
+    // part), and a failed read leaves the model untouched: either way the
+    // solve ends where the device route took over, the parameters and the
+    // cost the model's own references hold.
     if resident {
-        solver.resident().expect("a resident solver keeps its loop").finish(problem, &mut cur_x);
+        let read = match failure {
+            Some(SolveFailureKind::Device(_)) => None,
+            _ => Some(solver.resident().expect("a resident solver keeps its loop").finish(problem, &mut try_x)),
+        };
+        match read {
+            Some(Ok(())) => cur_x.copy_from_slice(&try_x),
+            unread => {
+                if let Some(Err(e)) = unread {
+                    failure = Some(SolveFailureKind::Device(e));
+                }
+                let (x, cost) = handover.take().expect("a resident solve records its handover");
+                cur_x = x;
+                end_cost = cost;
+            }
+        }
     }
     if let Some(s) = solve_start { timing.total = s.elapsed(); }
     let result = LmResult {
@@ -3892,7 +3996,7 @@ impl LmSolver<f64> for SparseCoo {
         CscMatrix::empty(n)
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut CscMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut CscMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveFailureKind> {
         let n = matrix.n;
         if self.coo.n != n {
             self.coo = CooMatrix::new(n);
@@ -3910,7 +4014,7 @@ impl LmSolver<f64> for SparseCoo {
         }
     }
 
-    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> Result<bool, SolveFailureKind> {
         for i in 0..n { matrix.vals[matrix.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
         let mut dense = vec![0.0f64; n * n];
         for j in 0..n {
@@ -3921,7 +4025,7 @@ impl LmSolver<f64> for SparseCoo {
                 if i != j { dense[j * n + i] = v; }
             }
         }
-        solve_spd(n, &dense, grad, delta)
+        Ok(solve_spd(n, &dense, grad, delta))
     }
 }
 
@@ -3963,7 +4067,7 @@ impl LmSolver<f64> for SparseDirectCsc {
         CscMatrix::empty(n)
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut CscMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut CscMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveFailureKind> {
         if !self.pattern_built {
             // First call: use COO to discover pattern
             let n = matrix.n;
@@ -3986,7 +4090,7 @@ impl LmSolver<f64> for SparseDirectCsc {
         }
     }
 
-    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> Result<bool, SolveFailureKind> {
         for i in 0..n { matrix.vals[matrix.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
         // Use dense fallback for now
         let mut dense = vec![0.0f64; n * n];
@@ -3998,7 +4102,7 @@ impl LmSolver<f64> for SparseDirectCsc {
                 if i != j { dense[j * n + i] = v; }
             }
         }
-        solve_spd(n, &dense, grad, delta)
+        Ok(solve_spd(n, &dense, grad, delta))
     }
 }
 
@@ -5439,7 +5543,8 @@ impl Refine {
 
     /// Refine `x`, the solution of `a x = b` through a reduced-precision
     /// factor, as [`MixedPrecision`] describes: `correct` solves that factor
-    /// for the correction, in place on an f64 vector. Returns the steps
+    /// for the correction, in place on an f64 vector (a device's solve can
+    /// fail, which ends the refinement with its failure). Returns the steps
     /// taken, the final residual norm, and whether it stayed above the
     /// tolerance. `lap` accumulates the solve and residual times for the
     /// verbose log.
@@ -5453,8 +5558,8 @@ impl Refine {
         lap: &mut impl FnMut(&mut f64),
         t_solve: &mut f64,
         t_residual: &mut f64,
-        mut correct: impl FnMut(&mut [f64]),
-    ) -> (usize, f64, f64, bool) {
+        mut correct: impl FnMut(&mut [f64]) -> Result<(), DeviceFailure>,
+    ) -> Result<(usize, f64, f64, bool), DeviceFailure> {
         // The refinement runs in f64 whatever T: the residual accumulated in
         // f64 from the matrix's entries, the iterate kept in f64 until it is
         // handed back. For an f64 solver that is the native arithmetic; for
@@ -5477,7 +5582,7 @@ impl Refine {
         lap(t_residual);
         while rnorm > tol && steps < mp.max_refinements {
             self.x_prev.copy_from_slice(&self.x64);
-            correct(&mut self.r);
+            correct(&mut self.r)?;
             for (xi, di) in self.x64.iter_mut().zip(&self.r) {
                 *xi += *di;
             }
@@ -5501,7 +5606,7 @@ impl Refine {
         if short {
             self.shortfalls += 1;
         }
-        (steps, rnorm, bnorm, short)
+        Ok((steps, rnorm, bnorm, short))
     }
 }
 
@@ -5598,23 +5703,23 @@ pub(crate) fn bind_block_positions<T: crate::utils::Float, P: LmProblemInternals
     positions
 }
 
-/// [`SetupError::SolverUnavailable`] for a part of the GPU route that could
-/// not be set up, `e` logged.
+/// [`SolveFailureKind::Device`] for the part `operation` of the GPU route
+/// that could not be set up.
 #[cfg(feature = "gpu")]
-fn gpu_setup_failed(what: &str, e: arael_gpu::GpuError) -> SetupError {
-    warn!("GPU: {what} could not be set up: {e}");
-    SetupError::SolverUnavailable { solver: "gpu", reason: "the GPU route could not be set up (logged)" }
+fn gpu_setup_failed(operation: &'static str, e: arael_gpu::GpuError) -> SolveFailureKind {
+    SolveFailureKind::Device(DeviceFailure { operation, message: e.to_string() })
 }
 
 /// The device factor of `sn` on `dev`'s runtime;
-/// [`SetupError::SolverUnavailable`] when that runtime is not compiled in.
+/// [`SetupError::SolverUnavailable`] when that runtime is not compiled in,
+/// [`SolveFailureKind::Device`] when it cannot be set up.
 #[cfg(feature = "gpu")]
 fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
     dev: &GpuDevice,
     precision: arael_gpu::GpuPrecision,
     sn: &arael_faer::supernodal::SupernodalSymbolic,
     asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
-) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SetupError> {
+) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SolveFailureKind> {
     #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
     let wide = match dev.wide() {
         GpuWide::F64 => arael_gpu::Wide::F64,
@@ -5631,24 +5736,24 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
             let made = device_in(&dev.cuda, || arael_gpu::cuda::CudaDevice::new(dev.index));
             let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging));
             report_kernel_cache();
-            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the CUDA factor", e))?))
+            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("setup of the CUDA factor", e))?))
         }
         #[cfg(not(feature = "gpu-cuda"))]
         GpuBackend::Cuda => {
             let _ = (precision, sn, asym);
-            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the CUDA runtime is not compiled in (feature gpu-cuda)" })
+            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the CUDA runtime is not compiled in (feature gpu-cuda)" }.into())
         }
         #[cfg(feature = "gpu-hip")]
         GpuBackend::Hip => {
             let made = device_in(&dev.hip, || arael_gpu::hip::HipDevice::new(dev.index));
             let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging));
             report_kernel_cache();
-            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the HIP factor", e))?))
+            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("setup of the HIP factor", e))?))
         }
         #[cfg(not(feature = "gpu-hip"))]
         GpuBackend::Hip => {
             let _ = (precision, sn, asym);
-            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the HIP runtime is not compiled in (feature gpu-hip)" })
+            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the HIP runtime is not compiled in (feature gpu-hip)" }.into())
         }
     }
 }
@@ -5673,7 +5778,7 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
         schur: &arael_faer::schur::SchurSymbolic<SparseIndex>,
         hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
         factorized: bool,
-    ) -> Result<(), SetupError> {
+    ) -> Result<(), SolveFailureKind> {
         #[cfg(feature = "gpu")]
         if let Some(g) = self.gpu_solver.as_mut() {
             if !factorized {
@@ -5682,7 +5787,7 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
             }
             let built = g.prepare_reduction(Some(schur), hsym);
             report_kernel_cache();
-            return built.map_err(|e| gpu_setup_failed("the device reduction", e));
+            return built.map_err(|e| gpu_setup_failed("setup of the reduction", e));
         }
         let _ = (schur, hsym, factorized);
         Ok(())
@@ -5691,11 +5796,11 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
     /// The device reduction with nothing eliminated, for the whole system
     /// factorized on the GPU (the device factor built for `hsym`).
     #[cfg(feature = "gpu")]
-    fn prepare_whole(&mut self, hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), SetupError> {
+    fn prepare_whole(&mut self, hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), SolveFailureKind> {
         let Some(g) = self.gpu_solver.as_mut() else { return Ok(()) };
         let built = g.prepare_reduction(None, hsym);
         report_kernel_cache();
-        built.map_err(|e| gpu_setup_failed("the device reduction", e))
+        built.map_err(|e| gpu_setup_failed("setup of the reduction", e))
     }
 
     /// Build the device factor for a new symbolic when a GPU is asked for:
@@ -5706,7 +5811,7 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
         &mut self,
         sn: &arael_faer::supernodal::SupernodalSymbolic,
         asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
-    ) -> Result<(), SetupError> {
+    ) -> Result<(), SolveFailureKind> {
         let Some(dev) = self.gpu.as_ref() else {
             return Ok(());
         };
@@ -5722,7 +5827,7 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
         #[cfg(not(feature = "gpu"))]
         {
             let _ = (dev, sn, asym);
-            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "arael built without the `gpu` feature" })
+            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "arael built without the `gpu` feature" }.into())
         }
     }
 }
@@ -5745,8 +5850,9 @@ impl<T: crate::utils::Float> SnNumeric<T> {
 }
 
 impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> SnNumeric<T> {
-    /// Factor `a` and solve `a x = b` into `x`. `Err` when the factorization
-    /// fails (a pivot that is not positive; the caller raises lambda).
+    /// Factor `a` and solve `a x = b` into `x`. The inner `Err` when the
+    /// factorization fails (a pivot that is not positive; the caller raises
+    /// lambda), the outer one when a device operation fails.
     ///
     /// On the mixed route the factor is `f32` and the solution is refined
     /// against `a` as [`MixedPrecision`] describes, the counters updated.
@@ -5758,7 +5864,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         x: &mut [T],
         threads: usize,
         verbose: bool,
-    ) -> Result<(), arael_faer::supernodal::SupernodalError> {
+    ) -> Result<Result<(), arael_faer::supernodal::SupernodalError>, DeviceFailure> {
         use arael_faer::supernodal::{supernodal_factorize, supernodal_factorize_as, supernodal_solve, supernodal_solve_as};
         // Where the time goes, for the verbose log only: the clock is not
         // read otherwise.
@@ -5776,15 +5882,17 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         #[cfg(feature = "gpu")]
         {
             if let Some(g) = self.gpu_solver.as_deref_mut() {
-                g.factorize(a.vals())?;
+                if let Err(e) = g.factorize(a.vals())? {
+                    return Ok(Err(e));
+                }
                 let (runtime, precision) = (g.runtime(), g.precision());
                 lap(&mut t_factor);
                 x.copy_from_slice(b);
-                g.solve(x);
+                g.solve(x)?;
                 lap(&mut t_solve);
                 let refined = match self.mixed {
                     Some(mp) if mp.max_refinements > 0 => {
-                        Some(self.rf.refine(a, b, x, mp, threads, &mut lap, &mut t_solve, &mut t_residual, |r| g.solve_f64(r)))
+                        Some(self.rf.refine(a, b, x, mp, threads, &mut lap, &mut t_solve, &mut t_residual, |r| g.solve_f64(r))?)
                     }
                     _ => None,
                 };
@@ -5804,11 +5912,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                         ),
                     }
                 }
-                return Ok(());
+                return Ok(Ok(()));
             }
         }
         let Some(mp) = self.mixed else {
-            supernodal_factorize(sn, a, &mut self.factor, &mut self.ctx, threads)?;
+            if let Err(e) = supernodal_factorize(sn, a, &mut self.factor, &mut self.ctx, threads) {
+                return Ok(Err(e));
+            }
             lap(&mut t_factor);
             x.copy_from_slice(b);
             supernodal_solve(sn, &self.factor, x, &mut self.ctx, threads);
@@ -5816,9 +5926,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if verbose {
                 info!("supernodal: factor {:.1} ms, solve {:.1} ms", t_factor, t_solve);
             }
-            return Ok(());
+            return Ok(Ok(()));
         };
-        supernodal_factorize_as(sn, a, &mut self.factor32, &mut self.ctx32, threads)?;
+        if let Err(e) = supernodal_factorize_as(sn, a, &mut self.factor32, &mut self.ctx32, threads) {
+            return Ok(Err(e));
+        }
         lap(&mut t_factor);
         x.copy_from_slice(b);
         supernodal_solve_as(sn, &self.factor32, x, &mut self.ctx32, threads);
@@ -5827,11 +5939,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if verbose {
                 info!("mixed precision: factor {:.1} ms, solve {:.1} ms, no refinement", t_factor, t_solve);
             }
-            return Ok(());
+            return Ok(Ok(()));
         }
         let (steps, rnorm, bnorm, short) = self.rf.refine(a, b, x, mp, threads, &mut lap, &mut t_solve, &mut t_residual, |r| {
-            supernodal_solve_as(sn, &self.factor32, r, &mut self.ctx32, threads)
-        });
+            supernodal_solve_as(sn, &self.factor32, r, &mut self.ctx32, threads);
+            Ok(())
+        })?;
         if verbose {
             info!(
                 "mixed precision: {} refinement steps, relative residual {:.1e}{}; factor {:.1} ms, {} solves {:.1} ms, {} residuals {:.1} ms",
@@ -5845,7 +5958,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 t_residual,
             );
         }
-        Ok(())
+        Ok(Ok(()))
     }
 
     /// Write the counters into the plan, on the mixed route.
@@ -6175,11 +6288,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             faer::sparse::linalg::cholesky::SymbolicCholesky<SparseIndex>,
         )>,
         vb: bool,
-    ) -> Result<T, SetupError> {
+    ) -> Result<T, SolveFailureKind> {
         // This route factorizes the whole system, so there is no reduced one
         // for conjugate gradients to run on.
         if self.schur_solve.cg().is_some() {
-            return Err(SetupError::IterativeSchurWithoutReduction);
+            return Err(SetupError::IterativeSchurWithoutReduction.into());
         }
         // No block storage on this route, and nothing left over from a
         // reduction that was considered and dropped.
@@ -6297,7 +6410,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         hsym: arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
         ctx: &mut crate::threads::Context,
         vb: bool,
-    ) -> Result<T, SetupError> {
+    ) -> Result<T, SolveFailureKind> {
         #[cfg(feature = "gpu")]
         {
             self.on_device = false;
@@ -6312,10 +6425,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     let gs = self.sn_num.gpu_mut();
                     let built = gs.build_route(root, &hsym, &self.bdiag_pos, ctx.threads());
                     report_kernel_cache();
-                    built.map_err(|e| gpu_setup_failed("the device assembly", e))?;
+                    built.map_err(|e| gpu_setup_failed("setup of the device assembly", e))?;
                     let t_layout = clock.map(|c| c.elapsed());
                     let t_a = self.measure.then(Instant::now);
-                    let cost = gs.route_compute(problem, params, grad);
+                    let cost = gs.route_compute(problem, params, grad)?;
                     if let Some(t) = t_a {
                         self.assembly_time = t.elapsed();
                     }
@@ -6374,10 +6487,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         hsym: arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
         band: usize,
         vb: bool,
-    ) -> Result<T, SetupError> {
+    ) -> Result<T, SolveFailureKind> {
         // Same as setup_full: banding the whole system is not a reduction.
         if self.schur_solve.cg().is_some() {
-            return Err(SetupError::IterativeSchurWithoutReduction);
+            return Err(SetupError::IterativeSchurWithoutReduction.into());
         }
         let n = *partition.last().unwrap();
         let nblk = partition.len() - 1;
@@ -6492,11 +6605,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // has to run it. `None` applies this solver's own ordering rule.
         block_order_in: Option<Vec<usize>>,
         vb: bool,
-    ) -> Result<T, SetupError> {
+    ) -> Result<T, SolveFailureKind> {
         // Factoring the whole system is not a reduction, so the iterative
         // Schur routes have nothing to solve here -- same as the band route.
         if self.schur_solve.cg().is_some() {
-            return Err(SetupError::IterativeSchurWithoutReduction);
+            return Err(SetupError::IterativeSchurWithoutReduction.into());
         }
         let n = *partition.last().unwrap();
         let nblk = partition.len() - 1;
@@ -6816,16 +6929,16 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     /// The reduced route on the device: S formed from the damped Hessian's
     /// values, factorized, solved and (under mixed precision) refined there,
     /// the eliminated blocks recovered there, the step brought back, in one
-    /// wait for the device. `false` when an eliminated block or S is not
+    /// wait for the device. `Ok(false)` when an eliminated block or S is not
     /// positive definite.
     #[cfg(feature = "gpu")]
-    fn solve_reduced_gpu(&mut self, h: &arael_faer::bsc::SparseBlockColMat<SparseIndex, T>, grad: &[T], delta: &mut [T]) -> bool {
+    fn solve_reduced_gpu(&mut self, h: &arael_faer::bsc::SparseBlockColMat<SparseIndex, T>, grad: &[T], delta: &mut [T]) -> Result<bool, DeviceFailure> {
         let clock = self.verbose.then(Instant::now);
         let refine = self.gpu_refine();
-        let solved = self.sn_num.gpu_mut().solve_reduced(h.vals(), grad, refine, delta);
+        let solved = self.sn_num.gpu_mut().solve_reduced(h.vals(), grad, refine, delta)?;
         let ok = solved.is_some();
         self.note_gpu_solve(solved, clock, "reduce + factor + solve + back-substitution");
-        ok
+        Ok(ok)
     }
 
     /// The device solve's refinement, `(max_steps, tolerance)` under mixed
@@ -6876,43 +6989,44 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 /// `T`, and each attempt makes one wait for its status and scalars.
 #[cfg(feature = "gpu")]
 impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> ResidentLoop<T> for SparseFaer<T> {
-    fn start(&mut self, x: &[T], floor: Option<T>) {
-        self.sn_num.gpu_mut().start(x, floor.map(arael_faer::schur::SchurReal::to_f64));
+    fn start(&mut self, x: &[T], floor: Option<T>) -> Result<(), DeviceFailure> {
+        self.sn_num.gpu_mut().start(x, floor.map(arael_faer::schur::SchurReal::to_f64))?;
         if let Some(plan) = self.plan.as_mut() {
             plan.gpu_assembly = true;
         }
+        Ok(())
     }
 
-    fn linearize(&mut self) {
-        self.sn_num.gpu_mut().linearize();
+    fn linearize(&mut self) -> Result<(), DeviceFailure> {
+        self.sn_num.gpu_mut().linearize()
     }
 
-    fn attempt(&mut self, lambda: T) -> ResidentAttempt {
+    fn attempt(&mut self, lambda: T) -> Result<ResidentAttempt, DeviceFailure> {
         let clock = self.verbose.then(Instant::now);
         let refine = self.gpu_refine();
-        let (stats, attempt) = self.sn_num.gpu_mut().attempt(arael_faer::schur::SchurReal::to_f64(lambda), refine);
+        let (stats, attempt) = self.sn_num.gpu_mut().attempt(arael_faer::schur::SchurReal::to_f64(lambda), refine)?;
         self.note_gpu_solve(stats, clock, "damp + reduce + factor + solve + back-substitution + trial cost");
-        attempt
+        Ok(attempt)
     }
 
     fn accept(&mut self) {
         self.sn_num.gpu_mut().accept();
     }
 
-    fn params(&mut self, x: &mut [T]) {
-        self.sn_num.gpu_mut().params(x);
+    fn params(&mut self, x: &mut [T]) -> Result<(), DeviceFailure> {
+        self.sn_num.gpu_mut().params(x)
     }
 
-    fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]) {
-        self.sn_num.gpu_mut().vectors(grad, diagonal, step);
+    fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]) -> Result<(), DeviceFailure> {
+        self.sn_num.gpu_mut().vectors(grad, diagonal, step)
     }
 
-    fn nonfinite(&mut self) -> [usize; 4] {
+    fn nonfinite(&mut self) -> Result<[usize; 4], DeviceFailure> {
         self.sn_num.gpu_mut().nonfinite()
     }
 
-    fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]) {
-        self.sn_num.gpu_mut().finish(problem, x);
+    fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]) -> Result<(), DeviceFailure> {
+        self.sn_num.gpu_mut().finish(problem, x)
     }
 }
 
@@ -6926,12 +7040,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         if self.sn_num.has_route() { Some(self) } else { None }
     }
 
+    /// The host matrix's non-finite values. On the device route the loop
+    /// asks [`ResidentLoop::nonfinite`] instead: the host copy is stale.
     fn matrix_nonfinite_count(&self, matrix: &FaerMatrix<T>) -> usize {
-        // The device route's H is on the device, the host copy stale.
-        #[cfg(feature = "gpu")]
-        if self.sn_num.route_live() {
-            return self.sn_num.gpu_ref().h_nonfinite();
-        }
         let block = matrix.h.as_ref().map(|h| h.vals().iter().filter(|v| !v.is_finite()).count());
         let scalar = matrix.csc.as_ref().map(|c| c.vals.iter().filter(|v| !v.is_finite()).count());
         block.or(scalar).unwrap_or(0)
@@ -7012,7 +7123,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         FaerMatrix { n, h: None, csc: None }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T], matrix: &mut FaerMatrix<T>, ctx: &mut crate::threads::Context) -> Result<T, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T], matrix: &mut FaerMatrix<T>, ctx: &mut crate::threads::Context) -> Result<T, SolveFailureKind> {
         // Report how much of this call was assembly; the solver takes the rest to
         // be structural analysis. In the steady state the whole call is assembly.
         self.assembly_time = Duration::ZERO;
@@ -7022,7 +7133,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // factorized.
         #[cfg(feature = "gpu")]
         if self.on_device && self.sn_num.has_route() {
-            let cost = self.sn_num.gpu_mut().route_compute(problem, params, grad);
+            let cost = self.sn_num.gpu_mut().route_compute(problem, params, grad)?;
             if let Some(t) = t_a {
                 self.assembly_time = t.elapsed();
             }
@@ -7975,7 +8086,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
     }
 
-    fn solve_damped(&mut self, n: usize, matrix: &mut FaerMatrix<T>, diagonal: &[T], damp: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut FaerMatrix<T>, diagonal: &[T], damp: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> Result<bool, SolveFailureKind> {
         // Copied out so the scratch buffers below can be borrowed mutably.
         let par = self.par;
 
@@ -8001,13 +8112,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 faer::Spec::default(),
             ) {
                 Ok(l) => l,
-                Err(_) => return false,
+                Err(_) => return Ok(false),
             };
             delta.copy_from_slice(grad);
             let rhs = faer::col::ColMut::from_slice_mut(delta);
             let solve_stack = faer::dyn_stack::MemStack::new(&mut self.solve_mem);
             llt.solve_in_place_with_conj(faer::Conj::No, rhs.as_mat_mut(), par, solve_stack);
-            return true;
+            return Ok(true);
         }
 
         // The device route: H is on the device, damped there.
@@ -8030,24 +8141,24 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         if self.schur.is_none() {
             #[cfg(feature = "gpu")]
             if self.sn_active && self.sn_num.gpu_reduces() {
-                return self.solve_reduced_gpu(h, grad, delta);
+                return Ok(self.solve_reduced_gpu(h, grad, delta)?);
             }
             if self.sn_active {
                 let sn = self.sn_sym.as_ref().unwrap();
                 let threads = self.ctx.threads();
-                if self.sn_num.solve(sn, h, grad, delta, threads, self.verbose).is_err() {
-                    return false;
+                if self.sn_num.solve(sn, h, grad, delta, threads, self.verbose)?.is_err() {
+                    return Ok(false);
                 }
                 self.sn_num.report_into(&mut self.plan);
-                return true;
+                return Ok(true);
             }
             let bsym = self.envelope_sym.as_ref().unwrap();
             if arael_faer::envelope::envelope_factorize(bsym, h, &mut self.envelope_factor).is_err() {
-                return false;
+                return Ok(false);
             }
             delta.copy_from_slice(grad);
             arael_faer::envelope::envelope_solve(bsym, &self.envelope_factor, delta);
-            return true;
+            return Ok(true);
         }
 
         let nk = self.rhs_kept.len();
@@ -8056,7 +8167,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // GPU, the step recovered there. Only for the factorizing method.
         #[cfg(feature = "gpu")]
         if self.sn_num.gpu_reduces() {
-            return self.solve_reduced_gpu(h, grad, delta);
+            return Ok(self.solve_reduced_gpu(h, grad, delta)?);
         }
 
         // Implicit route: no reduction at all. Only the reduced rhs and S's
@@ -8078,12 +8189,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             )
             .is_err()
             {
-                return false;
+                return Ok(false);
             }
             let precond =
                 match arael_faer::cg::BlockJacobi::from_diagonal_blocks(spans, diag) {
                     Ok(p) => p,
-                    Err(_) => return false,
+                    Err(_) => return Ok(false),
                 };
             let stats = arael_faer::cg::solve(
                 |u, v| arael_faer::schur::schur_apply(schur, h, ctx, u, v),
@@ -8098,10 +8209,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 plan.cg_iterations = Some(self.cg_iters);
             }
             let schur = self.schur.as_ref().unwrap();
-            return arael_faer::schur::schur_backsub(
+            return Ok(arael_faer::schur::schur_backsub(
                 schur, h, grad, &self.x_kept, &mut self.ctx, delta,
             )
-            .is_ok();
+            .is_ok());
         }
 
         // Reduce: S and the reduced rhs from the damped H.
@@ -8111,7 +8222,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if arael_faer::schur::schur_reduce(schur, h, grad, &mut self.ctx, s, &mut self.rhs_kept)
                 .is_err()
             {
-                return false;
+                return Ok(false);
             }
         }
 
@@ -8124,7 +8235,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 // A diagonal block of S is not positive definite. Reported the
                 // same way a failed Cholesky is: the loop raises lambda and
                 // tries again, which is what makes the block definite.
-                Err(_) => return false,
+                Err(_) => return Ok(false),
             };
             let stats = arael_faer::cg::solve(
                 |u, v| s.mul_symmetric_upper(u, v),
@@ -8139,7 +8250,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let bsym = self.envelope_sym.as_ref().unwrap();
             let s = self.s.as_ref().unwrap();
             if arael_faer::envelope::envelope_factorize(bsym, s, &mut self.envelope_factor).is_err() {
-                return false;
+                return Ok(false);
             }
             self.x_kept.copy_from_slice(&self.rhs_kept);
             arael_faer::envelope::envelope_solve(bsym, &self.envelope_factor, &mut self.x_kept);
@@ -8151,10 +8262,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let threads = self.ctx.threads();
             if self
                 .sn_num
-                .solve(sn, s, &self.rhs_kept, &mut self.x_kept, threads, self.verbose)
+                .solve(sn, s, &self.rhs_kept, &mut self.x_kept, threads, self.verbose)?
                 .is_err()
             {
-                return false;
+                return Ok(false);
             }
             self.sn_num.report_into(&mut self.plan);
         } else {
@@ -8174,7 +8285,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 faer::Spec::default(),
             ) {
                 Ok(l) => l,
-                Err(_) => return false,
+                Err(_) => return Ok(false),
             };
             self.x_kept.copy_from_slice(&self.rhs_kept);
             let rhs = faer::col::ColMut::from_slice_mut(&mut self.x_kept);
@@ -8184,8 +8295,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
         // Recover the eliminated blocks into the full-length delta.
         let schur = self.schur.as_ref().unwrap();
-        arael_faer::schur::schur_backsub(schur, h, grad, &self.x_kept, &mut self.ctx, delta)
-            .is_ok()
+        Ok(arael_faer::schur::schur_backsub(schur, h, grad, &self.x_kept, &mut self.ctx, delta).is_ok())
     }
 }
 
@@ -8327,7 +8437,7 @@ impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
     fn new_matrix(&self, n: usize) -> CscMatrix<T> {
         CscMatrix::empty(n)
     }
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T], matrix: &mut CscMatrix<T>, ctx: &mut crate::threads::Context) -> Result<T, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T], matrix: &mut CscMatrix<T>, ctx: &mut crate::threads::Context) -> Result<T, SolveFailureKind> {
         if let Some(kept) = &mut self.positions {
             return Ok(kept.assemble(problem, ctx, params, grad, matrix));
         }
@@ -8338,9 +8448,9 @@ impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
     fn extract_diagonal(&self, matrix: &CscMatrix<T>, diagonal: &mut [T]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.vals[matrix.diag_pos[i] as usize]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<T>, diagonal: &[T], damp: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<T>, diagonal: &[T], damp: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> Result<bool, SolveFailureKind> {
         for i in 0..n { matrix.vals[matrix.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
-        eigen_ffi_solve(T::LLT_SOLVE, self.handle, matrix, grad, delta)
+        Ok(eigen_ffi_solve(T::LLT_SOLVE, self.handle, matrix, grad, delta))
     }
 }
 
@@ -8376,7 +8486,7 @@ impl LmSolver<f64> for SparseCholmod {
     fn new_matrix(&self, n: usize) -> CscMatrix<f64> {
         CscMatrix::empty(n)
     }
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut CscMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut CscMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveFailureKind> {
         if let Some(kept) = &mut self.positions {
             return Ok(kept.assemble(problem, ctx, params, grad, matrix));
         }
@@ -8387,9 +8497,9 @@ impl LmSolver<f64> for SparseCholmod {
     fn extract_diagonal(&self, matrix: &CscMatrix<f64>, diagonal: &mut [f64]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.vals[matrix.diag_pos[i] as usize]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> Result<bool, SolveFailureKind> {
         for i in 0..n { matrix.vals[matrix.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
-        eigen_ffi_solve(eigen_cholmod_f64_solve, self.handle, matrix, grad, delta)
+        Ok(eigen_ffi_solve(eigen_cholmod_f64_solve, self.handle, matrix, grad, delta))
     }
 }
 
@@ -8429,7 +8539,7 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
     fn new_matrix(&self, n: usize) -> CscMatrix<f64> {
         CscMatrix::empty(n)
     }
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut CscMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut CscMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveFailureKind> {
         if let Some(kept) = &mut self.positions {
             return Ok(kept.assemble(problem, ctx, params, grad, matrix));
         }
@@ -8440,9 +8550,9 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
     fn extract_diagonal(&self, matrix: &CscMatrix<f64>, diagonal: &mut [f64]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.vals[matrix.diag_pos[i] as usize]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> Result<bool, SolveFailureKind> {
         for i in 0..n { matrix.vals[matrix.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
-        eigen_ffi_solve(eigen_cholmod_supernodal_f64_solve, self.handle, matrix, grad, delta)
+        Ok(eigen_ffi_solve(eigen_cholmod_supernodal_f64_solve, self.handle, matrix, grad, delta))
     }
 }
 

@@ -3049,6 +3049,50 @@ fn index_selects_assemble_and_solve_on_the_device_as_on_the_cpu() {
     assembles_and_solves_as_on_the_cpu(sel_world, "index selects");
 }
 
+/// A point whose select has no default.
+#[arael::model]
+#[arael(constraint(hb, { [select(selnan.k, selnan.x - 1.0, selnan.x * 2.0 - 1.0)] }))]
+#[derive(Clone)]
+pub struct SelNan {
+    pub x: Param<f64>,
+    pub k: u32,
+    pub hb: SelfBlock<SelNan>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct SelNanRoot {
+    pub items: refs::Vec<SelNan>,
+}
+
+/// An index outside a select's arms, with no default: the CPU's solve
+/// panics; the device's values turn NaN, and its solve fails with a NaN
+/// diagonal at that instance's parameter.
+#[test]
+fn a_select_index_outside_its_arms_fails_the_device_solve_at_its_parameter() {
+    use arael::simple_lm::{DiagonalFault, LmConfig, SolveFailureKind};
+    let model = || {
+        let mut items = refs::Vec::new();
+        for k in [0u32, 1, 7, 0] {
+            items.push(SelNan { x: Param::new(0.3), k, hb: SelfBlock::new() });
+        }
+        SelNanRoot { items }
+    };
+    let solve = |gpu: Option<&GpuDevice>| {
+        let mut s = model();
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &LmConfig::<f64>::default())
+    };
+    assert!(std::panic::catch_unwind(|| solve(None)).is_err(), "the CPU's select panics");
+    for d in devices() {
+        let failure = solve(Some(&d)).expect_err("the device solve fails");
+        assert_eq!(failure.kind, SolveFailureKind::DegenerateDiagonal { param: 2, fault: DiagonalFault::Nan }, "{}: {failure}", label(&d));
+    }
+}
+
 /// The kernel library's fast atan and atan2 against arael::utils' on the
 /// CPU, over signs, zeros, the folds' boundaries and wide magnitudes: the
 /// same folds, polynomial and constants, equal to rounding (the device may
