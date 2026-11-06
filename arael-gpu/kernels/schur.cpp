@@ -3,11 +3,12 @@
 // arael-gpu/src/schur.rs over its plan.
 //
 // In W, the route's wide scalar (wide.h). Compiled per EW (the widest eliminated block, rounded up to 4,
-// 8, 16, 32 or 64), KW (the widest kept block, rounded likewise) and ACC
-// (KW * KW / 32, the entries of a tile of S per lane); the plan header's
-// slots (SE_*, SO_*, ST_*, SP_*, SK_*), the refinement state's words
-// (R_*) and flags (F_*) come from schur.rs as #defines. Kernels launched
-// with THREADS threads per block, or PLANE where said.
+// 8, 16, 32 or 64), KW (the widest kept block, rounded likewise),
+// TILE_LANES (k_schur_tiles' threads per tile) and ACC (KW * KW /
+// TILE_LANES rounded up, the entries of a tile of S per lane); the plan
+// header's slots (SE_*, SO_*, ST_*, SP_*, SK_*), the refinement state's
+// words (R_*) and flags (F_*) come from schur.rs as #defines. Kernels
+// launched with THREADS threads per block, or PLANE where said.
 //
 // Per-thread arrays are indexed only by constants once their loops unroll:
 // the loops run to EW or KW and skip what is past the block's width, so the
@@ -15,8 +16,9 @@
 
 // SCHUR_STAGED: k_schur_w and k_schur_tiles read their small blocks once,
 // into registers and shared memory, instead of from global memory at every
-// use. On HIP and the CPU device; CUDA keeps the plain loops until measured
-// there (TODO.md).
+// use, and k_schur_tiles takes a tile per wavefront (TILE_LANES threads, 64
+// on AMD GCN and CDNA). On HIP and the CPU device; CUDA keeps the plain
+// loops until measured there (TODO.md).
 #if ARAEL_CUDA
 #define SCHUR_STAGED 0
 #else
@@ -176,6 +178,82 @@ KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL c
 #endif
 }
 
+#if SCHUR_STAGED
+// Stage 3, one block of TILE_LANES threads per tile of S (the wavefront):
+// the kept-kept tile of H (or nothing) minus W_oa C_ob^T over the tile's
+// pairs, thread `lane` owning the entries lane, lane + TILE_LANES, ... (ACC
+// of them at most); a diagonal tile upper-only. A pair's W_oa (wr x we,
+// row-major) and C_ob (wc x we, row j at j EW) are read once into shared
+// memory. The tile is the block's, so its plan words are the same in every
+// lane (scalar loads on AMD).
+KERNEL_THREADS(TILE_LANES) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const W* RESTRICT w, GLOBAL W* RESTRICT s) {
+    SHARED W ws[KW * EW];
+    SHARED W cs[KW * EW];
+    u32 t = block_x();
+    u32 lane = thread_x();
+    u32 o_ew = plan[SE_W];
+    u32 o_ca = plan[SO_CA_OFF];
+    u32 o_trans = plan[SO_TRANS];
+    u32 o_ow = plan[SO_W];
+    u32 o_e = plan[SO_E];
+    u32 o_woff = plan[SO_W_OFF];
+    u32 o_oa = plan[SP_OA];
+    u32 o_ob = plan[SP_OB];
+    u32 val = plan[plan[ST_VAL_OFF] + t];
+    u32 wr = plan[plan[ST_WR] + t];
+    u32 wc = plan[plan[ST_WC] + t];
+    u32 a = plan[plan[ST_A] + t];
+    u32 b = plan[plan[ST_B] + t];
+    u32 copy = plan[plan[ST_COPY_OFF] + t];
+    u32 p0 = plan[plan[ST_PAIR_PTR] + t];
+    u32 p1 = plan[plan[ST_PAIR_PTR] + t + 1];
+    W acc[ACC];
+#pragma unroll
+    for (u32 m = 0; m < ACC; m++) acc[m] = 0.0f;
+    for (u32 p = p0; p < p1; p++) {
+        u32 oa = plan[o_oa + p];
+        u32 ob = plan[o_ob + p];
+        u32 e = plan[o_e + oa];
+        u32 we = plan[o_ew + e];
+        u32 woff = plan[o_woff + oa];
+        u32 cb = plan[o_ca + ob];
+        u32 tb = plan[o_trans + ob];
+        u32 wb = plan[o_ow + ob];
+        // the previous pair's reads are done (the block is one wavefront)
+        BARRIER();
+        for (u32 x = lane; x < wr * we; x += TILE_LANES) ws[x] = w[woff + x];
+        for (u32 x = lane; x < wc * we; x += TILE_LANES) {
+            u32 j = x / we;
+            u32 k = x - j * we;
+            cs[j * EW + k] = coupling(h, cb, tb, wb, we, j, k);
+        }
+        BARRIER();
+#pragma unroll
+        for (u32 m = 0; m < ACC; m++) {
+            u32 ent = lane + TILE_LANES * m;
+            if (ent < wr * wc) {
+                u32 j = ent / wr;
+                u32 i = ent - j * wr;
+                W v = 0.0f;
+                for (u32 k = 0; k < we; k++) v = wide_fma(v, ws[i * we + k], cs[j * EW + k]);
+                acc[m] -= v;
+            }
+        }
+    }
+#pragma unroll
+    for (u32 m = 0; m < ACC; m++) {
+        u32 ent = lane + TILE_LANES * m;
+        if (ent < wr * wc) {
+            u32 j = ent / wr;
+            u32 i = ent - j * wr;
+            W v = acc[m];
+            if (copy != NONE) v += h[copy + i + j * wr];
+            if (a == b && i > j) v = 0.0f;
+            s[val + i + j * wr] = v;
+        }
+    }
+}
+#else
 // Stage 3, one block of PLANE threads per tile of S: the kept-kept tile of H
 // (or nothing) minus W_oa C_ob^T over the tile's pairs, thread `lane` owning
 // the entries lane, lane + 32, ... (ACC of them at most); a diagonal tile
@@ -199,12 +277,6 @@ KERNEL_THREADS(PLANE) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL
     u32 copy = plan[plan[ST_COPY_OFF] + t];
     u32 p0 = plan[plan[ST_PAIR_PTR] + t];
     u32 p1 = plan[plan[ST_PAIR_PTR] + t + 1];
-#if SCHUR_STAGED
-    // a pair's W_oa (wr x we, row-major) and C_ob (wc x we, row j at j EW),
-    // read once by the plane into shared memory
-    SHARED W ws[KW * EW];
-    SHARED W cs[KW * EW];
-#endif
     W acc[ACC];
 #pragma unroll
     for (u32 m = 0; m < ACC; m++) acc[m] = 0.0f;
@@ -217,17 +289,6 @@ KERNEL_THREADS(PLANE) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL
         u32 cb = plan[o_ca + ob];
         u32 tb = plan[o_trans + ob];
         u32 wb = plan[o_ow + ob];
-#if SCHUR_STAGED
-        // the previous pair's reads are done
-        WARP_BARRIER();
-        for (u32 x = lane; x < wr * we; x += PLANE) ws[x] = w[woff + x];
-        for (u32 x = lane; x < wc * we; x += PLANE) {
-            u32 j = x / we;
-            u32 k = x - j * we;
-            cs[j * EW + k] = coupling(h, cb, tb, wb, we, j, k);
-        }
-        WARP_BARRIER();
-#endif
 #pragma unroll
         for (u32 m = 0; m < ACC; m++) {
             u32 ent = lane + PLANE * m;
@@ -235,11 +296,7 @@ KERNEL_THREADS(PLANE) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL
                 u32 j = ent / wr;
                 u32 i = ent - j * wr;
                 W v = 0.0f;
-#if SCHUR_STAGED
-                for (u32 k = 0; k < we; k++) v = wide_fma(v, ws[i * we + k], cs[j * EW + k]);
-#else
                 for (u32 k = 0; k < we; k++) v = wide_fma(v, w[woff + i * we + k], coupling(h, cb, tb, wb, we, j, k));
-#endif
                 acc[m] -= v;
             }
         }
@@ -257,6 +314,7 @@ KERNEL_THREADS(PLANE) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL
         }
     }
 }
+#endif
 
 // Stage 4, one block of PLANE threads per kept block: rhs_kept = b_k - sum
 // over the block's observers of C_o z_e, the lanes over the observers, a

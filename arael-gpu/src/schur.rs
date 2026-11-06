@@ -166,8 +166,6 @@ pub(crate) struct SchurPlan {
     /// The widest eliminated and kept blocks, rounded up as the kernels take them.
     pub ew_cap: usize,
     pub kw_cap: usize,
-    /// Entries of a tile of S per lane.
-    pub acc_cap: usize,
     /// Per eliminated slot, its block id (for the error).
     pub elim_blk: Vec<u32>,
 }
@@ -412,7 +410,6 @@ impl SchurPlan {
             w_len: w_len as usize,
             ew_cap,
             kw_cap,
-            acc_cap: (kw_cap * kw_cap).div_ceil(32),
             elim_blk,
         }
     }
@@ -530,6 +527,8 @@ pub struct GpuSchur<D: Device> {
     ne: u32,
     no: u32,
     nt: u32,
+    /// Threads per tile of S in `k_schur_tiles`.
+    lanes: u32,
     nk: u32,
     n: usize,
     nks: usize,
@@ -558,7 +557,17 @@ impl<D: Device> GpuSchur<D> {
     }
 
     fn build(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide) -> Result<Self, GpuError> {
-        let defines = format!("{}{}", wide.defines(), defines(&p));
+        let lanes = if D::RUNTIME == "cuda" { PLANE } else { dev.arch().warp.max(PLANE) };
+        Self::build_lanes(dev, p, nh, wide, lanes)
+    }
+
+    /// [`build`](Self::build) with `lanes` threads per tile of S in
+    /// `k_schur_tiles`: the device's whole wavefront where the kernels stage
+    /// their blocks (not on CUDA, see `SCHUR_STAGED` in schur.cpp), else a
+    /// plane.
+    fn build_lanes(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide, lanes: u32) -> Result<Self, GpuError> {
+        assert!(lanes == PLANE || D::RUNTIME != "cuda", "CUDA's k_schur_tiles takes a plane per tile");
+        let defines = format!("{}{}", wide.defines(), defines(&p, lanes));
         let (kt_ptr_words, kt_words) = tiles_by_kept_block(&p);
         let mut pk = Packer { words: p.words };
         let on = 4 * pk.push(&[1]);
@@ -606,6 +615,7 @@ impl<D: Device> GpuSchur<D> {
             ne: p.ne,
             no: p.no,
             nt: p.nt,
+            lanes,
             nk: p.nk,
             n: p.n,
             nks: p.nks,
@@ -729,7 +739,7 @@ impl<D: Device> GpuSchur<D> {
         let elim = [plan, w(s.h), w(s.rhs), w(s.dinv), w(s.z), w(self.flag_at(F_ELIM)), Arg::U32(self.ne)];
         self.run(&self.k.elim, self.ne.div_ceil(THREADS), THREADS, &elim)?;
         self.run(&self.k.w, self.no.div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.dinv), w(s.w), Arg::U32(self.no)])?;
-        self.run(&self.k.tiles, self.nt, PLANE, &[plan, w(s.h), w(s.w), w(s.s)])?;
+        self.run(&self.k.tiles, self.nt, self.lanes, &[plan, w(s.h), w(s.w), w(s.s)])?;
         self.run(&self.k.rhs, self.nk, PLANE, &[plan, w(s.h), w(s.rhs), w(s.z), w(s.rhs_kept)])
     }
 
@@ -931,17 +941,19 @@ fn tiles_by_kept_block(p: &SchurPlan) -> (Vec<u32>, Vec<u32>) {
     (ptr, tiles)
 }
 
-/// The `#define`s of `schur.cpp`: the block size, the width classes, and
+/// The `#define`s of `schur.cpp`: the block sizes, the width classes, and
 /// the plan header's and the status's slots of [`crate::schur`].
-fn defines(p: &SchurPlan) -> String {
+fn defines(p: &SchurPlan, lanes: u32) -> String {
     let mut s = String::new();
     define_u32s(
         &mut s,
         &[
             ("THREADS", THREADS as usize),
+            ("TILE_LANES", lanes as usize),
             ("EW", p.ew_cap),
             ("KW", p.kw_cap),
-            ("ACC", p.acc_cap),
+            // the entries of a tile of S per lane
+            ("ACC", (p.kw_cap * p.kw_cap).div_ceil(lanes as usize)),
             ("SE_DIAG_OFF", SE_DIAG_OFF),
             ("SE_W", SE_W),
             ("SE_ORIG_OFF", SE_ORIG_OFF),
@@ -1048,6 +1060,28 @@ mod tests {
         let r64: Vec<f64> = r32.iter().map(|&v| v as f64).collect();
         g.reduce(&h64, &r64).unwrap();
         assert_eq!(s32, g.download().unwrap().0, "f32 inputs are their f64 twins");
+    }
+
+    /// A tile of S on 64 lanes, as on a 64-lane wavefront, is the tile on
+    /// 32.
+    #[test]
+    fn a_tile_on_64_lanes_is_the_tile_on_32() {
+        if <TestDevice as Device>::RUNTIME == "cuda" {
+            // CUDA's k_schur_tiles takes a plane per tile (SCHUR_STAGED)
+            return;
+        }
+        let (h, _, rhs, elim) = ba_like(40, 300, 5);
+        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
+        let dev = device();
+        for wide in WIDES {
+            let reduce = |lanes| {
+                let p = SchurPlan::reduction(&sym, h.symbolic());
+                let mut g = GpuSchur::build_lanes(&dev, p, h.symbolic().val_count(), wide, lanes).unwrap();
+                g.reduce(h.vals(), &rhs).unwrap();
+                g.download().unwrap()
+            };
+            assert_eq!(reduce(64), reduce(32), "{wide:?}");
+        }
     }
 
     #[test]

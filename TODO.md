@@ -471,6 +471,10 @@
   keeps the plain loops. On the gfx90c iGPU (bal-bench Ladybug-372, f64
   schur) the two kernels went from 43 to 14 ms and from 67 to 38 ms per
   attempt, the iteration from about 330 to 260 ms (f64 factor) and 190 to
-  140 ms (f32 factor), same results. Not measured on CUDA: run bal-bench on
+  140 ms (f32 factor), same results. `k_schur_tiles` then takes a tile per
+  wavefront (`TILE_LANES`, 64 there): 38 to 26.5 ms. Two tiles per 64-lane
+  wavefront, a 32-lane warp each, was slower (43 ms): the tile index then
+  differs within the wavefront, and the plan reads became vector loads
+  instead of scalar ones. Not measured on CUDA: run bal-bench on
   the 4090 with `SCHUR_STAGED` 0 and 1 (the `ARAEL_CUDA` branch of the
   `#if`), keep one path if they are equivalent.
