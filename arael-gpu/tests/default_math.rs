@@ -4,8 +4,8 @@
 //! term, and a product rounded on its own (an `fma(a, b, 0)` pin or
 //! `mul_rn`) is not fused into the add that consumes it. Contraction itself
 //! stays on, as NVRTC's and hipRTC's defaults. On CUDA (feature `cuda`),
-//! else on HIP (`hip`).
-#![cfg(any(feature = "cuda", feature = "hip"))]
+//! else on HIP (`hip`), else on the CPU device (`cpu`).
+#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
 
 use arael_gpu::{Arg, Device, Launch};
 
@@ -13,6 +13,8 @@ use arael_gpu::{Arg, Device, Launch};
 type Dev = arael_gpu::cuda::CudaDevice;
 #[cfg(all(feature = "hip", not(feature = "cuda")))]
 type Dev = arael_gpu::hip::HipDevice;
+#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip"))))]
+type Dev = arael_gpu::cpu::CpuDevice;
 
 const SOURCE: &str = r#"
 KERNEL void default_math(GLOBAL const float* in, GLOBAL float* out) {
@@ -37,9 +39,10 @@ KERNEL void default_math(GLOBAL const float* in, GLOBAL float* out) {
     float q = mul_rn(x, in[4]);
     out[5] = sub_rn(e, sub_rn(add_rn(q, e), q));
 
-    // An unpinned product: the compiler may fuse x * x + e.
-    float r = x * in[4];
-    out[6] = e - ((r + e) - r);
+    // An unpinned product used once: contraction fuses x * x + e. (A
+    // product with more uses is fused or not by the compiler's own rules.)
+    float fused = x * in[4] + e;
+    out[6] = e - (fused - q);
 }
 "#;
 
@@ -82,7 +85,7 @@ fn kernels_keep_default_math() {
     assert_eq!(actual[3], two_sum_error(a, b), "two_sum's error term");
     assert_eq!(actual[4], quick_two_sum_error, "quick_two_sum after an fma(x, x, 0) pin");
     assert_eq!(actual[5], quick_two_sum_error, "quick_two_sum with mul_rn and add_rn");
-    assert_ne!(actual[6], quick_two_sum_error, "an unpinned product is contracted, the compilers' default");
+    assert_eq!(actual[6], e - (fused_sum - p), "an unpinned product is contracted, the compilers' default");
 }
 
 #[test]

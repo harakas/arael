@@ -16,8 +16,6 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::GpuError;
-
 static ARMED: AtomicBool = AtomicBool::new(false);
 /// Operations counted since [`arm`].
 static COUNT: AtomicU64 = AtomicU64::new(0);
@@ -25,7 +23,7 @@ static COUNT: AtomicU64 = AtomicU64::new(0);
 static FAIL_AT: AtomicU64 = AtomicU64::new(0);
 
 /// Count the device operations from now on, the `fail_at`-th failing once
-/// with [`GpuError::Driver`]; 0 counts only.
+/// with [`crate::GpuError::Driver`]; 0 counts only.
 pub fn arm(fail_at: u64) {
     COUNT.store(0, Ordering::SeqCst);
     FAIL_AT.store(fail_at, Ordering::SeqCst);
@@ -41,13 +39,14 @@ pub fn disarm() -> u64 {
 /// A device operation `op` starts: its injected failure when it is the one
 /// [`arm`] named. One relaxed load when unarmed.
 #[inline]
-pub(crate) fn check(op: &'static str) -> Result<(), GpuError> {
+#[cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
+pub(crate) fn check(op: &'static str) -> Result<(), crate::GpuError> {
     if !ARMED.load(Ordering::Relaxed) {
         return Ok(());
     }
     let k = COUNT.fetch_add(1, Ordering::SeqCst) + 1;
     if k == FAIL_AT.load(Ordering::SeqCst) {
-        return Err(GpuError::Driver(format!("injected failure of operation {k} ({op})")));
+        return Err(crate::GpuError::Driver(format!("injected failure of operation {k} ({op})")));
     }
     Ok(())
 }

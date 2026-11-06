@@ -5,7 +5,9 @@ HIP. The kernels are written once in a C++ subset (`kernels/`) and
 compiled at run time for the device at hand: NVRTC on CUDA
 (`cuda::CudaDevice`, feature `cuda`), hipRTC on HIP (`hip::HipDevice`,
 feature `hip`). Both runtimes load the vendor's libraries at run time, so
-a build needs neither the CUDA toolkit nor ROCm.
+a build needs neither the CUDA toolkit nor ROCm. The CPU device
+(`cpu::CpuDevice`, feature `cpu`) runs the same kernels on the CPU,
+compiled by the host's C++ compiler, for tests and CI without a GPU.
 
 On a device:
 
@@ -60,6 +62,10 @@ with arael's `gpu-cuda` (or `gpu-hip`) feature; see docs/SOLVERS.md.
 
 - `cuda`, `hip`: the runtimes. Without one there is no device, and arael
   reports the backend unavailable.
+- `cpu`: the CPU device. The compiler is `ARAEL_CPU_CXX`, else `CXX`,
+  else `c++` (GCC or Clang, on Linux); kernels are compiled with
+  contraction on and FMA, as on a GPU, and a block's threads run as
+  fibers that switch at barriers. Slow: a test target.
 
 GPUs with 32-lane warps run the kernels: NVIDIA's, and AMD's RDNA. AMD's
 64-lane GPUs (CDNA, GCN) are not supported yet.
@@ -69,6 +75,7 @@ GPUs with 32-lane warps run the kernels: NVIDIA's, and AMD's RDNA. AMD's
 ```sh
 cargo test -p arael-gpu --features cuda   # the device against arael-faer's CPU factorization and Schur reduction, f64, f32 and df32, bad pivots, the pool, graph capture
 cargo test -p arael-gpu --features hip    # the same on HIP
+cargo test -p arael-gpu --features cpu    # the same on the CPU device, without a GPU
 ```
 
 `examples/repeat_solves.rs` solves several structures several times the way

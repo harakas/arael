@@ -706,7 +706,7 @@ fn defines(scalar: &str, lu: usize) -> String {
     s
 }
 
-#[cfg(all(test, any(feature = "cuda", feature = "hip")))]
+#[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu")))]
 mod tests {
     use super::*;
     use crate::TestDevice;
@@ -922,8 +922,9 @@ mod tests {
     }
 
     /// The kernels holding a row per thread keep it in registers: none uses
-    /// local memory, in f64 or f32.
+    /// local memory, in f64 or f32 (a GPU's).
     #[test]
+    #[cfg(any(feature = "cuda", feature = "hip"))]
     fn the_row_kernels_keep_their_rows_in_registers() {
         let (a, _, _, sn) = setup(10);
         let dev = device();

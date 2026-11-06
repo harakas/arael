@@ -2,8 +2,8 @@
 //! an index against them: `arael_select_index` gives the arm an index picks
 //! (-1 an integer outside the arms, -2 no integer), `arael_nan_of` the NaN
 //! a select gives where the CPU's panics. On CUDA (feature `cuda`), else on
-//! HIP (`hip`).
-#![cfg(any(feature = "cuda", feature = "hip"))]
+//! HIP (`hip`), else on the CPU device (`cpu`).
+#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
 
 use arael_gpu::{Arg, Device, Launch, Wide, ASSEMBLY, WIDE};
 
@@ -11,6 +11,8 @@ use arael_gpu::{Arg, Device, Launch, Wide, ASSEMBLY, WIDE};
 type Dev = arael_gpu::cuda::CudaDevice;
 #[cfg(all(feature = "hip", not(feature = "cuda")))]
 type Dev = arael_gpu::hip::HipDevice;
+#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip"))))]
+type Dev = arael_gpu::cpu::CpuDevice;
 
 const KERNEL: &str = r#"
 KERNEL void select_helpers(GLOBAL const float* inf, GLOBAL const double* ind, GLOBAL int* out, GLOBAL int* isnan_out) {

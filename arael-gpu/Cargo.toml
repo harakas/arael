@@ -19,6 +19,9 @@ cuda = ["dep:cudarc"]
 # HIP: the HIP runtime and hipRTC through our own bindings (src/hip_sys.rs),
 # loaded at run time, so a build needs no ROCm.
 hip = ["dep:libloading"]
+# The CPU device: the kernels compiled by the host's C++ compiler and run
+# on the CPU, for tests and CI without a GPU (src/cpu.rs).
+cpu = ["dep:libloading"]
 
 [dependencies]
 cudarc = { version = "0.19.10", optional = true, default-features = false, features = [

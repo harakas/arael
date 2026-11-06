@@ -981,7 +981,7 @@ fn defines(p: &SchurPlan) -> String {
     s
 }
 
-#[cfg(all(test, any(feature = "cuda", feature = "hip")))]
+#[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu")))]
 mod tests {
     use super::*;
     use crate::GpuPrecision;
@@ -1338,14 +1338,16 @@ mod tests {
     }
 
     /// At BA widths (eliminated blocks of 3, kept of 6) the per-thread
-    /// arrays stay in registers: no kernel uses local memory.
+    /// arrays stay in registers: no kernel uses local memory (a GPU's).
     #[test]
+    #[cfg(any(feature = "cuda", feature = "hip"))]
     fn the_kernels_keep_their_arrays_in_registers() {
         for wide in WIDES {
             the_kernels_keep_their_arrays_in_registers_in(wide);
         }
     }
 
+    #[cfg(any(feature = "cuda", feature = "hip"))]
     fn the_kernels_keep_their_arrays_in_registers_in(wide: Wide) {
         let (h, _, _, _, sym, _) = setup(10, 30, 2);
         let g = GpuSchur::new(&device(), &sym, h.symbolic(), wide).unwrap();

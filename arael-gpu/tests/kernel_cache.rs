@@ -1,11 +1,13 @@
-//! The kernel cache (feature `cuda` or `hip`), in a process of its own: the
-//! cache is chosen once per process, at its first GPU use.
-#![cfg(any(feature = "cuda", feature = "hip"))]
+//! The kernel cache (feature `cuda`, `hip` or `cpu`), in a process of its
+//! own: the cache is chosen once per process, at its first GPU use.
+#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
 
 #[cfg(feature = "cuda")]
 use arael_gpu::cuda::{CudaDevice as Dev, compiles};
 #[cfg(all(feature = "hip", not(feature = "cuda")))]
 use arael_gpu::hip::{HipDevice as Dev, compiles};
+#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip"))))]
+use arael_gpu::cpu::{CpuDevice as Dev, compiles};
 use arael_gpu::{Arg, Device, KernelCache, Launch, set_kernel_cache};
 
 /// The cache's directory for the device's runtime.
@@ -13,6 +15,8 @@ use arael_gpu::{Arg, Device, KernelCache, Launch, set_kernel_cache};
 const TARGET: &str = "cuda";
 #[cfg(all(feature = "hip", not(feature = "cuda")))]
 const TARGET: &str = "hip";
+#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip"))))]
+const TARGET: &str = "cpu";
 
 const SOURCE: &str = "KERNEL void twice(GLOBAL float* RESTRICT x, u32 n) { u32 i = global_x(); if (i < n) x[i] *= 2.0f; }";
 

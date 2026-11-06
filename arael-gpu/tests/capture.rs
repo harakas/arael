@@ -1,13 +1,16 @@
-//! Graph capture and replay (CUDA, else HIP): a capture records launches
-//! without running them, a replay runs them against the blocks' contents at
-//! the time, operations other than launches are refused while a capture is
-//! open, and a capture (thread-local) leaves other threads' work alone.
-#![cfg(any(feature = "cuda", feature = "hip"))]
+//! Graph capture and replay (CUDA, else HIP, else the CPU device): a
+//! capture records launches without running them, a replay runs them
+//! against the blocks' contents at the time, operations other than launches
+//! are refused while a capture is open, and a capture (thread-local) leaves
+//! other threads' work alone.
+#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
 
 #[cfg(feature = "cuda")]
 use arael_gpu::cuda::CudaDevice as Dev;
 #[cfg(all(feature = "hip", not(feature = "cuda")))]
 use arael_gpu::hip::HipDevice as Dev;
+#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip"))))]
+use arael_gpu::cpu::CpuDevice as Dev;
 use arael_gpu::{Arg, Device, GpuError, Launch};
 
 type Block = <Dev as Device>::Block;

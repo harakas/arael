@@ -1,7 +1,7 @@
-//! The device's pool (CUDA, else HIP): a dropped block is handed out again,
-//! zeroed, a fresh one has room for a quarter more, so solves of a slightly
-//! changed structure allocate nothing new.
-#![cfg(any(feature = "cuda", feature = "hip"))]
+//! The device's pool (CUDA, else HIP, else the CPU device): a dropped block
+//! is handed out again, zeroed, a fresh one has room for a quarter more, so
+//! solves of a slightly changed structure allocate nothing new.
+#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
 
 use std::sync::Arc;
 
@@ -11,6 +11,8 @@ use arael_faer::supernodal::{SupernodalParams, SupernodalSymbolic, nd_block_orde
 use arael_gpu::cuda::CudaDevice as Dev;
 #[cfg(all(feature = "hip", not(feature = "cuda")))]
 use arael_gpu::hip::HipDevice as Dev;
+#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip"))))]
+use arael_gpu::cpu::CpuDevice as Dev;
 use arael_gpu::test_util::{ba_like, rel_residual};
 use arael_gpu::{Device, GpuFactor, GpuPrecision, GpuSchur, Wide};
 

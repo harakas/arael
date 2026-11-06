@@ -336,7 +336,7 @@ impl<D: Device> LmVectors<D> {
     }
 }
 
-#[cfg(all(test, any(feature = "cuda", feature = "hip")))]
+#[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu")))]
 mod tests {
     use super::*;
     use crate::lm::{DiagFault, Scalars};

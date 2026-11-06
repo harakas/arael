@@ -4,7 +4,8 @@
 //! [`Device`]: [`cuda::CudaDevice`] (feature `cuda`, NVRTC) and
 //! [`hip::HipDevice`] (feature `hip`, hipRTC). Both load the vendor's
 //! libraries at run time, so a build needs neither the CUDA toolkit nor
-//! ROCm.
+//! ROCm. `cpu::CpuDevice` (feature `cpu`) runs the same kernels on the
+//! CPU, compiled by the host's C++ compiler, for tests without a GPU.
 //!
 //! On a device: [`GpuSupernodal`] (the block supernodal Cholesky and its
 //! level-set solve), [`GpuSchur`] (the Schur reduction, the refinement and
@@ -28,17 +29,19 @@ use arael_faer::schur::SchurReal;
 pub mod cache;
 #[cfg(feature = "cuda")]
 pub mod cuda;
-#[cfg(any(feature = "cuda", feature = "hip"))]
+#[cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
 mod disk;
 #[cfg(feature = "hip")]
 pub mod hip;
 #[cfg(feature = "hip")]
 mod hip_sys;
+#[cfg(feature = "cpu")]
+pub mod cpu;
 #[doc(hidden)]
 pub mod fault;
 pub mod lm;
 pub mod plan;
-#[cfg(any(feature = "cuda", feature = "hip"))]
+#[cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
 mod pool;
 pub mod schur;
 pub mod supernodal;
@@ -49,7 +52,7 @@ pub mod test_util;
 /// bytemuck, whose `Pod` bounds this crate's uploads take.
 pub use bytemuck;
 pub use cache::{KernelCache, kernel_cache, set_kernel_cache};
-#[cfg(any(feature = "cuda", feature = "hip"))]
+#[cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
 pub use disk::take_cache_failure;
 pub use lm::{LmVectors, Scalars};
 pub use plan::GpuSupernodalParams;
@@ -57,12 +60,14 @@ pub use schur::{GpuSchur, GpuSchurError, GraphKey, RefineStats};
 pub use supernodal::{FactorizeError, GpuFactor, GpuSupernodal};
 
 /// The device this crate's tests run on: CUDA when its runtime is built
-/// (feature `cuda`), else HIP (`hip`).
+/// (feature `cuda`), else HIP (`hip`), else the CPU (`cpu`).
 #[cfg(all(test, feature = "cuda"))]
 pub(crate) type TestDevice = cuda::CudaDevice;
 #[cfg(all(test, feature = "hip", not(feature = "cuda")))]
 pub(crate) type TestDevice = hip::HipDevice;
-#[cfg(all(test, any(feature = "cuda", feature = "hip")))]
+#[cfg(all(test, feature = "cpu", not(any(feature = "cuda", feature = "hip"))))]
+pub(crate) type TestDevice = cpu::CpuDevice;
+#[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu")))]
 pub(crate) type TestBlock = <TestDevice as Device>::Block;
 
 /// The header in front of every kernel source: what differs between targets.
