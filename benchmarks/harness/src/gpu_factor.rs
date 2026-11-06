@@ -8,8 +8,9 @@
 //! The environment: ROUNDS (20), BENCH_THREADS (the CPU's threads, 8),
 //! ARAEL_GPU (`cuda` or `hip`); GPU_SMALL_Q, GPU_SMALL_FLOPS,
 //! GPU_BIG_PAIR_FLOPS, GPU_WIDE_PAIR_K, GPU_WIDE_PAIR_FLOPS,
-//! GPU_CHAIN_FLOPS_F32, GPU_CHAIN_FLOPS_F64, GPU_CHAIN_ITEMS, GPU_SOLVE_WORK
-//! and GPU_BLOCKS_PER_SM override the device's
+//! GPU_CHAIN_FLOPS_F32, GPU_CHAIN_FLOPS_F64, GPU_CHAIN_ITEMS,
+//! GPU_SOLVE_CHAIN_WORK, GPU_SOLVE_WORK and GPU_BLOCKS_PER_SM override the
+//! device's
 //! `GpuSupernodalParams`; GPU_CHECK_FACTOR=1 compares the f64 factor with
 //! the CPU's, supernode by supernode, and checks 50 more factorizations;
 //! GPU_ORDER picks the elimination order, `amd` (the default) or `nd`
@@ -81,6 +82,9 @@ fn params() -> GpuSupernodalParams {
     }
     if let Some(v) = var("GPU_CHAIN_ITEMS") {
         p.chain_items = v as u32;
+    }
+    if let Some(v) = var("GPU_SOLVE_CHAIN_WORK") {
+        p.solve_chain_work = v;
     }
     if let Some(v) = var("GPU_SOLVE_WORK") {
         p.solve_work = v as usize;
