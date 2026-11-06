@@ -76,6 +76,8 @@ pub struct HipDevice {
     capturing: AtomicBool,
     /// The device memory the blocks come from and go back to.
     pool: Arc<Pool<HipMem>>,
+    /// The pinned host memory the host blocks come from and go back to.
+    host_pool: Arc<Pool<PinnedMem>>,
 }
 
 // SAFETY: the stream is a runtime handle usable from any thread (each call
@@ -149,6 +151,69 @@ impl HipBlock {
 
 impl Drop for HipBlock {
     fn drop(&mut self) {
+        if let Some(mem) = self.mem.take() {
+            self.pool.give(self.cap, mem);
+        }
+    }
+}
+
+/// A pinned host allocation and the event recorded after each copy from
+/// it, freed when its pool goes.
+struct PinnedMem {
+    ptr: *mut u8,
+    event: rt::hipEvent_t,
+    l: &'static Libs,
+    index: i32,
+}
+
+// SAFETY: page-locked host memory and an event handle, valid on any thread
+// of the process; writes to the memory go through `host_mut`, which waits
+// for the copies from it.
+unsafe impl Send for PinnedMem {}
+unsafe impl Sync for PinnedMem {}
+
+impl Drop for PinnedMem {
+    fn drop(&mut self) {
+        // SAFETY: allocated by hipHostMalloc and hipEventCreateWithFlags in
+        // `alloc_host`, freed once, after the copies from it completed.
+        unsafe {
+            let _ = self.l.rt.hipSetDevice(self.index);
+            let _ = self.l.rt.hipEventSynchronize(self.event);
+            let _ = self.l.rt.hipEventDestroy(self.event);
+            let _ = self.l.rt.hipHostFree(self.ptr.cast());
+        }
+    }
+}
+
+/// Pinned host memory on a [`HipDevice`] ([`Device::alloc_host`]), from its
+/// pool and back to it on drop.
+pub struct HipHost {
+    /// Some until the drop; its own size, `cap`, may exceed `len`.
+    mem: Option<PinnedMem>,
+    cap: usize,
+    len: usize,
+    pool: Arc<Pool<PinnedMem>>,
+}
+
+impl HipHost {
+    /// Its size in bytes.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether it holds no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn mem(&self) -> &PinnedMem {
+        self.mem.as_ref().expect("a host block's memory until its drop")
+    }
+}
+
+impl Drop for HipHost {
+    fn drop(&mut self) {
+        // copies from it may still run: the next taker waits for them
         if let Some(mem) = self.mem.take() {
             self.pool.give(self.cap, mem);
         }
@@ -408,6 +473,7 @@ impl HipDevice {
                 modules: Mutex::new(HashMap::new()),
                 capturing: AtomicBool::new(false),
                 pool: Arc::new(Pool::new()),
+                host_pool: Arc::new(Pool::new()),
             })
         }
     }
@@ -486,6 +552,7 @@ impl Device for HipDevice {
     type Block = HipBlock;
     type Kernel = HipKernel;
     type Graph = HipGraph;
+    type Host = HipHost;
     const RUNTIME: &'static str = "hip";
 
     fn arch(&self) -> &Arch {
@@ -498,6 +565,10 @@ impl Device for HipDevice {
 
     fn reserved_bytes(&self) -> usize {
         self.pool.reserved_bytes()
+    }
+
+    fn host_allocations(&self) -> usize {
+        self.host_pool.allocations()
     }
 
     fn alloc(&self, bytes: usize) -> Result<HipBlock, GpuError> {
@@ -529,6 +600,58 @@ impl Device for HipDevice {
         // the call returns, so `src` may be reused after it.
         let e = unsafe { self.l.rt.hipMemcpyHtoDAsync(dst.ptr().byte_add(offset), src.as_ptr().cast(), src.len(), self.stream) };
         check(self.l, e, "hipMemcpyHtoDAsync")
+    }
+
+    fn alloc_host(&self, bytes: usize) -> Result<HipHost, GpuError> {
+        let (cap, mem) = match self.host_pool.take(bytes) {
+            Some(taken) => taken,
+            None => {
+                let cap = capacity(bytes);
+                self.host_pool.made(cap);
+                self.bind()?;
+                let mut event = core::ptr::null_mut();
+                // SAFETY: an out-parameter.
+                check(self.l, unsafe { self.l.rt.hipEventCreateWithFlags(&mut event, rt::hipEventDisableTiming) }, "hipEventCreateWithFlags")?;
+                let mut ptr = core::ptr::null_mut();
+                // SAFETY: an out-parameter; contents left undefined.
+                let e = unsafe { self.l.rt.hipHostMalloc(&mut ptr, cap, 0) };
+                if let Err(err) = check(self.l, e, "hipHostMalloc") {
+                    // SAFETY: the event created above, destroyed once.
+                    unsafe {
+                        let _ = self.l.rt.hipEventDestroy(event);
+                    }
+                    return Err(err);
+                }
+                (cap, PinnedMem { ptr: ptr.cast(), event, l: self.l, index: self.index })
+            }
+        };
+        Ok(HipHost { mem: Some(mem), cap, len: bytes, pool: self.host_pool.clone() })
+    }
+
+    fn host_mut<'a>(&self, host: &'a mut HipHost) -> Result<&'a mut [u8], GpuError> {
+        self.bind()?;
+        let mem = host.mem();
+        // SAFETY: the host block's event.
+        check(self.l, unsafe { self.l.rt.hipEventSynchronize(mem.event) }, "hipEventSynchronize")?;
+        // SAFETY: the allocation holds `len` bytes, no copy from it pending.
+        Ok(unsafe { core::slice::from_raw_parts_mut(mem.ptr, host.len) })
+    }
+
+    fn write_from_host(&self, dst: &mut HipBlock, offset: usize, host: &HipHost, range: core::ops::Range<usize>) -> Result<(), GpuError> {
+        self.not_capturing("a write")?;
+        assert!(range.start <= range.end && range.end <= host.len, "a copy past the host block's {} bytes", host.len);
+        assert!(offset + range.len() <= dst.len, "a write past the block's {} bytes", dst.len);
+        if range.is_empty() {
+            return Ok(());
+        }
+        self.bind()?;
+        let mem = host.mem();
+        // SAFETY: within the block and the host memory; the host memory is
+        // not written before the event recorded below has passed.
+        let e = unsafe { self.l.rt.hipMemcpyHtoDAsync(dst.ptr().byte_add(offset), mem.ptr.add(range.start).cast(), range.len(), self.stream) };
+        check(self.l, e, "hipMemcpyHtoDAsync")?;
+        // SAFETY: the host block's event and the device's stream.
+        check(self.l, unsafe { self.l.rt.hipEventRecord(mem.event, self.stream) }, "hipEventRecord")
     }
 
     fn read(&self, src: &HipBlock, offset: usize, dst: &mut [u8]) -> Result<(), GpuError> {

@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! bindgen /opt/rocm/include/hip/hip_runtime_api.h --dynamic-loading HipRuntime --dynamic-link-require-all \
-//!   --allowlist-function 'hipInit|hipGetDeviceCount|hipSetDevice|hipGetDevicePropertiesR0600|hipDeviceGetAttribute|hipRuntimeGetVersion|hipStreamCreateWithFlags|hipStreamDestroy|hipStreamSynchronize|hipMalloc|hipFree|hipMemsetAsync|hipMemcpyHtoDAsync|hipMemcpyDtoHAsync|hipModuleLoadData|hipModuleUnload|hipModuleGetFunction|hipModuleLaunchKernel|hipFuncGetAttribute|hipStreamBeginCapture|hipStreamEndCapture|hipGraphInstantiate|hipGraphUpload|hipGraphLaunch|hipGraphExecDestroy|hipGraphDestroy|hipGetErrorName|hipGetErrorString' \
+//!   --allowlist-function 'hipInit|hipGetDeviceCount|hipSetDevice|hipGetDevicePropertiesR0600|hipDeviceGetAttribute|hipRuntimeGetVersion|hipStreamCreateWithFlags|hipStreamDestroy|hipStreamSynchronize|hipMalloc|hipFree|hipMemsetAsync|hipMemcpyHtoDAsync|hipMemcpyDtoHAsync|hipModuleLoadData|hipModuleUnload|hipModuleGetFunction|hipModuleLaunchKernel|hipFuncGetAttribute|hipStreamBeginCapture|hipStreamEndCapture|hipGraphInstantiate|hipGraphUpload|hipGraphLaunch|hipGraphExecDestroy|hipGraphDestroy|hipGetErrorName|hipGetErrorString|hipHostMalloc|hipHostFree|hipEventCreateWithFlags|hipEventRecord|hipEventSynchronize|hipEventDestroy' \
+//!   --allowlist-var 'hipHostMallocWriteCombined|hipEventDisableTiming|hipEventBlockingSync' \
 //!   --no-layout-tests --no-doc-comments --use-core -- -D__HIP_PLATFORM_AMD__ -I/opt/rocm/include
 //! bindgen /opt/rocm/include/hip/hiprtc.h --dynamic-loading HipRtc --dynamic-link-require-all \
 //!   --allowlist-function 'hiprtc(CreateProgram|CompileProgram|GetProgramLogSize|GetProgramLog|GetCodeSize|GetCode|DestroyProgram|Version|GetErrorString)' \
@@ -512,6 +513,9 @@ pub mod rt {
             }
         }
     }
+    pub const hipEventBlockingSync: u32 = 1;
+    pub const hipEventDisableTiming: u32 = 2;
+    pub const hipHostMallocWriteCombined: u32 = 4;
     #[repr(C)]
     #[derive(Debug, Copy, Clone)]
     pub struct hipDeviceArch_t {
@@ -1596,6 +1600,12 @@ pub mod rt {
     pub type hipFunction_t = *mut ihipModuleSymbol_t;
     #[repr(C)]
     #[derive(Debug)]
+    pub struct ihipEvent_t {
+        _unused: [u8; 0],
+    }
+    pub type hipEvent_t = *mut ihipEvent_t;
+    #[repr(C)]
+    #[derive(Debug)]
     pub struct ihipGraph {
         _unused: [u8; 0],
     }
@@ -1638,9 +1648,20 @@ pub mod rt {
             unsafe extern "C" fn(stream: *mut hipStream_t, flags: ::core::ffi::c_uint) -> hipError_t,
         pub hipStreamDestroy: unsafe extern "C" fn(stream: hipStream_t) -> hipError_t,
         pub hipStreamSynchronize: unsafe extern "C" fn(stream: hipStream_t) -> hipError_t,
+        pub hipEventCreateWithFlags:
+            unsafe extern "C" fn(event: *mut hipEvent_t, flags: ::core::ffi::c_uint) -> hipError_t,
+        pub hipEventRecord: unsafe extern "C" fn(event: hipEvent_t, stream: hipStream_t) -> hipError_t,
+        pub hipEventDestroy: unsafe extern "C" fn(event: hipEvent_t) -> hipError_t,
+        pub hipEventSynchronize: unsafe extern "C" fn(event: hipEvent_t) -> hipError_t,
         pub hipMalloc:
             unsafe extern "C" fn(ptr: *mut *mut ::core::ffi::c_void, size: usize) -> hipError_t,
+        pub hipHostMalloc: unsafe extern "C" fn(
+            ptr: *mut *mut ::core::ffi::c_void,
+            size: usize,
+            flags: ::core::ffi::c_uint,
+        ) -> hipError_t,
         pub hipFree: unsafe extern "C" fn(ptr: *mut ::core::ffi::c_void) -> hipError_t,
+        pub hipHostFree: unsafe extern "C" fn(ptr: *mut ::core::ffi::c_void) -> hipError_t,
         pub hipMemcpyHtoDAsync: unsafe extern "C" fn(
             dst: hipDeviceptr_t,
             src: *const ::core::ffi::c_void,
@@ -1734,8 +1755,16 @@ pub mod rt {
                 .map(|sym| *sym)?;
             let hipStreamDestroy = __library.get(b"hipStreamDestroy\0").map(|sym| *sym)?;
             let hipStreamSynchronize = __library.get(b"hipStreamSynchronize\0").map(|sym| *sym)?;
+            let hipEventCreateWithFlags = __library
+                .get(b"hipEventCreateWithFlags\0")
+                .map(|sym| *sym)?;
+            let hipEventRecord = __library.get(b"hipEventRecord\0").map(|sym| *sym)?;
+            let hipEventDestroy = __library.get(b"hipEventDestroy\0").map(|sym| *sym)?;
+            let hipEventSynchronize = __library.get(b"hipEventSynchronize\0").map(|sym| *sym)?;
             let hipMalloc = __library.get(b"hipMalloc\0").map(|sym| *sym)?;
+            let hipHostMalloc = __library.get(b"hipHostMalloc\0").map(|sym| *sym)?;
             let hipFree = __library.get(b"hipFree\0").map(|sym| *sym)?;
+            let hipHostFree = __library.get(b"hipHostFree\0").map(|sym| *sym)?;
             let hipMemcpyHtoDAsync = __library.get(b"hipMemcpyHtoDAsync\0").map(|sym| *sym)?;
             let hipMemcpyDtoHAsync = __library.get(b"hipMemcpyDtoHAsync\0").map(|sym| *sym)?;
             let hipMemsetAsync = __library.get(b"hipMemsetAsync\0").map(|sym| *sym)?;
@@ -1764,8 +1793,14 @@ pub mod rt {
                 hipStreamCreateWithFlags,
                 hipStreamDestroy,
                 hipStreamSynchronize,
+                hipEventCreateWithFlags,
+                hipEventRecord,
+                hipEventDestroy,
+                hipEventSynchronize,
                 hipMalloc,
+                hipHostMalloc,
                 hipFree,
+                hipHostFree,
                 hipMemcpyHtoDAsync,
                 hipMemcpyDtoHAsync,
                 hipMemsetAsync,
@@ -1832,11 +1867,38 @@ pub mod rt {
         pub unsafe fn hipStreamSynchronize(&self, stream: hipStream_t) -> hipError_t {
             (self.hipStreamSynchronize)(stream)
         }
+        pub unsafe fn hipEventCreateWithFlags(
+            &self,
+            event: *mut hipEvent_t,
+            flags: ::core::ffi::c_uint,
+        ) -> hipError_t {
+            (self.hipEventCreateWithFlags)(event, flags)
+        }
+        pub unsafe fn hipEventRecord(&self, event: hipEvent_t, stream: hipStream_t) -> hipError_t {
+            (self.hipEventRecord)(event, stream)
+        }
+        pub unsafe fn hipEventDestroy(&self, event: hipEvent_t) -> hipError_t {
+            (self.hipEventDestroy)(event)
+        }
+        pub unsafe fn hipEventSynchronize(&self, event: hipEvent_t) -> hipError_t {
+            (self.hipEventSynchronize)(event)
+        }
         pub unsafe fn hipMalloc(&self, ptr: *mut *mut ::core::ffi::c_void, size: usize) -> hipError_t {
             (self.hipMalloc)(ptr, size)
         }
+        pub unsafe fn hipHostMalloc(
+            &self,
+            ptr: *mut *mut ::core::ffi::c_void,
+            size: usize,
+            flags: ::core::ffi::c_uint,
+        ) -> hipError_t {
+            (self.hipHostMalloc)(ptr, size, flags)
+        }
         pub unsafe fn hipFree(&self, ptr: *mut ::core::ffi::c_void) -> hipError_t {
             (self.hipFree)(ptr)
+        }
+        pub unsafe fn hipHostFree(&self, ptr: *mut ::core::ffi::c_void) -> hipError_t {
+            (self.hipHostFree)(ptr)
         }
         pub unsafe fn hipMemcpyHtoDAsync(
             &self,

@@ -5,7 +5,7 @@ use crate::disk::DiskCache;
 use crate::pool::{Pool, capacity};
 use crate::{Arch, Arg, Device, GpuError, HEADER, Launch, MAX_ARGS};
 use cudarc::driver::sys::{self, CUdevice_attribute, CUfunction_attribute};
-use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, result};
+use cudarc::driver::{CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, result};
 use cudarc::nvrtc::{self, Ptx};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -22,6 +22,8 @@ pub struct CudaDevice {
     capturing: AtomicBool,
     /// The device memory the blocks come from and go back to.
     pool: Arc<Pool<CudaSlice<u8>>>,
+    /// The pinned host memory the host blocks come from and go back to.
+    host_pool: Arc<Pool<PinnedMem>>,
 }
 
 impl core::fmt::Debug for CudaDevice {
@@ -205,6 +207,7 @@ impl CudaDevice {
             modules: Mutex::new(HashMap::new()),
             capturing: AtomicBool::new(false),
             pool: Arc::new(Pool::new()),
+            host_pool: Arc::new(Pool::new()),
         })
     }
 
@@ -319,10 +322,68 @@ fn compile_cubin(entry: &str, source: &str, opts: &[String]) -> Result<Vec<u8>, 
     Ok(cubin)
 }
 
+/// A pinned host allocation and the event recorded after each copy from
+/// it, freed when its pool goes.
+struct PinnedMem {
+    ptr: *mut u8,
+    event: CudaEvent,
+}
+
+// SAFETY: page-locked host memory and an event, valid on any thread of the
+// process; writes to the memory go through `host_mut`, which waits for the
+// copies from it.
+unsafe impl Send for PinnedMem {}
+unsafe impl Sync for PinnedMem {}
+
+impl Drop for PinnedMem {
+    fn drop(&mut self) {
+        // SAFETY: allocated by cuMemHostAlloc in `alloc_host`, freed once,
+        // after the copies from it completed.
+        let _ = self.event.synchronize();
+        let _ = unsafe { result::free_host(self.ptr.cast()) };
+    }
+}
+
+/// Pinned host memory on a [`CudaDevice`] ([`Device::alloc_host`]), from its
+/// pool and back to it on drop.
+pub struct CudaHost {
+    /// Some until the drop; its own size, `cap`, may exceed `len`.
+    mem: Option<PinnedMem>,
+    cap: usize,
+    len: usize,
+    pool: Arc<Pool<PinnedMem>>,
+}
+
+impl CudaHost {
+    /// Its size in bytes.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether it holds no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn mem(&self) -> &PinnedMem {
+        self.mem.as_ref().expect("a host block's memory until its drop")
+    }
+}
+
+impl Drop for CudaHost {
+    fn drop(&mut self) {
+        // copies from it may still run: the next taker waits for them
+        if let Some(mem) = self.mem.take() {
+            self.pool.give(self.cap, mem);
+        }
+    }
+}
+
 impl Device for CudaDevice {
     type Block = CudaBlock;
     type Kernel = CudaKernel;
     type Graph = CudaGraph;
+    type Host = CudaHost;
     const RUNTIME: &'static str = "cuda";
 
     fn arch(&self) -> &Arch {
@@ -335,6 +396,10 @@ impl Device for CudaDevice {
 
     fn reserved_bytes(&self) -> usize {
         self.pool.reserved_bytes()
+    }
+
+    fn host_allocations(&self) -> usize {
+        self.host_pool.allocations()
     }
 
     fn alloc(&self, bytes: usize) -> Result<CudaBlock, GpuError> {
@@ -362,6 +427,47 @@ impl Device for CudaDevice {
         assert!(offset + src.len() <= dst.len, "a write past the block's {} bytes", dst.len);
         let mut view = dst.mem_mut().slice_mut(offset..offset + src.len());
         self.stream.memcpy_htod(src, &mut view).map_err(driver)
+    }
+
+    fn alloc_host(&self, bytes: usize) -> Result<CudaHost, GpuError> {
+        let (cap, mem) = match self.host_pool.take(bytes) {
+            Some(taken) => taken,
+            None => {
+                let cap = capacity(bytes);
+                self.host_pool.made(cap);
+                self.ctx.bind_to_thread().map_err(driver)?;
+                let event = self.ctx.new_event(None).map_err(driver)?;
+                // SAFETY: a fresh allocation, its contents left undefined.
+                let ptr = unsafe { result::malloc_host(cap, 0) }.map_err(driver)?;
+                (cap, PinnedMem { ptr: ptr.cast(), event })
+            }
+        };
+        Ok(CudaHost { mem: Some(mem), cap, len: bytes, pool: self.host_pool.clone() })
+    }
+
+    fn host_mut<'a>(&self, host: &'a mut CudaHost) -> Result<&'a mut [u8], GpuError> {
+        let mem = host.mem();
+        mem.event.synchronize().map_err(driver)?;
+        // SAFETY: the allocation holds `len` bytes, no copy from it pending.
+        Ok(unsafe { core::slice::from_raw_parts_mut(mem.ptr, host.len) })
+    }
+
+    fn write_from_host(&self, dst: &mut CudaBlock, offset: usize, host: &CudaHost, range: core::ops::Range<usize>) -> Result<(), GpuError> {
+        self.not_capturing("a write")?;
+        assert!(range.start <= range.end && range.end <= host.len, "a copy past the host block's {} bytes", host.len);
+        assert!(offset + range.len() <= dst.len, "a write past the block's {} bytes", dst.len);
+        if range.is_empty() {
+            return Ok(());
+        }
+        let mem = host.mem();
+        let at = dst.mem_mut().device_ptr_mut(&self.stream).0 + offset as u64;
+        // SAFETY: within the block and the host memory; the host memory is
+        // not written before the event recorded below has passed.
+        unsafe {
+            let src = core::slice::from_raw_parts(mem.ptr.add(range.start), range.len());
+            result::memcpy_htod_async(at, src, self.stream.cu_stream()).map_err(driver)?;
+        }
+        mem.event.record(&self.stream).map_err(driver)
     }
 
     fn read(&self, src: &CudaBlock, offset: usize, dst: &mut [u8]) -> Result<(), GpuError> {

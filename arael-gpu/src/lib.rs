@@ -309,6 +309,9 @@ pub trait Device: Send + Sync {
     type Kernel: Send + Sync;
     /// A recorded sequence of launches ([`Device::capture`]).
     type Graph: Send;
+    /// Pinned (page-locked) host memory, the source of an asynchronous
+    /// [`Device::write_from_host`].
+    type Host: Send + Sync;
 
     /// The runtime's name: `cuda`, `hip`.
     const RUNTIME: &'static str;
@@ -329,8 +332,31 @@ pub trait Device: Send + Sync {
     /// Bytes of device memory the device holds, in blocks in use or free.
     fn reserved_bytes(&self) -> usize;
 
+    /// Pinned host blocks the device has allocated from the driver over its
+    /// life; a dropped one is handed out again, as device blocks are.
+    fn host_allocations(&self) -> usize;
+
     /// Copies `src` into `dst` from byte `offset` on. `src` may be reused when this returns.
     fn write(&self, dst: &mut Self::Block, offset: usize, src: &[u8]) -> Result<(), GpuError>;
+
+    /// `bytes` of pinned (page-locked, cached) host memory. Its contents
+    /// start undefined.
+    fn alloc_host(&self, bytes: usize) -> Result<Self::Host, GpuError>;
+
+    /// The bytes of `host`, to write, once every copy queued from it has
+    /// completed.
+    fn host_mut<'a>(&self, host: &'a mut Self::Host) -> Result<&'a mut [u8], GpuError>;
+
+    /// Queues a copy of `host[range]` into `dst` from byte `offset` on and
+    /// returns without waiting; [`host_mut`](Self::host_mut) waits for it
+    /// before `host` is written again.
+    ///
+    /// ```ignore
+    /// let mut staging = dev.alloc_host(n)?;
+    /// dev.host_mut(&mut staging)?[..n].copy_from_slice(&bytes);
+    /// dev.write_from_host(&mut block, 0, &staging, 0..n)?;
+    /// ```
+    fn write_from_host(&self, dst: &mut Self::Block, offset: usize, host: &Self::Host, range: core::ops::Range<usize>) -> Result<(), GpuError>;
 
     /// Copies `dst.len()` bytes of `src` from byte `offset` on, after the work queued before it.
     fn read(&self, src: &Self::Block, offset: usize, dst: &mut [u8]) -> Result<(), GpuError>;
