@@ -931,11 +931,13 @@ where
 /// built structure: one block lookup per RUN of same-cell coordinates
 /// (contributions arrive block-object by block-object), arithmetic only
 /// inside a run. The consumer for building indexed position maps
-/// without a COO pass.
+/// without a COO pass. A clone shares the scalar-to-block tables and has a
+/// memo of its own, for resolving on several threads.
+#[derive(Clone)]
 pub struct PositionResolver<'a, I: Index> {
     sym: &'a SymbolicSparseBlockColMat<I>,
-    blk_row_of: Vec<u32>,
-    blk_col_of: Vec<u32>,
+    blk_row_of: std::sync::Arc<[u32]>,
+    blk_col_of: std::sync::Arc<[u32]>,
     last_key: u64,
     base: usize,
     row_w: usize,
@@ -947,7 +949,7 @@ pub struct PositionResolver<'a, I: Index> {
 
 impl<'a, I: Index> PositionResolver<'a, I> {
     pub fn new(sym: &'a SymbolicSparseBlockColMat<I>) -> Self {
-        let of = |part: &[I]| {
+        let of = |part: &[I]| -> std::sync::Arc<[u32]> {
             let nblk = part.len() - 1;
             let mut of = vec![0u32; part[nblk].zx()];
             for b in 0..nblk {
@@ -955,7 +957,7 @@ impl<'a, I: Index> PositionResolver<'a, I> {
                     of[i] = b as u32;
                 }
             }
-            of
+            of.into()
         };
         let (row_part, col_part, _, _, _) = sym.parts();
         Self {
