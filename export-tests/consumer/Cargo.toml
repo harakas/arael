@@ -11,6 +11,8 @@ export-models = { path = "../models" }
 trybuild = "1"
 
 # The device assembly of the imported models: cargo test --features gpu-cuda
+# (or gpu-hip, or gpu-cpu without a GPU)
 [features]
 gpu-cuda = ["arael/gpu-cuda"]
 gpu-hip = ["arael/gpu-hip"]
+gpu-cpu = ["arael/gpu-cpu"]

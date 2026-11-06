@@ -1,7 +1,7 @@
-// Imported models on the device (feature gpu-cuda or gpu-hip): roots of an
+// Imported models on the device (feature gpu-cuda, gpu-hip or gpu-cpu): roots of an
 // imported generic entity, a `vect<T, 4>` parameter and a `matrix<T, 2, 4>`
 // datum, assemble on the device as on the CPU in f64 and f32.
-#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
 
 use arael::__gpu::Wide;
 use arael::matrix::matrixd;
@@ -19,6 +19,10 @@ fn device() -> std::sync::Arc<arael::__gpu::cuda::CudaDevice> {
 #[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
 fn device() -> std::sync::Arc<arael::__gpu::hip::HipDevice> {
     std::sync::Arc::new(arael::__gpu::hip::HipDevice::new(0).unwrap())
+}
+#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+fn device() -> std::sync::Arc<arael::__gpu::cpu::CpuDevice> {
+    std::sync::Arc::new(arael::__gpu::cpu::CpuDevice::new(0).unwrap())
 }
 
 macro_rules! cals {
