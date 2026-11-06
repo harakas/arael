@@ -55,6 +55,24 @@ DEVICE double arael_safe_sqrt(double v) { return v <= 0.0 ? 0.0 : sqrt(v); }
 DEVICE float arael_epsilon_for(float) { return 1.1920928955078125e-7f; }
 DEVICE double arael_epsilon_for(double) { return 2.220446049250313e-16; }
 
+// The arm of n a select's index x picks (arael::utils::SelectIndex): the
+// integer in [0, n) x is, -1 for an integer outside them (the default
+// arm), -2 for a NaN, an infinity or a fraction (where the CPU panics).
+template <typename T>
+DEVICE int arael_select_index(T x, u32 n) {
+    if (isnan(x) || isinf(x) || x != floor(x)) return -2;
+    if (x < (T)0 || x >= (T)n) return -1;
+    return (int)x;
+}
+
+// A quiet NaN of the argument's type, its value ignored: a select's value
+// where the CPU's select panics.
+DEVICE float arael_nan_of(float) { return __int_as_float(0x7fc00000); }
+DEVICE double arael_nan_of(double) { return __longlong_as_double(0x7ff8000000000000LL); }
+#ifdef ARAEL_WIDE_DF32
+DEVICE df32 arael_nan_of(df32) { return df32(arael_nan_of(0.0f)); }
+#endif
+
 // An entity's parameter values from x (W) in F, one thread per value:
 // ev[i] = x[idx[i]], or fixed[i] for a fixed parameter.
 KERNEL_THREADS(256) void k_gather_params(GLOBAL const W* RESTRICT x, GLOBAL const u32* RESTRICT idx,
