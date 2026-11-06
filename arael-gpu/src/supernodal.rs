@@ -12,7 +12,7 @@ use arael_faer::schur::SchurReal;
 use arael_faer::supernodal::SupernodalSymbolic;
 
 use crate::plan::{self, GpuSupernodalParams, NB, Plan, SparseIndex, TB, build_levels};
-use crate::{Arg, Device, GpuError, Launch, Scalar, WIDE, Wide, is_f64, scalar_bytes, staged};
+use crate::{Arg, Device, GpuError, Launch, Scalar, WIDE, Wide, is_f64, scalar_bytes};
 
 /// Arrays packed into one block, each starting on a 256-byte boundary.
 #[derive(Default)]
@@ -193,7 +193,7 @@ pub struct GpuSupernodal<F: Scalar, D: Device> {
     tiles: usize,
     on: usize,
     ntiles: u32,
-    /// The seed's threads per stored tile: a block each, or 1 (a thread each).
+    /// The seed's threads per stored tile, a block each.
     seed_lanes: u32,
     levels: Vec<Level>,
     steps: Vec<Step>,
@@ -343,10 +343,9 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let nvals = asym.val_count();
         let sec = Sections::new(plan.factor_vals * fs, plan.n * fs, nvals * 8, plan.n * 8);
         let work = dev.alloc(sec.bytes)?;
-        // the seed's threads per stored tile where the kernels are staged
-        // (the wavefront), else a thread per tile
-        let seed_lanes = if staged::<D>() { dev.arch().warp } else { 1 };
-        let defines = format!("{}{}", wide.defines(), defines(F::CPP, lu, staged::<D>(), seed_lanes));
+        // the seed's threads per stored tile: the device's lockstep width
+        let seed_lanes = dev.arch().warp;
+        let defines = format!("{}{}", wide.defines(), defines(F::CPP, lu, seed_lanes));
         let source = format!("{WIDE}\n{SOURCE}");
         let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_f64", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out"];
         let [zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out]: [D::Kernel; 20] =
@@ -425,11 +424,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let flen = self.factor_vals as u32;
         self.run(&self.k.zero, flen.div_ceil(THREADS).max(1), THREADS, 0, &[factor, Arg::U32(flen)])?;
         let seed_args = [list(self.tiles), Arg::Block(vals.0, vals.1), factor, Arg::U32(self.ntiles)];
-        if staged::<D>() {
-            self.run(seed, self.ntiles.max(1), self.seed_lanes, 0, &seed_args)?;
-        } else {
-            self.run(seed, self.ntiles.div_ceil(THREADS).max(1), THREADS, 0, &seed_args)?;
-        }
+        self.run(seed, self.ntiles.max(1), self.seed_lanes, 0, &seed_args)?;
         for step in &self.steps {
             let l = match *step {
                 Step::Chain { records, n, shared } => {
@@ -675,11 +670,10 @@ impl<D: Device> GpuFactor<D> {
 }
 
 /// The `#define`s of `supernodal.cpp`: the scalar, the lane unroll, the
-/// block size, and the tile sizes and plan header slots of [`crate::plan`].
-fn defines(scalar: &str, lu: usize, staged: bool, seed_lanes: u32) -> String {
+/// block sizes, and the tile sizes and plan header slots of [`crate::plan`].
+fn defines(scalar: &str, lu: usize, seed_lanes: u32) -> String {
     use plan::*;
-    let staged = staged as u32;
-    let mut s = format!("#define SCALAR {scalar}\n#define LU {lu}u\n#define THREADS {THREADS}u\n#define STAGED {staged}u\n#define SEED_LANES {seed_lanes}u\n");
+    let mut s = format!("#define SCALAR {scalar}\n#define LU {lu}u\n#define THREADS {THREADS}u\n#define SEED_LANES {seed_lanes}u\n");
     let consts = [
         ("NB", NB),
         ("TB", TB),

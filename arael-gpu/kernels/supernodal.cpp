@@ -28,7 +28,6 @@ KERNEL_THREADS(THREADS) void k_zero_u32(GLOBAL u32* RESTRICT buf, u32 n) {
     if (i < n) buf[i] = 0;
 }
 
-#if STAGED
 // Stored tile `t` scattered into its panel by the SEED_LANES threads of a
 // block, its values cast to F: `tiles` has 6 entries per tile (destination,
 // stride, transposed, value offset, rows, columns). An upper tile lands
@@ -76,45 +75,6 @@ KERNEL_THREADS(SEED_LANES) void k_seed_wide(GLOBAL const u32* RESTRICT tiles, GL
     u32 t = block_x();
     if (t < ntiles) seed_tile_lanes<W>(tiles, vals, factor, t, thread_x());
 }
-#else
-// Stored tile `t` scattered into its panel, its values cast to F: `tiles` has
-// 6 entries per tile (destination, stride, transposed, value offset, rows,
-// columns). An upper tile lands transposed, a diagonal one as is.
-template <typename M>
-DEVICE void seed_tile(GLOBAL const u32* tiles, GLOBAL const M* vals, GLOBAL F* factor, u32 t) {
-    u32 dst = tiles[6 * t];
-    u32 stride = tiles[6 * t + 1];
-    u32 trans = tiles[6 * t + 2];
-    u32 off = tiles[6 * t + 3];
-    u32 wr = tiles[6 * t + 4];
-    u32 wc = tiles[6 * t + 5];
-    if (trans == 0) {
-        for (u32 c = 0; c < wc; c++)
-            for (u32 r = 0; r < wr; r++) factor[dst + c * stride + r] = (F)vals[off + c * wr + r];
-    } else {
-        for (u32 c = 0; c < wr; c++)
-            for (u32 r = 0; r < wc; r++) factor[dst + c * stride + r] = (F)vals[off + c + r * wr];
-    }
-}
-
-// The seed from f32 values: one thread per stored tile.
-KERNEL_THREADS(THREADS) void k_seed_f32(GLOBAL const u32* RESTRICT tiles, GLOBAL const float* RESTRICT vals, GLOBAL F* RESTRICT factor, u32 ntiles) {
-    u32 t = global_x();
-    if (t < ntiles) seed_tile<float>(tiles, vals, factor, t);
-}
-
-// The seed from f64 values.
-KERNEL_THREADS(THREADS) void k_seed_f64(GLOBAL const u32* RESTRICT tiles, GLOBAL const double* RESTRICT vals, GLOBAL F* RESTRICT factor, u32 ntiles) {
-    u32 t = global_x();
-    if (t < ntiles) seed_tile<double>(tiles, vals, factor, t);
-}
-
-// The seed from values of the route's wide scalar (wide.h): S formed on the device.
-KERNEL_THREADS(THREADS) void k_seed_wide(GLOBAL const u32* RESTRICT tiles, GLOBAL const W* RESTRICT vals, GLOBAL F* RESTRICT factor, u32 ntiles) {
-    u32 t = global_x();
-    if (t < ntiles) seed_tile<W>(tiles, vals, factor, t);
-}
-#endif
 
 // The small descendant updates: one block per piece of `items` (PAIR_ITEM
 // words each, plan.rs's LevelWork::pair_items): rows [i0, i1) of a pair
@@ -774,9 +734,8 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
 #pragma unroll
     for (u32 z = 0; z < 16; z++) acc[z] = F(0);
     for (u32 kk = 0; kk < nb; kk++) {
-#if STAGED
-        // rows tx + 16 r and columns ty + 16 c: a wavefront's reads and
-        // writes of the tile cover whole cache lines
+        // rows tx + 16 r and columns ty + 16 c: neighbouring threads read
+        // and write neighbouring rows, whole cache lines together
         F a0 = sa[kk * TB + tx];
         F a1 = sa[kk * TB + tx + 16];
         F a2 = sa[kk * TB + tx + 32];
@@ -785,16 +744,6 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
         F b1 = sb[kk * TB + ty + 16];
         F b2 = sb[kk * TB + ty + 32];
         F b3 = sb[kk * TB + ty + 48];
-#else
-        F a0 = sa[kk * TB + tx * 4];
-        F a1 = sa[kk * TB + tx * 4 + 1];
-        F a2 = sa[kk * TB + tx * 4 + 2];
-        F a3 = sa[kk * TB + tx * 4 + 3];
-        F b0 = sb[kk * TB + ty * 4];
-        F b1 = sb[kk * TB + ty * 4 + 1];
-        F b2 = sb[kk * TB + ty * 4 + 2];
-        F b3 = sb[kk * TB + ty * 4 + 3];
-#endif
         acc[0] += a0 * b0;
         acc[1] += a0 * b1;
         acc[2] += a0 * b2;
@@ -816,13 +765,8 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
     for (u32 r = 0; r < 4; r++) {
 #pragma unroll
         for (u32 c = 0; c < 4; c++) {
-#if STAGED
             u32 i = tx + 16 * r;
             u32 jj = ty + 16 * c;
-#else
-            u32 i = tx * 4 + r;
-            u32 jj = ty * 4 + c;
-#endif
             if (i < nrows && jj < ncols && row0 + i >= col0 + jj) factor[panel + (col0 + jj) * h + row0 + i] -= acc[r * 4 + c];
         }
     }

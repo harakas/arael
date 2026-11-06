@@ -433,14 +433,6 @@ pub trait Device: Send + Sync {
     fn replay(&self, graph: &Self::Graph) -> Result<(), GpuError>;
 }
 
-/// Whether the kernels read their small blocks once into registers and
-/// shared memory and size their launches to the wavefront (`STAGED` in
-/// schur.cpp and supernodal.cpp): everywhere but CUDA, which keeps the
-/// plain loops until measured there (TODO.md).
-pub(crate) fn staged<D: Device>() -> bool {
-    D::RUNTIME != "cuda"
-}
-
 /// `#define NAME VALUEu` for each pair, for a kernel source's constants.
 pub(crate) fn define_u32s(s: &mut String, consts: &[(&str, usize)]) {
     use core::fmt::Write as _;
