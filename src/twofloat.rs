@@ -1047,7 +1047,7 @@ mod tests {
 
     #[test]
     fn the_arael_traits() {
-        use crate::utils::{Wide, WideScalar, SelectIndex};
+        use crate::utils::{Wide, WideScalar};
         use crate::model::ParamType;
         assert_eq!(<df32 as Wide<f32>>::widen(0.1f32).to_f64(), 0.1f32 as f64);
         assert_eq!(<df32 as Wide<f32>>::narrow(df32::from_f64(0.1)), 0.1f32);

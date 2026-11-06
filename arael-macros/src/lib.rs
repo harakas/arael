@@ -571,6 +571,13 @@ fn registry_lookup(name: &str) -> Option<SymLayout> {
         .or_else(|| builtin_component_layout(name))
 }
 
+/// Where the `#[arael::model]` struct `name` is defined (file, line), when
+/// it was expanded in this session.
+fn registry_site(name: &str) -> Option<(String, u32)> {
+    let guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    guard.as_ref().and_then(|reg| reg.sites.get(name).cloned())
+}
+
 /// Layouts of the in-tree components (defined in arael's own source, so
 /// they are never expanded in a downstream crate's macro session). The
 /// runtime halves live in the arael crate; these give the macro the same

@@ -7955,6 +7955,8 @@ pub fn generate_root_methods(
                     (&root_var_name, &root_name.to_string()),
                 )?;
                 dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
+                dc.site = (sc.attr_file.clone(), sc.attr_line);
+                dc.source = crate::device::attribute_text(&sc.attr_file, sc.attr_line).unwrap_or_else(|| sc.attr_tokens.clone());
                 Ok((dc, key, crate::device::DevGroup { walk: Box::new(walk) }))
             })();
             match built {
@@ -10444,7 +10446,10 @@ pub fn generate_root_methods(
         device_unsupported = Some("the root has no constraints".to_string());
     }
     let (device_items, device_why, device_accessor) = match &device_unsupported {
-        Some(why) => (quote! {}, quote! { Some(#why) }, quote! {}),
+        Some(why) => {
+            crate::device::dump_kernels(&root_name.to_string(), Err(why)).map_err(|e| syn::Error::new(root_name.span(), e))?;
+            (quote! {}, quote! { Some(#why) }, quote! {})
+        }
         None => {
             let groups = device_groups;
             let root_str = root_name.to_string();
@@ -10466,7 +10471,8 @@ pub fn generate_root_methods(
                 quote! { #(#walks)* }
             };
             let idx_fill = |ty: &str, acc: &TokenStream2, out: &syn::Ident| store_idx_stmts(ty, acc, out).1;
-            let items = crate::device::device_root(root_name, precision, &device_constraints, &groups, &entity_walk, &idx_fill);
+            let (items, cpp) = crate::device::device_root(root_name, precision, &device_constraints, &groups, &entity_walk, &idx_fill);
+            crate::device::dump_kernels(&root_str, Ok(&cpp)).map_err(|e| syn::Error::new(root_name.span(), e))?;
             (items, quote! { None }, quote! {
                 ::arael::__gpu_items! {
                     fn device_root(&self) -> Option<&dyn ::arael::__gpu::DeviceRoot<#prec_type>> { Some(self) }

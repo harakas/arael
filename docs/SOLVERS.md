@@ -933,6 +933,43 @@ turns it off; unset, it is `arael/kernels` in the user's cache directory
 wavefronts (RDNA, the consumer cards); 64-lane ones (CDNA, GCN) are not
 supported yet.
 
+`cargo arael kernels` writes the kernels a crate's roots generate, with
+no GPU needed: it builds the crate (by default `--all-targets`; arguments
+after `--` replace that) and writes each root it expands to
+`target/arael-kernels/<crate>/<Root>.cu`, or why the root has no device
+form:
+
+```bash
+cargo arael kernels
+cargo arael kernels -- --features gpu-cuda --test fit
+```
+
+A file opens with the root's tables (entity types and their parameters,
+referenced fields, cross tiles) and its data records, a field per line
+with its model path. Each constraint's kernels follow a banner with its
+source line, its attribute, its sides and its instance data, and every
+leaf a kernel reads is commented with its model symbol:
+
+```cpp
+// C4: a constraint of `SFrine` (tests/device_assembly.rs:3687), 2 rows
+//   #[arael(constraint(hb, parent = lm, {
+//       let mr2w = pose.ea.rotation_matrix();
+//   ...
+// Sides, in the order of a row's partials:
+//   0: `lm`, E1: lm.pos.work().x, lm.pos.work().y, lm.pos.work().z
+//   1: `pose`, E0: pose.pos.work().x, pose.pos.work().y, ...
+// Instance data D0: sfrine.camera_pos.x
+...
+        const F __l0 = COL(B, F, C4_D0)[o]; // sfrine.camera_pos.x
+```
+
+The comments are part of the compiled source, so a constraint moved to
+another line compiles its root's kernels again. The environment variable
+`ARAEL_KERNEL_DUMP` names a directory where every device assembly writes
+the whole unit it compiles (the layout's defines, the kernel headers, the
+shared kernels and the root's) as `<Root>.<target>.<wide>.cu`
+(`SPath.sm_89.df32.cu`); the line numbers of a compile error refer to it.
+
 The device sums without atomic writes, in its wide scalar: `f64`, or
 with `GpuDevice::with_wide(GpuWide::Df32)` df32, two f32 whose sum is the
 value, about 48 bits, for H, the gradient, the cost, the Schur reduction,

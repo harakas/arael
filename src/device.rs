@@ -351,6 +351,8 @@ pub trait DeviceRoot<T> {
     /// `arael-gpu/kernels/assembly.cpp` with the layout table's slots
     /// (`ARAEL_COL_*`) defined in front.
     fn device_cpp(&self) -> &'static str;
+    /// The root's type name: the name of its kernel dump.
+    fn device_name(&self) -> &'static str;
     /// Set the references of the model's optimized referenced parameters
     /// from `refs`, keyed by the first live index of the step, and zero
     /// their steps: a device solve's re-centring handed back.
@@ -372,6 +374,25 @@ pub struct DeviceCheck {
 
 /// Threads per block of every assembly kernel (`kernels/assembly.cpp`).
 const THREADS: u32 = 256;
+
+/// The environment variable naming the directory a device assembly writes
+/// the translation unit it compiles to, as `<root>.<target>.<wide>.cu`
+/// (`SPath.sm_89.f64.cu`): the architecture's and the layout's defines,
+/// the kernel headers, the shared kernels and the root's.
+///
+/// ```sh
+/// ARAEL_KERNEL_DUMP=target/kernels cargo test --features gpu-cuda --test device_assembly
+/// ```
+pub const KERNEL_DUMP_VAR: &str = "ARAEL_KERNEL_DUMP";
+
+/// Writes `unit` to `<dir>/<root>.<target>.<wide>.cu`, creating `dir`.
+fn dump_unit(dir: &std::path::Path, root: &str, target: &str, wide: Wide, unit: &str) -> Result<std::path::PathBuf, GpuError> {
+    let err = |e: std::io::Error| GpuError::Dump(format!("{}: {e}", dir.display()));
+    std::fs::create_dir_all(dir).map_err(err)?;
+    let path = dir.join(format!("{root}.{target}.{}.cu", wide.name()));
+    std::fs::write(&path, unit).map_err(err)?;
+    Ok(path)
+}
 
 /// One column of the model block: its name in the kernels, the size of an
 /// element in bytes, and its element count.
@@ -867,6 +888,9 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         let scalar = if ts == 8 { "double" } else { "float" };
         let defines = format!("{}#define SCALAR {scalar}\n{}", wide.defines(), layout.defines());
         let source = format!("{WIDE}\n{}\n{}", arael_gpu::ASSEMBLY, root.device_cpp());
+        if let Some(dir) = std::env::var_os(KERNEL_DUMP_VAR) {
+            dump_unit(dir.as_ref(), root.device_name(), &dev.arch().target, wide, &dev.unit(&source, &defines))?;
+        }
         // every entry point in one lookup of the source, in the order the
         // kernels take them below
         let mut entries: Vec<String> = ["k_gather_params", "k_zero_wide", "k_zero_steps"].map(String::from).to_vec();
@@ -1200,6 +1224,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A kernel dump lands at `<dir>/<root>.<target>.<wide>.cu`, the
+    /// directory made, and a dump that cannot be written is an error.
+    #[test]
+    fn a_kernel_dump_is_named_by_root_target_and_wide_scalar() {
+        let dir = std::env::temp_dir().join(format!("arael-kernel-dump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dump_unit(&dir.join("sub"), "Scene", "sm_89", Wide::Df32, "// unit\n").unwrap();
+        assert_eq!(path, dir.join("sub").join("Scene.sm_89.df32.cu"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "// unit\n");
+        // a file where the directory would be
+        let blocked = dir.join("file");
+        std::fs::write(&blocked, "").unwrap();
+        assert!(matches!(dump_unit(&blocked, "Scene", "sm_89", Wide::F64, ""), Err(GpuError::Dump(_))));
+    }
 
     /// The tiles looked up on several threads equal the ones looked up on
     /// one: two entity tables (three and two parameters a slot, some fixed

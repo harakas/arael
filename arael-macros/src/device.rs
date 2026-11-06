@@ -98,6 +98,167 @@ pub(crate) struct DevConstraint {
     /// The constraint's guard, evaluated once per structure by the
     /// structure walk: an instance it drops gets no row.
     pub filter: Option<TokenStream2>,
+    /// The constraint attribute's source file and line, and its text
+    /// (from the source, else its tokens): the kernels' comments.
+    pub site: (String, u32),
+    pub source: String,
+}
+
+/// The text of the attribute that starts at line `line` of `file`
+/// (`#[arael(constraint(...))]`, through its closing bracket), read from
+/// the source file, its lines after the first dedented by the attribute's
+/// column; `None` when the file cannot be read there or the attribute does
+/// not close.
+pub(crate) fn attribute_text(file: &str, line: u32) -> Option<String> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let start: usize = text.split_inclusive('\n').take(line.saturating_sub(1) as usize).map(str::len).sum();
+    let rest = text.get(start..)?;
+    let open = rest.find("#[")?;
+    let column = open - rest[..open].rfind('\n').map_or(0, |p| p + 1);
+    let dedent = |s: &str| -> String {
+        let mut lines = s.lines();
+        let mut out = lines.next().unwrap_or("").to_string();
+        for l in lines {
+            let ws = l.len() - l.trim_start().len();
+            out.push('\n');
+            out.push_str(&l[ws.min(column)..]);
+        }
+        out
+    };
+    // the brackets from `#[` to their balance, skipping strings and
+    // comments
+    let b = rest.as_bytes();
+    let (mut depth, mut i) = (0i32, open + 1);
+    while i < b.len() {
+        match b[i] {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(dedent(&rest[open..=i]));
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The symbol `s` of a constraint of `holder` as its attribute writes it:
+/// the instance's own fields, `__frine.<path>` in the body, as
+/// `<holder in lower case>.<path>`.
+fn shown(s: &str, holder: &str) -> String {
+    match s.strip_prefix("__frine.") {
+        Some(path) => format!("{}.{path}", holder.to_lowercase()),
+        None => s.to_string(),
+    }
+}
+
+/// `text` as C++ line comments, each line after `prefix`. A line ending in
+/// a backslash gets a closing `//`, so it does not continue the comment
+/// onto the next line.
+fn comment_lines(text: &str, prefix: &str) -> String {
+    text.lines()
+        .map(|l| {
+            let l = l.trim_end();
+            let close = if l.ends_with('\\') { " //" } else { "" };
+            format!("//{prefix}{l}{close}\n")
+        })
+        .collect()
+}
+
+/// The generated C++ indented four spaces per open brace: a line starting
+/// with `}` one level out, the braces of comments and strings not counted.
+pub(crate) fn format_cpp(src: &str) -> String {
+    let mut out = String::with_capacity(src.len() + src.len() / 4);
+    let mut depth: i32 = 0;
+    for line in src.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            out.push('\n');
+            continue;
+        }
+        // the code part: before a `//` comment, outside strings
+        let mut code = String::new();
+        let mut in_str = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => in_str = !in_str,
+                '\\' if in_str => {
+                    chars.next();
+                    continue;
+                }
+                '/' if !in_str && chars.peek() == Some(&'/') => break,
+                _ => {}
+            }
+            if !in_str {
+                code.push(c);
+            }
+        }
+        let opens = code.matches('{').count() as i32;
+        let closes = code.matches('}').count() as i32;
+        let at = (depth - i32::from(code.starts_with('}'))).max(0);
+        for _ in 0..at {
+            out.push_str("    ");
+        }
+        out.push_str(line);
+        out.push('\n');
+        depth = (depth + opens - closes).max(0);
+    }
+    out
+}
+
+/// The environment variable naming the directory `#[arael(root)]` writes
+/// each root's kernels to as it expands, `<dir>/<crate>/<Root>.cu`; a root
+/// without a device form gets a file saying why. `cargo arael kernels`
+/// sets it.
+pub(crate) const KERNELS_DIR_VAR: &str = "ARAEL_KERNELS_DIR";
+
+/// Writes the kernels of the root `root`, `Ok(cpp)`, or why it has none,
+/// `Err(why)`, under [`KERNELS_DIR_VAR`] when it is set.
+pub(crate) fn dump_kernels(root: &str, kernels: Result<&str, &str>) -> Result<(), String> {
+    let Some(dir) = std::env::var_os(KERNELS_DIR_VAR) else {
+        return Ok(());
+    };
+    let krate = std::env::var("CARGO_CRATE_NAME").unwrap_or_else(|_| "crate".to_string());
+    write_kernels(std::path::Path::new(&dir), &krate, root, kernels).map(|_| ())
+}
+
+/// [`dump_kernels`]'s file: `<dir>/<krate>/<root>.cu`.
+fn write_kernels(dir: &std::path::Path, krate: &str, root: &str, kernels: Result<&str, &str>) -> Result<std::path::PathBuf, String> {
+    let dir = dir.join(krate);
+    let text = match kernels {
+        Ok(cpp) => cpp.to_string(),
+        Err(why) => {
+            let at = crate::registry_site(root).map_or(String::new(), |(f, l)| format!(" ({f}:{l})"));
+            format!("// `{root}`{at} has no device form: {why}\n// Its solves assemble on the CPU.\n")
+        }
+    };
+    let path = dir.join(format!("{root}.cu"));
+    std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::write(&path, text))
+        .map_err(|e| format!("{KERNELS_DIR_VAR}: cannot write {}: {e}", path.display()))?;
+    Ok(path)
 }
 
 /// A referenced parameter field a device constraint reads: a parameter
@@ -246,7 +407,6 @@ impl RefKind {
     }
 }
 
-/// A CSE temporary's name: `__x3`, `__w1`, `__m2`.
 /// A robust loss of a device constraint, over the squared norm of its
 /// instance's rows ([`LOSS_ARG_SYM`]): `rho(s)` for the cost kernel, and
 /// `rho(s)` and the weight `rho'(s)` with shared statements for the
@@ -258,6 +418,7 @@ pub(crate) struct DevLoss {
 
 use crate::constraint::LOSS_ARG_SYM;
 
+/// A CSE temporary's name: `__x3`, `__w1`, `__m2`.
 fn is_temp(s: &str) -> bool {
     let rest = s.strip_prefix("__x").or_else(|| s.strip_prefix("__w")).or_else(|| s.strip_prefix("__m"));
     rest.is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
@@ -539,19 +700,22 @@ pub(crate) fn device_constraint(
     }
     let names: std::collections::BTreeMap<String, String> = leaf.keys().enumerate().map(|(i, s)| (s.clone(), format!("__l{i}"))).collect();
     let pair_sides: Vec<(usize, usize)> = pairs.iter().map(|p| (p.i, p.j)).collect();
-    let cpp = cpp_kernels(cid, ft, (&ns, &pair_sides), rows, &leaf, &names, &refs, (&gh_syms, &cost_syms), gh, guard, cost, loss)?;
-    Ok(DevConstraint { group_key, sides, pairs, holder, inst, ent, root, refs, cpp, cid, rows, filter: None })
+    let cpp = cpp_kernels(cid, ft, &holder, (&ns, &pair_sides), rows, &leaf, &names, &refs, (&gh_syms, &cost_syms), gh, guard, cost, loss)?;
+    Ok(DevConstraint { group_key, sides, pairs, holder, inst, ent, root, refs, cpp, cid, rows, filter: None, site: (String::new(), 0), source: String::new() })
 }
 
 /// The kernels of [`device_constraint`] in C++
 /// (`arael-gpu/kernels/assembly.cpp` is compiled in front of them): every
 /// column is read through the layout table `L` at the start of the model's
 /// block `B`, by the constraint's own column names. `ns` are the sides'
-/// parameters, `pairs` the sides of each cross tile.
+/// parameters, `pairs` the sides of each cross tile; a leaf read is
+/// commented with its symbol as the attribute of the constraint of
+/// `holder` writes it.
 #[allow(clippy::too_many_arguments)]
 fn cpp_kernels(
     cid: usize,
     ft: &str,
+    holder: &str,
     (ns, pairs): (&[usize], &[(usize, usize)]),
     rows: usize,
     leaf: &std::collections::BTreeMap<String, Leaf>,
@@ -602,7 +766,7 @@ fn cpp_kernels(
         plain.into_iter().chain(atoms)
             .map(|s| {
                 let (t, e) = read(&leaf[s])?;
-                Ok(format!("const {t} {} = {e};\n", names[s]))
+                Ok(format!("const {t} {} = {e}; // {}\n", names[s], shown(s, holder)))
             })
             .collect()
     };
@@ -658,22 +822,28 @@ fn cpp_kernels(
         None => body,
     };
     let gh_kernel = format!(
-        "KERNEL_THREADS(256) void __dk{cid}_gh(GLOBAL u8* RESTRICT B, u32 n) {{\n{}{}\
-         F rec[{recw}];\n#pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) rec[k] = (F)0.0f;\n{gh_code}{costs}\
-         GLOBAL F* out = COL_MUT(B, F, C{cid}_REC) + o * {recw}u;\n#pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) out[k] = rec[k];\n\
+        "// C{cid}'s linearization, a thread per instance: its record of {rows} row{} of {stride} values (the residual,\n\
+         // then the sides' partials in order) and its block's part of the cost\n\
+         KERNEL_THREADS(256) void __dk{cid}_gh(GLOBAL u8* RESTRICT B, u32 n) {{\n{}// the leaves the body reads\n{}\
+         F rec[{recw}];\n#pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) rec[k] = (F)0.0f;\n// the body: the rows and their partials\n{gh_code}{costs}\
+         // the record out\nGLOBAL F* out = COL_MUT(B, F, C{cid}_REC) + o * {recw}u;\n#pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) out[k] = rec[k];\n\
          }}\ncost_partial(COL_MUT(B, W, C{cid}_PART), c);\n}}\n",
+        if rows == 1 { "" } else { "s" },
         prologue("B"),
         lets(gh_syms)?
     );
     // the sums of the records: the cost, each side's entities, each pair's
     // cross tiles
     let mut reduce = format!(
-        "KERNEL_THREADS(256) void __dk{cid}_csum(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT cost, u32 parts) {{\n\
+        "// C{cid}: its cost parts summed into the cost\n\
+         KERNEL_THREADS(256) void __dk{cid}_csum(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT cost, u32 parts) {{\n\
          GLOBAL const u64* L = (GLOBAL const u64*)B;\ncost_sum(COL(B, W, C{cid}_PART), parts, cost);\n}}\n"
     );
     for (i, (&n, &off)) in ns.iter().zip(&offs).enumerate() {
         reduce.push_str(&format!(
-            "KERNEL_THREADS(256) void __dk{cid}_r{i}(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, GLOBAL W* RESTRICT g, u32 slots) {{\n\
+            "\n// C{cid}, side {i}: each entity's tile and gradient, summed over its instances' records\n\
+             // ({n} parameters, the partials from value {off} of a row on)\n\
+             KERNEL_THREADS(256) void __dk{cid}_r{i}(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, GLOBAL W* RESTRICT g, u32 slots) {{\n\
              GLOBAL const u64* L = (GLOBAL const u64*)B;\n\
              reduce_entity<{n}u, {rows}u, {stride}u, {off}u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_OFF{i}), COL(B, u32, C{cid}_INST{i}), \
              COL(B, u32, C{cid}_IDX{i}), COL(B, u32, C{cid}_TILE{i}), h, g, slots);\n}}\n"
@@ -682,7 +852,8 @@ fn cpp_kernels(
     for (p, &(i, j)) in pairs.iter().enumerate() {
         let (ni, nj, oi, oj) = (ns[i], ns[j], offs[i], offs[j]);
         reduce.push_str(&format!(
-            "KERNEL_THREADS(256) void __dk{cid}_x{p}(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, u32 slots) {{\n\
+            "\n// C{cid}, cross tile {p} (sides {i} and {j}): each tile summed over its instances' products\n\
+             KERNEL_THREADS(256) void __dk{cid}_x{p}(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, u32 slots) {{\n\
              GLOBAL const u64* L = (GLOBAL const u64*)B;\n\
              reduce_cross<{ni}u, {nj}u, {rows}u, {stride}u, {oi}u, {oj}u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_XOFF{p}), COL(B, u32, C{cid}_XINST{p}), \
              COL(B, u32, C{cid}_S{i}), COL(B, u32, C{cid}_S{j}), COL(B, u32, C{cid}_IDX{i}), COL(B, u32, C{cid}_TILE{i}), \
@@ -705,11 +876,12 @@ fn cpp_kernels(
         cbody.push_str(&format!("{{\n{}c += (W)({});\n}}\n", stmts(&l.cost.0)?, expr(&l.cost.1)?));
     }
     let cost_kernel = format!(
-        "KERNEL_THREADS(256) void __dk{cid}_cost(GLOBAL u8* RESTRICT B, u32 n) {{\n{}{}{cbody}}}\ncost_partial(COL_MUT(B, W, C{cid}_PART), c);\n}}\n",
+        "// C{cid}'s cost alone, at a trial point: the rows without their partials\n\
+         KERNEL_THREADS(256) void __dk{cid}_cost(GLOBAL u8* RESTRICT B, u32 n) {{\n{}{}{cbody}}}\ncost_partial(COL_MUT(B, W, C{cid}_PART), c);\n}}\n",
         prologue("B"),
         lets(cost_syms)?
     );
-    Ok(format!("{gh_kernel}{reduce}{cost_kernel}"))
+    Ok(format!("{gh_kernel}\n{reduce}\n{cost_kernel}"))
 }
 
 /// The walk over a constraint's instances, as the root's emission hands it
@@ -753,19 +925,20 @@ impl Record {
         (self.fields.len() + self.pad) * if ft == "f64" { 8 } else { 4 }
     }
 
-    /// The C++ struct, `name`.
-    fn cpp(&self, name: &str) -> String {
+    /// The C++ struct, `name`, a field per line commented with its model
+    /// path, after the comment `what`.
+    fn cpp(&self, name: &str, what: &str) -> String {
         if self.fields.is_empty() {
             return String::new();
         }
-        let mut s = format!("struct alignas(16) {name} {{");
+        let mut s = format!("{}struct alignas(16) {name} {{\n", comment_lines(what, " "));
         for (f, p) in &self.fields {
-            s.push_str(&format!(" F {f}; /* {p} */"));
+            s.push_str(&format!("F {f}; // {p}\n"));
         }
         if self.pad > 0 {
-            s.push_str(&format!(" F _pad[{}];", self.pad));
+            s.push_str(&format!("F _pad[{}]; // to 16 bytes\n", self.pad));
         }
-        s.push_str(" };\n");
+        s.push_str("};\n\n");
         s
     }
 
@@ -790,7 +963,6 @@ impl Record {
         }
     }
 
-    /// The record's value with each field read from `acc.<path>`.
     /// The record's value with each field read from `acc.<path>`. A path
     /// through an optional sub-struct reads NaN where it is `None`: every
     /// entity's record is written, but only the instances a guard keeps
@@ -833,10 +1005,11 @@ impl Record {
     }
 }
 
-/// The device items of a root whose every constraint has a device form.
-/// `entity_walk(type, body)` walks every entity of `type` in slot order,
-/// `body` reading it as `__ent`; `idx_stmts(type, acc, idx)` fills `idx`
-/// with the parameters' global indices of the entity `acc`.
+/// The device items of a root whose every constraint has a device form,
+/// and their C++ (the root's `device_cpp`). `entity_walk(type, body)` walks
+/// every entity of `type` in slot order, `body` reading it as `__ent`;
+/// `idx_stmts(type, acc, idx)` fills `idx` with the parameters' global
+/// indices of the entity `acc`.
 pub(crate) fn device_root(
     root_name: &syn::Ident,
     ft: &str,
@@ -844,7 +1017,7 @@ pub(crate) fn device_root(
     groups: &std::collections::BTreeMap<String, DevGroup>,
     entity_walk: &dyn Fn(&str, TokenStream2) -> TokenStream2,
     idx_stmts: &dyn Fn(&str, &TokenStream2, &syn::Ident) -> Vec<TokenStream2>,
-) -> TokenStream2 {
+) -> (TokenStream2, String) {
     let scalar: syn::Type = syn::parse_str(ft).unwrap();
     // the device's numbering of the entity tables, referenced fields and
     // cross arrays the constraints read; per entity table its type, self
@@ -945,16 +1118,62 @@ pub(crate) fn device_root(
         let pairs = id.pairs.iter().map(|(i, j, x)| quote! { (#i, #j, #x) });
         quote! { ::arael::__gpu::DeviceConstraint { data: #nd, rows: #rows, sides: vec![#(#sides),*], pairs: vec![#(#pairs),*] } }
     }).collect();
-    // the C++: the records, then the kernels, each constraint's column and
-    // record names aliased to the root's numbering, which the host's layout
-    // table follows
-    let mut cpp = String::new();
-    for (e, r) in records.iter().enumerate() {
-        cpp.push_str(&r.cpp(&format!("E{e}Data")));
+    // the C++: a header naming the root and its tables, the records, then
+    // the kernels, each constraint's column and record names aliased to the
+    // root's numbering, which the host's layout table follows; every piece
+    // commented with the model's names and source sites
+    let site = |ty: &str| crate::registry_site(ty).map_or(String::new(), |(f, l)| format!(" ({f}:{l})"));
+    let mut cpp = format!(
+        "// Device assembly of the root `{root_name}`{}, generated by #[arael::model].\n\
+         // Compiled after arael-gpu's kernels/assembly.cpp: F is {ft}, W the wide scalar of the sums.\n\
+         // A column is read as COL(B, type, name), through the layout table L at the start of the block B.\n\
+         //\n",
+        site(&root_name.to_string())
+    );
+    cpp.push_str("// Entity tables, a row per entity in slot order: E<e>_EV its parameter values, E<e>_IDX their\n\
+                  // global indices, E<e>_TILE its Hessian tile, E<e>_DATA its data record E<e>Data.\n");
+    for (e, en) in entities.iter().enumerate() {
+        cpp.push_str(&format!("//   E{e}: `{}`{}, self block `{}`, parameters: {}\n", en.ty, site(&en.ty), en.hb, en.params.join(", ")));
     }
-    cpp.push_str(&root_record.cpp("RootData"));
+    if !references.is_empty() {
+        cpp.push_str("// Referenced fields, a row per entity of their table: R<r>_VAL their values in F, R<r>_VALW in W,\n\
+                      // R<r>_DER their derivatives by the step.\n");
+        for (r, (e, rf)) in references.iter().enumerate() {
+            cpp.push_str(&format!("//   R{r}: `{}.{}`, of E{e}, a {}\n", entities[*e].ty, rf.path, rf.kind.ident()));
+        }
+    }
+    if !crosses.is_empty() {
+        cpp.push_str("// Cross tile arrays, X<x>_TILE a cross block's Hessian tile:\n");
+        for (x, (holder, block)) in crosses.iter().enumerate() {
+            cpp.push_str(&format!("//   X{x}: `{holder}.{block}`\n"));
+        }
+    }
+    cpp.push('\n');
+    for (e, r) in records.iter().enumerate() {
+        let ty = &entities[e].ty;
+        cpp.push_str(&r.cpp(&format!("E{e}Data"), &format!("E{e}Data: per `{ty}`{} of E{e}, the data the constraints read", site(ty))));
+    }
+    cpp.push_str(&root_record.cpp("RootData", &format!("RootData: the data of the root `{root_name}` the constraints read")));
+    let rule = format!("//{}\n", "-".repeat(98));
     for (c, id) in constraints.iter().zip(&ids) {
         let k = c.cid;
+        let at = if c.site.0.is_empty() { String::new() } else { format!(" ({}:{})", c.site.0, c.site.1) };
+        cpp.push_str(&format!("{rule}// C{k}: a constraint of `{}`{at}, {} row{}\n", c.holder, c.rows, if c.rows == 1 { "" } else { "s" }));
+        cpp.push_str(&comment_lines(&c.source, "   "));
+        cpp.push_str("// Sides, in the order of a row's partials:\n");
+        for (i, (sd, e)) in c.sides.iter().zip(&id.sides).enumerate() {
+            cpp.push_str(&format!("//   {i}: `{}`, E{e}: {}\n", sd.var, sd.params.join(", ")));
+        }
+        for (p, (i, j, x)) in id.pairs.iter().enumerate() {
+            cpp.push_str(&format!("// Cross tile {p}: sides {i} and {j}, X{x}\n"));
+        }
+        for (j, d) in c.inst.iter().enumerate() {
+            cpp.push_str(&format!("// Instance data D{j}: {}\n", shown(d, &c.holder)));
+        }
+        for (lr, (rf, &r)) in c.refs.iter().zip(&id.refs).enumerate() {
+            cpp.push_str(&format!("// Referenced field {lr}: `{}.{}`, R{r}\n", c.sides[rf.side].var, rf.path));
+        }
+        cpp.push_str(&format!("{rule}// C{k}'s names of the root's columns\n"));
         let mut alias = |local: &str, root: String| cpp.push_str(&format!("#define ARAEL_COL_C{k}_{local} ARAEL_COL_{root}\n"));
         for (i, e) in id.sides.iter().enumerate() {
             for col in ["EV", "IDX", "TILE", "DATA"] {
@@ -974,8 +1193,11 @@ pub(crate) fn device_root(
                 cpp.push_str(&format!("typedef E{e}Data C{k}_Rec{i};\n"));
             }
         }
+        cpp.push('\n');
         cpp.push_str(&c.cpp);
+        cpp.push('\n');
     }
+    let cpp = format_cpp(&cpp);
 
     // the structure walk: per entity table its indices in slot order, per
     // group the cost sweep's loop, per constraint its guard and its kept
@@ -1077,7 +1299,8 @@ pub(crate) fn device_root(
     let n_constraints = constraints.len();
     let fewer: Vec<String> = constraints.iter().map(|c| format!("{}: the model has fewer instances than its structure: it changed without LmSession::invalidate()", c.holder)).collect();
     let cids: Vec<usize> = constraints.iter().map(|c| c.cid).collect();
-    quote! {
+    let root_str = root_name.to_string();
+    let items = quote! {
         ::arael::__gpu_items! {
             #(#rust_records)*
             #rust_root
@@ -1118,10 +1341,74 @@ pub(crate) fn device_root(
                     #cpp
                 }
 
+                fn device_name(&self) -> &'static str {
+                    #root_str
+                }
+
                 fn device_restore(&mut self, refs: &mut dyn FnMut(u32) -> Option<arael::model::Reference>) {
                     arael::model::Model::set_references(self, refs);
                 }
             }
         }
+    };
+    (items, cpp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("arael-macros-device-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn format_cpp_indents_by_braces_outside_comments_and_strings() {
+        let src = "void k() {\nif (a) {\nx = \"{\";\n} else {\n// a } in a comment\ny = 1; // and { here\n}\n\nswitch (i) {\ncase 0: {\nz = 2;\n} break;\n}\n}\n";
+        let want = "void k() {\n    if (a) {\n        x = \"{\";\n    } else {\n        // a } in a comment\n        y = 1; // and { here\n    }\n\n    switch (i) {\n        case 0: {\n            z = 2;\n        } break;\n    }\n}\n";
+        assert_eq!(format_cpp(src), want);
+    }
+
+    #[test]
+    fn attribute_text_reads_the_whole_attribute_dedented() {
+        let dir = scratch("attr");
+        let file = dir.join("m.rs");
+        std::fs::write(
+            &file,
+            "mod m {\n    #[arael(constraint(hb, {\n        let s = \"]\"; // ]\n        [a.x - 1.0]\n    }))]\n    struct A;\n    #[arael(constraint(hb, {\n",
+        )
+        .unwrap();
+        let f = file.to_str().unwrap();
+        assert_eq!(
+            attribute_text(f, 2).as_deref(),
+            Some("#[arael(constraint(hb, {\n    let s = \"]\"; // ]\n    [a.x - 1.0]\n}))]")
+        );
+        assert_eq!(attribute_text(f, 7), None, "an attribute that does not close");
+        assert_eq!(attribute_text(dir.join("none.rs").to_str().unwrap(), 1), None);
+    }
+
+    #[test]
+    fn a_comment_line_ending_in_a_backslash_does_not_continue() {
+        assert_eq!(comment_lines("a \\\nb", "   "), "//   a \\ //\n//   b\n");
+    }
+
+    #[test]
+    fn instance_fields_show_as_the_attribute_names_them() {
+        assert_eq!(shown("__frine.mf2r[0].x", "SFrine"), "sfrine.mf2r[0].x");
+        assert_eq!(shown("pose.pos.work().x", "SFrine"), "pose.pos.work().x");
+    }
+
+    #[test]
+    fn kernels_are_written_per_crate_and_root() {
+        let dir = scratch("dump");
+        let path = write_kernels(&dir, "tests_a", "Scene", Ok("// kernels\n")).unwrap();
+        assert_eq!(path, dir.join("tests_a").join("Scene.cu"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "// kernels\n");
+        let path = write_kernels(&dir, "tests_a", "Other", Err("a `coo` pair has no device form yet")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("// `Other` has no device form: a `coo` pair has no device form yet\n"), "{text}");
     }
 }
