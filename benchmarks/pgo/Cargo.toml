@@ -10,8 +10,8 @@ publish = false
 
 [features]
 # The GPU routes (ARAEL_GPU=cuda|hip[:index]).
-gpu-cuda = ["arael/gpu-cuda"]
-gpu-hip = ["arael/gpu-hip"]
+gpu-cuda = ["arael/gpu-cuda", "bench-harness/gpu-cuda"]
+gpu-hip = ["arael/gpu-hip", "bench-harness/gpu-hip"]
 
 [dependencies]
 arael = { path = "../..", features = ["threads"] }

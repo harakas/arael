@@ -292,3 +292,51 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
 pub fn describe<T>(e: &SolveFailure<T>) -> String {
     e.to_string()
 }
+
+/// `problem`'s Hessian at its serialized parameters, in the tiled block
+/// layout the solver assembles into, the gradient, and the block partition
+/// of the parameters. The diagonal is damped by `1 + 1e-8`, as a solve's
+/// first attempt about does.
+///
+/// ```ignore
+/// let (h, grad, partition) = bench_harness::arael::hessian::<u32, _>(&mut model);
+/// ```
+pub fn hessian<I, P>(problem: &mut P) -> (arael_faer::bsc::SparseBlockColMat<I, f64>, Vec<f64>, Vec<usize>)
+where
+    I: arael_faer::faer::Index,
+    P: ::arael::simple_lm::RootProblem<f64> + ::arael::simple_lm::LmProblemInternals<f64>,
+{
+    use ::arael::simple_lm::LmProblemInternals as _;
+    use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
+    let mut ctx = ::arael::threads::Context::new();
+    let mut params: Vec<f64> = Vec::new();
+    problem.serialize(&mut params);
+    let n = params.len();
+    let mut spans = Vec::new();
+    problem.collect_param_block_spans(&mut spans, &mut ctx);
+    let partition = ::arael::store::block_partition_from_spans(&spans, n);
+    let mut cells: Vec<(u32, u32)> = Vec::new();
+    problem.collect_hessian_cells(&mut cells, &mut ctx);
+    let part: Vec<I> = partition.iter().map(|&p| I::truncate(p)).collect();
+    let (hsym, _) = SymbolicSparseBlockColMat::<I>::from_scalar_coords(part.clone(), part, cells.len(), |k| (cells[k].0 as usize, cells[k].1 as usize));
+    let mut resolver = PositionResolver::new(&hsym);
+    let mut positions = ::arael::store::PositionStream::new();
+    problem.bind_hessian_positions(
+        &mut ::arael::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
+        &mut positions,
+        &mut ctx,
+    );
+    let mut h = SparseBlockColMat::<I, f64>::zeroed(hsym);
+    let mut grad = vec![0.0; n];
+    problem.calc_grad_hessian_sparse_indexed(&params, &mut grad, h.vals_mut(), &positions, &mut ctx);
+    for b in 0..partition.len() - 1 {
+        let w = partition[b + 1] - partition[b];
+        let hs = h.symbolic().clone();
+        let d = hs.col_range(b).find(|&x| hs.blk_row(x) == b).expect("every block has its diagonal tile");
+        let base = hs.val_range(d).start;
+        for k in 0..w {
+            h.vals_mut()[base + k * (w + 1)] *= 1.0 + 1e-8;
+        }
+    }
+    (h, grad, partition)
+}

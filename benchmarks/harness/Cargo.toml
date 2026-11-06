@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 arael = { path = "../.." }
+arael-faer = { path = "../../arael-faer" }
 serde_json = "1"
 libc = "0.2"
 num = "0.4"
@@ -20,6 +21,9 @@ faer23 = { package = "faer", version = "0.23.2", default-features = false, featu
 
 [features]
 factrs = ["dep:factrs", "dep:faer23"]
+# The GPU factor comparison (`gpu_factor`), on the runtime of the same name.
+gpu-cuda = ["arael/gpu-cuda"]
+gpu-hip = ["arael/gpu-hip"]
 
 # Added by cargo-arael. Model code generation runs inside the arael
 # proc-macros at compile time, and cargo builds proc-macros unoptimized

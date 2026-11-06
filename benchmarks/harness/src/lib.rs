@@ -16,6 +16,8 @@ pub mod external;
 pub mod header;
 #[cfg(feature = "factrs")]
 pub mod factrs;
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+pub mod gpu_factor;
 pub mod mem;
 pub mod pin;
 pub mod probe;
