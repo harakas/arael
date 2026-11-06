@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use arael_faer::bsc::{PositionResolver, SymbolicSparseBlockColMat};
+use arael_faer::bsc::SymbolicSparseBlockColMat;
 use arael_faer::schur::{SchurReal, SchurSymbolic};
 use arael_faer::supernodal::{SupernodalError, SupernodalSymbolic};
 use arael_faer::{SparseIndex, ValueIndex};
@@ -205,14 +205,13 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         on_device(gs.h_values(), "read of H").iter().filter(|v| !v.is_finite()).count()
     }
 
-    fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex]) -> Result<(), GpuError> {
+    fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex], threads: usize) -> Result<(), GpuError> {
         self.route = None;
         if self.schur.is_none() {
             return Ok(());
         }
         let dev = self.factor.device();
-        let mut resolver = PositionResolver::new(hsym);
-        let asm = DeviceAssembly::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize), self.wide, self.staging)?;
+        let asm = DeviceAssembly::new(dev, root, hsym, threads, self.wide, self.staging)?;
         self.route = Some(Route {
             attempt_graph: None,
             step_graph: None,

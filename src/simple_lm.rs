@@ -6306,7 +6306,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     problem.update_params(params);
                     let root = problem.device_root().expect("a device root");
                     let gs = self.sn_num.gpu_mut();
-                    let built = gs.build_route(root, &hsym, &self.bdiag_pos);
+                    let built = gs.build_route(root, &hsym, &self.bdiag_pos, ctx.threads());
                     report_kernel_cache();
                     built.map_err(|e| gpu_setup_failed("the device assembly", e))?;
                     let t_layout = clock.map(|c| c.elapsed());

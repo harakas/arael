@@ -65,7 +65,7 @@ pub(crate) trait GpuSolver<T>: Send {
     /// structure `hsym`, whose scalar diagonal is at `bdiag_pos` in its
     /// values; the model's working copies are current. Nothing without a
     /// reduction.
-    fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex]) -> Result<(), GpuError>;
+    fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex], threads: usize) -> Result<(), GpuError>;
     /// Whether the route is built.
     fn has_route(&self) -> bool;
     /// Whether the device holds the last compute's H and gradient.

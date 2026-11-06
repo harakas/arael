@@ -615,54 +615,91 @@ fn by_slot(of: impl Iterator<Item = u32> + Clone, slots: usize) -> (Vec<u32>, Ve
     (ptr, inst)
 }
 
-/// The tiles of the structure `st` against the pattern `resolve` describes:
-/// per entity table `(base, stride, start)` per slot, per cross array
-/// `(base, stride, flip)` per slot its instances name, `flip` 1 when the
-/// second side's span is the lower-numbered one and lies on the tile's
-/// rows. Zeros where a side is fixed throughout.
+/// The positions in H, the resolver of the solver's pattern.
+type Resolver<'a> = arael_faer::bsc::PositionResolver<'a, arael_faer::SparseIndex>;
+
+/// Lookups a thread takes at least before the work is split over more.
+const PAR_MIN: usize = 32 * 1024;
+
+/// `f` over `0..n` cut into at most `threads` ranges of at least `min`,
+/// on arael's worker pool (`arael_faer::pool`, the sweeps' threads), each
+/// range with its own clone of `r`, the results in range order; on the
+/// calling thread alone when there is one range.
+fn par_ranges<R: Send>(n: usize, threads: usize, min: usize, r: &Resolver<'_>, f: impl Fn(std::ops::Range<usize>, &mut Resolver<'_>) -> R + Sync) -> Vec<R> {
+    let parts = threads.min(n / min.max(1)).max(1);
+    if parts == 1 {
+        return vec![f(0..n, &mut r.clone())];
+    }
+    let step = n.div_ceil(parts);
+    let mut out: Vec<(Resolver<'_>, Option<R>)> = (0..parts).map(|_| (r.clone(), None)).collect();
+    arael_faer::pool::run_over(&mut out, |k, (r, res)| *res = Some(f(k * step..((k + 1) * step).min(n), r)));
+    out.into_iter().map(|(_, res)| res.expect("every range ran")).collect()
+}
+
+/// The tiles of the structure `st` in the pattern `r` resolves, on up to
+/// `threads` threads of at least `min` lookups each: per entity table `(base, stride, start)` per slot,
+/// per cross array `(base, stride, flip)` per slot its instances name,
+/// `flip` 1 when the second side's span is the lower-numbered one and lies
+/// on the tile's rows. Zeros where a side is fixed throughout.
 fn tiles(
     shape: &DeviceShape,
     st: &DeviceStructure,
     slots: &[usize],
     cross_slots: &[usize],
-    resolve: &mut dyn FnMut(u32, u32) -> (usize, usize, usize),
+    r: &Resolver<'_>,
+    (threads, min): (usize, usize),
 ) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
     use crate::store::{device_word, tile_extent};
     let extent = |e: usize, s: usize| {
         let n = shape.entities[e];
         tile_extent(&st.idx[e][s * n..(s + 1) * n])
     };
-    let entity = (0..shape.entities.len())
+    let entity: Vec<Vec<u32>> = (0..shape.entities.len())
         .map(|e| {
-            (0..slots[e])
-                .flat_map(|s| {
-                    let (start, live) = extent(e, s);
-                    if live == 0 {
-                        return [0, 0, 0];
-                    }
-                    let (base, stride, _) = resolve(start, start);
-                    [device_word(base), device_word(stride), start]
-                })
-                .collect()
+            par_ranges(slots[e], threads, min, r, |range, r| {
+                range
+                    .flat_map(|s| {
+                        let (start, live) = extent(e, s);
+                        if live == 0 {
+                            return [0, 0, 0];
+                        }
+                        let (base, stride, _) = r.resolve_tile(start as usize, start as usize);
+                        [device_word(base), device_word(stride), start]
+                    })
+                    .collect::<Vec<u32>>()
+            })
+            .concat()
         })
         .collect();
     let mut cross: Vec<Vec<u32>> = cross_slots.iter().map(|&n| vec![0u32; 3 * n]).collect();
     let mut done: Vec<Vec<bool>> = cross_slots.iter().map(|&n| vec![false; n]).collect();
     for (c, k) in shape.constraints.iter().enumerate() {
         let Some((b, x)) = k.pair else { continue };
-        for rec in st.rows[c].as_chunks::<3>().0 {
-            let (sa, sb, sx) = (rec[0] as usize, rec[1] as usize, rec[2] as usize);
-            if done[x][sx] {
-                continue;
+        let rows = st.rows[c].as_chunks::<3>().0;
+        // per row its tile, then the first row of each cross slot keeps it
+        let row_tiles = par_ranges(rows.len(), threads, min, r, |range, r| {
+            rows[range]
+                .iter()
+                .map(|rec| {
+                    // the sides' first live indices from their entity
+                    // tiles, a zero stride where a side is fixed throughout
+                    let (ta, tb) = (&entity[k.a][3 * rec[0] as usize..], &entity[b][3 * rec[1] as usize..]);
+                    if ta[1] == 0 || tb[1] == 0 {
+                        return [0, 0, 0];
+                    }
+                    let (ra, rb) = (ta[2], tb[2]);
+                    let flip = rb < ra;
+                    let (base, stride, _) = if flip { r.resolve_tile(rb as usize, ra as usize) } else { r.resolve_tile(ra as usize, rb as usize) };
+                    [device_word(base), device_word(stride), flip as u32]
+                })
+                .collect::<Vec<[u32; 3]>>()
+        });
+        for (rec, tile) in rows.iter().zip(row_tiles.iter().flatten()) {
+            let sx = rec[2] as usize;
+            if !done[x][sx] {
+                done[x][sx] = true;
+                cross[x][3 * sx..3 * sx + 3].copy_from_slice(tile);
             }
-            done[x][sx] = true;
-            let ((ra, wa), (rb, wb)) = (extent(k.a, sa), extent(b, sb));
-            if wa == 0 || wb == 0 {
-                continue;
-            }
-            let flip = rb < ra;
-            let (base, stride, _) = if flip { resolve(rb, ra) } else { resolve(ra, rb) };
-            cross[x][3 * sx..3 * sx + 3].copy_from_slice(&[device_word(base), device_word(stride), flip as u32]);
         }
     }
     (entity, cross)
@@ -745,14 +782,16 @@ fn write_structure(
 }
 
 impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
-    /// Lay `root` out on `dev` against the tiled pattern `resolve`
-    /// describes, its sums in `wide`, compile its kernels, and upload its
-    /// structure and values from `staging`. The model's working copies must
-    /// be current (its guards, fixed values and references are read).
+    /// Lay `root` out on `dev` against the tiled pattern `pattern` (its
+    /// tiles looked up on up to `threads` threads), its sums in `wide`,
+    /// compile its kernels, and upload its structure and values from
+    /// `staging`. The model's working copies must be current (its guards,
+    /// fixed values and references are read).
     pub fn new(
         dev: &Arc<D>,
         root: &dyn DeviceRoot<T>,
-        resolve: &mut dyn FnMut(u32, u32) -> (usize, usize, usize),
+        pattern: &arael_faer::bsc::SymbolicSparseBlockColMat<arael_faer::SparseIndex>,
+        threads: usize,
         wide: Wide,
         staging: Staging,
     ) -> Result<Self, GpuError> {
@@ -771,7 +810,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
                 }
             }
         }
-        let (entity_tiles, cross_tiles) = tiles(&shape, &st, &slots, &cross_slots, resolve);
+        let (entity_tiles, cross_tiles) = tiles(&shape, &st, &slots, &cross_slots, &Resolver::new(pattern), (threads, PAR_MIN));
         let layout = Layout::new(columns(&shape, &slots, &cross_slots, &counts, ts));
         let scalar = if ts == 8 { "double" } else { "float" };
         let defines = format!("{}#define SCALAR {scalar}\n{}", wide.defines(), layout.defines());
@@ -1072,8 +1111,8 @@ where
     // the device laid out from the model at x0
     problem.update_params(x0);
     let root = problem.device_root().expect("the root has a device assembly");
-    let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
-    let asm = DeviceAssembly::<T, D>::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize), wide, Staging::Pinned)
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+    let asm = DeviceAssembly::<T, D>::new(dev, root, &hsym, threads, wide, Staging::Pinned)
         .expect("lay the root out on the device");
     // x, the gradient, the values and the cost in one block of the test's own
     let (at_g, at_h) = (n * 8, n * 16);
@@ -1096,4 +1135,53 @@ where
         if max > 0.0 { diff / max } else { diff }
     };
     DeviceCheck { cpu_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tiles looked up on several threads equal the ones looked up on
+    /// one: two entity tables (three and two parameters a slot, some fixed
+    /// throughout), a cross constraint between them, every row a lookup.
+    #[test]
+    fn tiles_on_several_threads_are_the_tiles_on_one() {
+        let (s0, s1, nrows) = (50usize, 70usize, 300usize);
+        let mut idx0: Vec<u32> = (0..3 * s0 as u32).collect();
+        let mut idx1: Vec<u32> = (0..2 * s1 as u32).map(|i| 3 * s0 as u32 + i).collect();
+        // entity 7 of the first table and entity 11 of the second fixed
+        idx0[21..24].fill(FIXED);
+        idx1[22..24].fill(FIXED);
+        let rows: Vec<u32> = (0..nrows as u32).flat_map(|k| [k * 7 % s0 as u32, k * 11 % s1 as u32, k]).collect();
+        let shape = DeviceShape {
+            entities: vec![3, 2],
+            references: Vec::new(),
+            crosses: 1,
+            constraints: vec![DeviceConstraint { words: 3, data: 0, rows: 1, a: 0, pair: Some((1, 0)) }],
+            entity_data: vec![0, 0],
+            root_data: 0,
+        };
+        let st = DeviceStructure { idx: vec![idx0, idx1], rows: vec![rows.clone()], keep: vec![vec![true; nrows]] };
+        // one block per entity, the diagonal blocks and the coupled pairs
+        let mut part = vec![0usize];
+        for k in 0..s0 + s1 {
+            part.push(part[k] + if k < s0 { 3 } else { 2 });
+        }
+        let mut cells: Vec<(usize, usize)> = (0..s0 + s1).map(|b| (b, b)).collect();
+        for rec in rows.chunks(3) {
+            cells.push((rec[0] as usize, s0 + rec[1] as usize));
+        }
+        cells.sort_unstable();
+        cells.dedup();
+        // one scalar coordinate per block cell, its first
+        let p = crate::simple_lm::partition_idx(&part);
+        let pattern = arael_faer::bsc::SymbolicSparseBlockColMat::covering(p.clone(), p, cells.len(), |k| (part[cells[k].0], part[cells[k].1]));
+        let r = Resolver::new(&pattern);
+        let one = tiles(&shape, &st, &[s0, s1], &[nrows], &r, (1, usize::MAX));
+        let many = tiles(&shape, &st, &[s0, s1], &[nrows], &r, (4, 1));
+        assert_eq!(one, many);
+        // the fixed entities have no tile, the others one each
+        assert_eq!(one.0[0][21..24], [0, 0, 0]);
+        assert!(one.0[0][..21].chunks(3).all(|t| t[1] > 0));
+    }
 }
