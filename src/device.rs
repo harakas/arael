@@ -1209,6 +1209,22 @@ where
     T: crate::utils::Float + 'static,
     D: Device,
 {
+    try_device_check(problem, x0, x, dev, wide).unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// [`device_check`], a panic of the CPU's assembly at `x` (a model that
+/// panics on its data) caught and returned, the model put back at `x0`.
+fn try_device_check<T, D>(
+    problem: &mut dyn crate::simple_lm::LmProblemInternals<T>,
+    x0: &[T],
+    x: &[T],
+    dev: &Arc<D>,
+    wide: Wide,
+) -> Result<DeviceCheck, Box<dyn std::any::Any + Send>>
+where
+    T: crate::utils::Float + 'static,
+    D: Device,
+{
     use crate::store::{HessianBinder, PositionStream};
     let mut ctx = crate::threads::Context::new();
     problem.begin_with_context(&mut ctx);
@@ -1224,9 +1240,12 @@ where
     problem.bind_hessian_positions(&mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)), &mut positions, &mut ctx);
     let nv = hsym.val_count();
     let (mut grad, mut vals) = (vec![T::zero(); n], vec![T::zero(); nv]);
-    let cpu_cost = problem.calc_grad_hessian_sparse_indexed(x, &mut grad, &mut vals, &positions, &mut ctx).to_f64().unwrap();
+    let cpu_cost = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        problem.calc_grad_hessian_sparse_indexed(x, &mut grad, &mut vals, &positions, &mut ctx)
+    }));
     // the device laid out from the model at x0
     problem.update_params(x0);
+    let cpu_cost = cpu_cost?.to_f64().unwrap();
     let root = problem.device_root().expect("the root has a device assembly");
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
     let asm = DeviceAssembly::<T, D>::new(dev, root, &hsym, threads, wide, Staging::Pinned)
@@ -1251,7 +1270,7 @@ where
         let diff = dev.iter().zip(cpu).fold(0.0f64, |m, (d, c)| m.max((d - c.to_f64().unwrap()).abs()));
         if max > 0.0 { diff / max } else { diff }
     };
-    DeviceCheck { cpu_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv, leaf_bits: asm.leaf_bits() }
+    Ok(DeviceCheck { cpu_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv, leaf_bits: asm.leaf_bits() })
 }
 
 /// The environment variable that turns on the device check of solves:
@@ -1312,8 +1331,10 @@ where
     }
     // the root types checked, one check at a time (tests solve on several
     // threads); a root is marked when its check ends, so a check a panic
-    // cuts short (a test's deliberately bad model) runs again at the next
-    // call
+    // cuts short runs again at the next call, and so does one whose CPU
+    // assembly panics on the model's data (a test's deliberately bad
+    // model): there is nothing to check against, and the solve goes on to
+    // meet the panic itself, or not on the device's route
     static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
     let name = std::any::type_name::<P>();
     let mut seen = SEEN.lock().unwrap_or_else(|p| p.into_inner());
@@ -1321,13 +1342,21 @@ where
         return;
     }
     let line = match problem.device_unsupported() {
-        Some(why) => format!("{name}: no device assembly: {why}"),
+        Some(why) => {
+            seen.push(name);
+            format!("{name}: no device assembly: {why}")
+        }
         None => {
             let precision = if core::mem::size_of::<T>() == 8 { "f64" } else { "f32" };
-            format!("{name} ({precision}): checked: {}", check_root(problem, x0, name))
+            match check_root(problem, x0, name) {
+                Ok(found) => {
+                    seen.push(name);
+                    format!("{name} ({precision}): checked: {found}")
+                }
+                Err(why) => format!("{name} ({precision}): not checked here: the CPU assembly panics: {why}"),
+            }
         }
     };
-    seen.push(name);
     drop(seen);
     if let Some(path) = std::env::var_os(DEVICE_CHECK_LOG_VAR) {
         use std::io::Write;
@@ -1342,9 +1371,10 @@ where
 }
 
 /// [`check_solve`]'s check of the root `name`: its largest differences,
-/// or a panic where one is beyond [`check_tolerance`].
+/// or a panic where one is beyond [`check_tolerance`]; `Err` with the
+/// message of a panic of the CPU's assembly.
 #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
-fn check_root<T, P>(problem: &mut P, x0: &[T], name: &str) -> String
+fn check_root<T, P>(problem: &mut P, x0: &[T], name: &str) -> Result<String, String>
 where
     T: crate::utils::Float + 'static,
     P: crate::simple_lm::LmProblemInternals<T>,
@@ -1367,7 +1397,9 @@ where
     let mut worst = [0.0f64; 3];
     let mut bits = root_bits;
     for wide in [Wide::F64, Wide::Df32] {
-        let chk = device_check(problem, x0, &x1, dev, wide);
+        let chk = try_device_check(problem, x0, &x1, dev, wide).map_err(|panic| {
+            panic.downcast_ref::<&str>().map(|m| m.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_else(|| "a panic without a message".into())
+        })?;
         bits = root_bits.min(chk.leaf_bits);
         let tol = check_tolerance(bits);
         let cost = (chk.device_cost - chk.cpu_cost).abs() / chk.cpu_cost.abs().max(f64::MIN_POSITIVE);
@@ -1383,11 +1415,11 @@ where
         }
     }
     let narrow = if bits < root_bits { format!(" (leaves of {bits} significand bits, tolerance {:.0e})", check_tolerance(bits)) } else { String::new() };
-    format!("cost {:.1e}, gradient {:.1e}, Hessian {:.1e}{narrow}", worst[0], worst[1], worst[2])
+    Ok(format!("cost {:.1e}, gradient {:.1e}, Hessian {:.1e}{narrow}", worst[0], worst[1], worst[2]))
 }
 
 #[cfg(not(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu")))]
-fn check_root<T, P>(_problem: &mut P, _x0: &[T], name: &str) -> String
+fn check_root<T, P>(_problem: &mut P, _x0: &[T], name: &str) -> Result<String, String>
 where
     T: crate::utils::Float + 'static,
     P: crate::simple_lm::LmProblemInternals<T>,

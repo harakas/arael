@@ -1005,8 +1005,10 @@ f32 entity in an f64 root has its rows computed in f32 on the CPU, in f64
 on the device).
 `ARAEL_DEVICE_CHECK_LOG` names a file it appends a line to per root type:
 checked, with the largest differences, or why the root has no device
-assembly. Over a test suite it tests the device assembly of every model
-the suite solves:
+assembly. A root whose CPU assembly panics on the model's data (an index
+outside a select's arms) is not checked at that solve, which goes on to
+meet the panic itself, and is logged so; a later solve checks it. Over a
+test suite it tests the device assembly of every model the suite solves:
 
 ```bash
 ARAEL_DEVICE_CHECK=1 ARAEL_DEVICE_CHECK_LOG=check.log cargo test --features gpu-cuda
