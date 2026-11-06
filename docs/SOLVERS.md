@@ -904,11 +904,11 @@ fields), over Euler-angle (simple and re-centred) and `QuaternionParam`
 rotations, `TransformParam` and `ScaledTransformParam` poses,
 `UnitVecParam` directions and `AngleParam` headings, `symbolic =` and
 `deriv =` fields computed from parameters alone (on an entity or in a
-user component), guards included (each evaluated once per structure),
-robust losses, index selects (`select`, a `match` on an integer field,
-in the body or picking the loss; where the CPU's select panics the
-device's values are NaN), `#[arael::function]`s with a symbolic body and
-the `fast_atan` roots. A constraint has none yet when it writes `coo`
+user component), every built-in function of arael-sym, guards included
+(each evaluated once per structure), robust losses, index selects
+(`select`, a `match` on an integer field, in the body or picking the
+loss; where the CPU's select panics the device's values are NaN),
+`#[arael::function]`s with a symbolic body and the `fast_atan` roots. A constraint has none yet when it writes `coo`
 pairs, or reads what Rust code computes: a `compute =` field, a
 component's field computed from data its `update` moves, a
 `#[arael::function]` with a numeric body.
@@ -973,9 +973,11 @@ shared kernels and the root's) as `<Root>.<target>.<wide>.cu`
 The device sums without atomic writes, in its wide scalar: `f64`, or
 with `GpuDevice::with_wide(GpuWide::Df32)` df32, two f32 whose sum is the
 value, about 48 bits, for H, the gradient, the cost, the Schur reduction,
-the refinement's residual, the LM loop's vectors and the reference
-rotations. With an f32 root and the f32 factor nothing on the device then
-runs in f64, which consumer cards run at 1/32 to 1/64 of f32:
+the refinement's residual, the LM loop's vectors, the reference
+rotations and the bodies' `with_wide` scopes (an f64 root's too, which
+then compute in 48 bits instead of the CPU's 53). With an f32 root and
+the f32 factor nothing on the device then runs in f64, which consumer
+cards run at 1/32 to 1/64 of f32:
 
 ```rust,ignore
 SparseFaer::from_options(&SparseFaerOptions::default()
