@@ -343,29 +343,10 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let work = dev.alloc(sec.bytes)?;
         let defines = format!("{}{}", wide.defines(), defines(F::CPP, lu));
         let source = format!("{WIDE}\n{SOURCE}");
-        let c = |entry: &str| dev.compile(&source, &defines, entry);
-        let k = Kernels {
-            zero: c("k_zero")?,
-            zero_u32: c("k_zero_u32")?,
-            seed_f32: c("k_seed_f32")?,
-            seed_f64: c("k_seed_f64")?,
-            seed_wide: c("k_seed_wide")?,
-            pair_update: c("k_pair_update")?,
-            big_update: c("k_big_update")?,
-            small_factor: c("k_small_factor")?,
-            chain: c("k_chain")?,
-            potf2: c("k_potf2")?,
-            trsm: c("k_trsm")?,
-            syrk: c("k_syrk")?,
-            fwd_gather: c("k_fwd_gather")?,
-            fwd_trsv: c("k_fwd_trsv")?,
-            bwd_gemv: c("k_bwd_gemv")?,
-            bwd_trsv: c("k_bwd_trsv")?,
-            fwd_chain: c("k_fwd_chain")?,
-            bwd_chain: c("k_bwd_chain")?,
-            perm_in: c("k_perm_in")?,
-            perm_out: c("k_perm_out")?,
-        };
+        let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_f64", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out"];
+        let [zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out]: [D::Kernel; 20] =
+            dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
+        let k = Kernels { zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out };
         Ok(GpuSupernodal {
             dev: dev.clone(),
             k,

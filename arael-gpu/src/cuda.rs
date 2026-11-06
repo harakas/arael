@@ -382,21 +382,26 @@ impl Device for CudaDevice {
         self.stream.synchronize().map_err(driver)
     }
 
-    fn compile(&self, source: &str, defines: &str, entry: &str) -> Result<CudaKernel, GpuError> {
+    fn compile_many(&self, source: &str, defines: &str, entries: &[&str]) -> Result<Vec<CudaKernel>, GpuError> {
         self.not_capturing("a compile")?;
         let full = format!("{}{defines}\n{HEADER}\n{source}", self.arch.defines());
-        let module = self.module(entry, full)?;
-        let function = module.load_function(entry).map_err(driver)?;
-        // Launches may take all the shared memory the device allows a block,
-        // not only the 48 KB a kernel gets without asking.
-        let fixed = function.shared_size_bytes().map_err(driver)?;
-        function
-            .set_attribute(
-                CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                self.arch.shared_bytes as i32 - fixed,
-            )
-            .map_err(driver)?;
-        Ok(CudaKernel { function })
+        let module = self.module(entries.first().copied().unwrap_or("module"), full)?;
+        entries
+            .iter()
+            .map(|&entry| {
+                let function = module.load_function(entry).map_err(driver)?;
+                // Launches may take all the shared memory the device allows a
+                // block, not only the 48 KB a kernel gets without asking.
+                let fixed = function.shared_size_bytes().map_err(driver)?;
+                function
+                    .set_attribute(
+                        CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                        self.arch.shared_bytes as i32 - fixed,
+                    )
+                    .map_err(driver)?;
+                Ok(CudaKernel { function })
+            })
+            .collect()
     }
 
     fn launch(&self, kernel: &CudaKernel, launch: Launch, args: &[Arg<'_, CudaBlock>]) -> Result<(), GpuError> {

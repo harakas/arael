@@ -585,22 +585,10 @@ impl<D: Device> GpuSchur<D> {
         };
         let work = dev.alloc(sec.bytes)?;
         let source = format!("{WIDE}\n{SOURCE}");
-        let c = |entry: &str| dev.compile(&source, &defines, entry);
-        let k = Kernels {
-            zero_u32: c("k_zero_u32")?,
-            elim: c("k_schur_elim")?,
-            w: c("k_schur_w")?,
-            tiles: c("k_schur_tiles")?,
-            rhs: c("k_schur_rhs")?,
-            scatter_kept: c("k_scatter_kept")?,
-            backsub: c("k_schur_backsub")?,
-            symv_sub: c("k_symv_sub")?,
-            copy: c("k_copy_f64")?,
-            refine_start: c("k_refine_start")?,
-            refine_apply: c("k_refine_apply")?,
-            refine_judge: c("k_refine_judge")?,
-            refine_revert: c("k_refine_revert")?,
-        };
+        let entries = ["k_zero_u32", "k_schur_elim", "k_schur_w", "k_schur_tiles", "k_schur_rhs", "k_scatter_kept", "k_schur_backsub", "k_symv_sub", "k_copy_f64", "k_refine_start", "k_refine_apply", "k_refine_judge", "k_refine_revert"];
+        let [zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert]: [D::Kernel; 13] =
+            dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
+        let k = Kernels { zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert };
         Ok(GpuSchur {
             graph: None,
             graphs: true,

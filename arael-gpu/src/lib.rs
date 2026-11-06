@@ -344,7 +344,13 @@ pub trait Device: Send + Sync {
 
     /// Entry point `entry` of `source`, compiled with `defines` in front of [`HEADER`].
     /// A source compiles once per device; later calls find it in memory.
-    fn compile(&self, source: &str, defines: &str, entry: &str) -> Result<Self::Kernel, GpuError>;
+    fn compile(&self, source: &str, defines: &str, entry: &str) -> Result<Self::Kernel, GpuError> {
+        Ok(self.compile_many(source, defines, &[entry])?.remove(0))
+    }
+
+    /// The entry points `entries` of `source`, as [`compile`](Self::compile)
+    /// gives each, the source looked up once.
+    fn compile_many(&self, source: &str, defines: &str, entries: &[&str]) -> Result<Vec<Self::Kernel>, GpuError>;
 
     /// Queues `kernel` with `args` (at most [`MAX_ARGS`]).
     fn launch(

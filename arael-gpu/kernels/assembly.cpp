@@ -26,6 +26,34 @@ typedef SCALAR F;
 // A fixed parameter's global index.
 #define FIXED 0xffffffffu
 
+// The helpers of arael's external functions (arael-sym's EXTERN_CPP), as
+// arael::utils computes them, for float and double.
+
+// An angle in [-pi, pi]: one turn per 2 pi taken off outside it.
+template <typename T>
+DEVICE T arael_rad2rad(T v) {
+    const T pi = (T)3.14159265358979323846;
+    const T two_pi = (T)6.28318530717958647692;
+    if (v < -pi || v > pi) return v - two_pi * floor(v / two_pi + (T)0.5);
+    return v;
+}
+
+// The difference of two angles in [-pi, pi].
+DEVICE float arael_rad_diff(float a, float b) { return arael_rad2rad(a - b); }
+DEVICE double arael_rad_diff(double a, double b) { return arael_rad2rad(a - b); }
+
+// The sum of two angles in [-pi, pi].
+DEVICE float arael_rad_sum(float a, float b) { return arael_rad2rad(a + b); }
+DEVICE double arael_rad_sum(double a, double b) { return arael_rad2rad(a + b); }
+
+// sqrt(v), 0 for v at or below 0.
+DEVICE float arael_safe_sqrt(float v) { return v <= 0.0f ? 0.0f : sqrt(v); }
+DEVICE double arael_safe_sqrt(double v) { return v <= 0.0 ? 0.0 : sqrt(v); }
+
+// The machine epsilon of the argument's type, its value ignored.
+DEVICE float arael_epsilon_for(float) { return 1.1920928955078125e-7f; }
+DEVICE double arael_epsilon_for(double) { return 2.220446049250313e-16; }
+
 // An entity's parameter values from x (W) in F, one thread per value:
 // ev[i] = x[idx[i]], or fixed[i] for a fixed parameter.
 KERNEL_THREADS(256) void k_gather_params(GLOBAL const W* RESTRICT x, GLOBAL const u32* RESTRICT idx,
@@ -170,6 +198,130 @@ KERNEL_THREADS(256) void k_euler_advance(GLOBAL W* RESTRICT refr, GLOBAL const F
     for (u32 i = 0; i < 9; i++) refr[r0 + i] = m[i];
 }
 
+// The rotation matrix of the unit quaternion q (w, x, y, z), row-major, as
+// quatern::rotation_matrix.
+DEVICE void quat_matrix(GLOBAL const W* RESTRICT q, W* m) {
+    W w = q[0], x = q[1], y = q[2], z = q[3];
+    W one = 1.0f, two = 2.0f;
+    m[0] = one - two * (y * y + z * z);
+    m[1] = two * (x * y - z * w);
+    m[2] = two * (x * z + y * w);
+    m[3] = two * (x * y + z * w);
+    m[4] = one - two * (x * x + z * z);
+    m[5] = two * (y * z - x * w);
+    m[6] = two * (x * z - y * w);
+    m[7] = two * (y * z + x * w);
+    m[8] = one - two * (x * x + y * y);
+}
+
+// The composed rotation R(q_ref) R(v) of one QuaternionParam entity, in W
+// (rot_wide) and F (rot), from its reference quaternion qref (w, x, y, z)
+// and its rotation-vector step v (three values of ev at a). R(v) is
+// matrix3::from_rotation_vector_small: with (x, y, z) = v / 2 and
+// s = 2 / (1 + x^2 + y^2 + z^2), R(v) = I + s A. With DERIVS also
+// R(q_ref) dR(v)/dv_k = R(q_ref) (s dA/dk - k s^2 A) / 2 in F (drot, k-major).
+template <bool DERIVS>
+DEVICE void quat_compose(GLOBAL const W* RESTRICT qref, GLOBAL const F* RESTRICT ev, u32 a, u32 e,
+                         GLOBAL W* RESTRICT rot_wide, GLOBAL F* RESTRICT rot, GLOBAL F* RESTRICT drot) {
+    W m[9];
+    quat_matrix(qref + e * 4, m);
+    W half = 0.5f, one = 1.0f, two = 2.0f, zero = 0.0f;
+    W x = (W)ev[a] * half, y = (W)ev[a + 1] * half, z = (W)ev[a + 2] * half;
+    W s = two / (one + x * x + y * y + z * z);
+    W A[9] = {-(y * y + z * z), x * y - z, x * z + y,
+              x * y + z, -(x * x + z * z), y * z - x,
+              x * z - y, y * z + x, -(x * x + y * y)};
+    W d[9];
+#pragma unroll
+    for (u32 i = 0; i < 9; i++) d[i] = s * A[i];
+    d[0] += one;
+    d[4] += one;
+    d[8] += one;
+    u32 r0 = e * 9;
+#pragma unroll
+    for (u32 i = 0; i < 3; i++) {
+#pragma unroll
+        for (u32 j = 0; j < 3; j++) {
+            W v = 0.0f;
+#pragma unroll
+            for (u32 k = 0; k < 3; k++) v += m[i * 3 + k] * d[k * 3 + j];
+            rot_wide[r0 + i * 3 + j] = v;
+            rot[r0 + i * 3 + j] = (F)v;
+        }
+    }
+    if (!DERIVS) return;
+    W m2x = -(two * x), m2y = -(two * y), m2z = -(two * z), m1 = -one;
+    // dA/dx, dA/dy, dA/dz
+    W dA[27] = {zero, y, z, y, m2x, m1, z, one, m2x,
+                m2y, x, one, x, zero, z, m1, z, m2y,
+                m2z, m1, x, one, m2z, y, x, y, zero};
+    W kv[3] = {x, y, z};
+    W sh = s * half, s2h = s * s * half;
+    u32 q0 = e * 27;
+#pragma unroll
+    for (u32 c = 0; c < 3; c++) {
+        W dd[9];
+#pragma unroll
+        for (u32 i = 0; i < 9; i++) dd[i] = sh * dA[c * 9 + i] - kv[c] * s2h * A[i];
+#pragma unroll
+        for (u32 i = 0; i < 3; i++) {
+#pragma unroll
+            for (u32 j = 0; j < 3; j++) {
+                W v = 0.0f;
+#pragma unroll
+                for (u32 k = 0; k < 3; k++) v += m[i * 3 + k] * dd[k * 3 + j];
+                drot[q0 + c * 9 + i * 3 + j] = (F)v;
+            }
+        }
+    }
+}
+
+// One QuaternionParam rotation per thread, values only.
+KERNEL_THREADS(256) void k_quat_values(GLOBAL const W* RESTRICT qref, GLOBAL const F* RESTRICT ev,
+                                       GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT rot_wide,
+                                       GLOBAL F* RESTRICT rot, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    quat_compose<false>(qref, ev, at[e], e, rot_wide, rot, rot);
+}
+
+// One QuaternionParam rotation per thread with its three derivatives.
+KERNEL_THREADS(256) void k_quat_rotations(GLOBAL const W* RESTRICT qref, GLOBAL const F* RESTRICT ev,
+                                          GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT rot_wide,
+                                          GLOBAL F* RESTRICT rot, GLOBAL F* RESTRICT drot, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    quat_compose<true>(qref, ev, at[e], e, rot_wide, rot, drot);
+}
+
+// The reference quaternions moved by their steps, one thread per entity:
+// q_ref = unit(q_ref unit(1, v / 2)), as QuaternionParam::advance does
+// after an accepted step.
+KERNEL_THREADS(256) void k_quat_advance(GLOBAL W* RESTRICT qref, GLOBAL const F* RESTRICT ev,
+                                        GLOBAL const u32* RESTRICT at, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    u32 a = at[e];
+    W half = 0.5f, one = 1.0f;
+    W sx = (W)ev[a] * half, sy = (W)ev[a + 1] * half, sz = (W)ev[a + 2] * half;
+    W inv = one / sqrt(one + sx * sx + sy * sy + sz * sz);
+    W sw = inv;
+    sx *= inv;
+    sy *= inv;
+    sz *= inv;
+    GLOBAL W* q = qref + e * 4;
+    W w = q[0], x = q[1], y = q[2], z = q[3];
+    W nw = w * sw - (x * sx + y * sy + z * sz);
+    W nx = sx * w + x * sw + (y * sz - z * sy);
+    W ny = sy * w + y * sw + (z * sx - x * sz);
+    W nz = sz * w + z * sw + (x * sy - y * sx);
+    W r = one / sqrt(nw * nw + nx * nx + ny * ny + nz * nz);
+    q[0] = nw * r;
+    q[1] = nx * r;
+    q[2] = ny * r;
+    q[3] = nz * r;
+}
+
 // n values of x zeroed: an assembly's targets before the sums add into them.
 KERNEL_THREADS(256) void k_zero_wide(GLOBAL W* RESTRICT x, u32 n) {
     u32 i = global_x();
@@ -274,9 +426,11 @@ DEVICE void reduce_entity(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRI
 
 // One cross array's sums, one thread per (cross slot, i, j) over `slots`
 // slots: 2 dA_i dB_j summed over the rows of the slot's instances
-// inst[off[x]..off[x + 1]] (one pair of entities, sa and sb, per slot), into
-// the cross tile `tile_x` of the slot, between the live parameters of the
-// entities (global indices idx_a, idx_b; first live ones in tile_a, tile_b).
+// inst[off[x]..off[x + 1]] (one pair of entities, sa and sb those of the
+// first, per slot), into the cross tile `tile_x` of the slot, between the
+// live parameters of the entities (global indices idx_a, idx_b; first live
+// ones in tile_a, tile_b). An instance of the pair the other way round (its
+// A the first's B: two entities of one array, NA = NB) adds dA_j dB_i.
 template <u32 NA, u32 NB, u32 R, u32 STRIDE>
 DEVICE void reduce_cross(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRICT off, GLOBAL const u32* RESTRICT inst,
                          GLOBAL const u32* RESTRICT slot_a, GLOBAL const u32* RESTRICT slot_b,
@@ -298,10 +452,13 @@ DEVICE void reduce_cross(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRIC
     W acc = 0.0f;
     for (u32 q = q0; q < q1; q++) {
         GLOBAL const F* r = rec + inst[q] * (R * STRIDE);
+        bool reversed = NA == NB && slot_a[inst[q]] != sa;
+        u32 ia = reversed ? 1 + j : 1 + i;
+        u32 jb = reversed ? 1 + NA + i : 1 + NA + j;
 #pragma unroll
         for (u32 row = 0; row < R; row++) {
             GLOBAL const F* rr = r + row * STRIDE;
-            acc = wide_fma(acc, rr[1 + i], rr[1 + NA + j]);
+            acc = wide_fma(acc, rr[ia], rr[jb]);
         }
     }
     acc += acc;

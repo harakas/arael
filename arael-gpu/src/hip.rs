@@ -548,16 +548,21 @@ impl Device for HipDevice {
         check(self.l, unsafe { self.l.rt.hipStreamSynchronize(self.stream) }, "hipStreamSynchronize")
     }
 
-    fn compile(&self, source: &str, defines: &str, entry: &str) -> Result<HipKernel, GpuError> {
+    fn compile_many(&self, source: &str, defines: &str, entries: &[&str]) -> Result<Vec<HipKernel>, GpuError> {
         self.not_capturing("a compile")?;
         let full = format!("{}{defines}\n{HEADER}\n{source}", self.arch.defines());
-        let module = self.module(entry, full)?;
+        let module = self.module(entries.first().copied().unwrap_or("module"), full)?;
         self.bind()?;
-        let name = c_string(entry, entry)?;
-        let mut function = core::ptr::null_mut();
-        // SAFETY: a loaded module and a C string.
-        check(self.l, unsafe { self.l.rt.hipModuleGetFunction(&mut function, module.module, name.as_ptr()) }, &format!("hipModuleGetFunction({entry})"))?;
-        Ok(HipKernel { function, module })
+        entries
+            .iter()
+            .map(|&entry| {
+                let name = c_string(entry, entry)?;
+                let mut function = core::ptr::null_mut();
+                // SAFETY: a loaded module and a C string.
+                check(self.l, unsafe { self.l.rt.hipModuleGetFunction(&mut function, module.module, name.as_ptr()) }, &format!("hipModuleGetFunction({entry})"))?;
+                Ok(HipKernel { function, module: module.clone() })
+            })
+            .collect()
     }
 
     fn launch(&self, kernel: &HipKernel, launch: Launch, args: &[Arg<'_, HipBlock>]) -> Result<(), GpuError> {

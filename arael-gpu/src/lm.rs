@@ -193,17 +193,10 @@ impl<D: Device> LmVectors<D> {
         // above FAULT_BELOW in either scalar
         defines.push_str("#define NO_FAULT ARAEL_WIDE(1e300, 3.0e38f, 0.0f)\n");
         let source = format!("{WIDE}\n{SOURCE}");
-        let c = |entry: &str| dev.compile(&source, &defines, entry);
-        let k = Kernels {
-            gather_diag: c("k_gather_diag")?,
-            lin_pass: c("k_lin_pass")?,
-            damp: c("k_damp")?,
-            attempt_pass: c("k_attempt_pass")?,
-            combine_lin: c("k_combine_lin")?,
-            combine_attempt: c("k_combine_attempt")?,
-            copy: c("k_copy")?,
-            zero_steps: c("k_zero_steps")?,
-        };
+        let entries = ["k_gather_diag", "k_lin_pass", "k_damp", "k_attempt_pass", "k_combine_lin", "k_combine_attempt", "k_copy", "k_zero_steps"];
+        let [gather_diag, lin_pass, damp, attempt_pass, combine_lin, combine_attempt, copy, zero_steps]: [D::Kernel; 8] =
+            dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
+        let k = Kernels { gather_diag, lin_pass, damp, attempt_pass, combine_lin, combine_attempt, copy, zero_steps };
         Ok(LmVectors { dev: dev.clone(), wide, k, n, block, sec })
     }
 
