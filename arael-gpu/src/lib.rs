@@ -34,6 +34,8 @@ mod disk;
 pub mod hip;
 #[cfg(feature = "hip")]
 mod hip_sys;
+#[doc(hidden)]
+pub mod fault;
 pub mod lm;
 pub mod plan;
 #[cfg(any(feature = "cuda", feature = "hip"))]

@@ -403,6 +403,7 @@ impl Device for CudaDevice {
     }
 
     fn alloc(&self, bytes: usize) -> Result<CudaBlock, GpuError> {
+        crate::fault::check("alloc")?;
         self.not_capturing("an allocation")?;
         let mem = match self.pool.take(bytes) {
             Some((_, mem)) => mem,
@@ -423,6 +424,7 @@ impl Device for CudaDevice {
     }
 
     fn write(&self, dst: &mut CudaBlock, offset: usize, src: &[u8]) -> Result<(), GpuError> {
+        crate::fault::check("write")?;
         self.not_capturing("a write")?;
         assert!(offset + src.len() <= dst.len, "a write past the block's {} bytes", dst.len);
         let mut view = dst.mem_mut().slice_mut(offset..offset + src.len());
@@ -430,6 +432,7 @@ impl Device for CudaDevice {
     }
 
     fn alloc_host(&self, bytes: usize) -> Result<CudaHost, GpuError> {
+        crate::fault::check("alloc_host")?;
         let (cap, mem) = match self.host_pool.take(bytes) {
             Some(taken) => taken,
             None => {
@@ -446,6 +449,7 @@ impl Device for CudaDevice {
     }
 
     fn host_mut<'a>(&self, host: &'a mut CudaHost) -> Result<&'a mut [u8], GpuError> {
+        crate::fault::check("host_mut")?;
         let mem = host.mem();
         mem.event.synchronize().map_err(driver)?;
         // SAFETY: the allocation holds `len` bytes, no copy from it pending.
@@ -453,6 +457,7 @@ impl Device for CudaDevice {
     }
 
     fn write_from_host(&self, dst: &mut CudaBlock, offset: usize, host: &CudaHost, range: core::ops::Range<usize>) -> Result<(), GpuError> {
+        crate::fault::check("write_from_host")?;
         self.not_capturing("a write")?;
         assert!(range.start <= range.end && range.end <= host.len, "a copy past the host block's {} bytes", host.len);
         assert!(offset + range.len() <= dst.len, "a write past the block's {} bytes", dst.len);
@@ -471,6 +476,7 @@ impl Device for CudaDevice {
     }
 
     fn read(&self, src: &CudaBlock, offset: usize, dst: &mut [u8]) -> Result<(), GpuError> {
+        crate::fault::check("read")?;
         self.not_capturing("a read")?;
         assert!(offset + dst.len() <= src.len, "a read past the block's {} bytes", src.len);
         let view = src.mem().slice(offset..offset + dst.len());
@@ -479,6 +485,7 @@ impl Device for CudaDevice {
     }
 
     fn read_many(&self, reads: &mut [(&CudaBlock, usize, &mut [u8])]) -> Result<(), GpuError> {
+        crate::fault::check("read")?;
         self.not_capturing("a read")?;
         for (src, offset, dst) in reads.iter_mut() {
             assert!(*offset + dst.len() <= src.len, "a read past the block's {} bytes", src.len);
@@ -489,6 +496,7 @@ impl Device for CudaDevice {
     }
 
     fn compile_many(&self, source: &str, defines: &str, entries: &[&str]) -> Result<Vec<CudaKernel>, GpuError> {
+        crate::fault::check("compile")?;
         self.not_capturing("a compile")?;
         let full = self.unit(source, defines);
         let module = self.module(entries.first().copied().unwrap_or("module"), full)?;
@@ -511,6 +519,7 @@ impl Device for CudaDevice {
     }
 
     fn launch(&self, kernel: &CudaKernel, launch: Launch, args: &[Arg<'_, CudaBlock>]) -> Result<(), GpuError> {
+        crate::fault::check("launch")?;
         assert!(args.len() <= MAX_ARGS, "a launch takes at most {MAX_ARGS} arguments");
         // Each argument's value in a slot of its own, the driver reading as
         // many bytes from the slot as the kernel's parameter has (the low
@@ -553,6 +562,7 @@ impl Device for CudaDevice {
     }
 
     fn sync(&self) -> Result<(), GpuError> {
+        crate::fault::check("sync")?;
         self.not_capturing("a wait")?;
         self.stream.synchronize().map_err(driver)
     }
@@ -560,6 +570,7 @@ impl Device for CudaDevice {
     /// Stream capture in thread-local mode, instantiated and uploaded: the
     /// capture forbids nothing on other threads.
     fn capture(&self, record: impl FnOnce() -> Result<(), GpuError>) -> Result<CudaGraph, GpuError> {
+        crate::fault::check("capture")?;
         let open = OpenCapture::begin(self)?;
         let recorded = record();
         let graph = open.end();
@@ -582,6 +593,7 @@ impl Device for CudaDevice {
     }
 
     fn replay(&self, graph: &CudaGraph) -> Result<(), GpuError> {
+        crate::fault::check("replay")?;
         self.not_capturing("a replay")?;
         assert!(Arc::ptr_eq(&graph.ctx, &self.ctx), "a graph replays on the context it was captured on");
         self.ctx.bind_to_thread().map_err(driver)?;

@@ -572,6 +572,7 @@ impl Device for HipDevice {
     }
 
     fn alloc(&self, bytes: usize) -> Result<HipBlock, GpuError> {
+        crate::fault::check("alloc")?;
         self.not_capturing("an allocation")?;
         self.bind()?;
         let (cap, mem) = match self.pool.take(bytes) {
@@ -593,6 +594,7 @@ impl Device for HipDevice {
     }
 
     fn write(&self, dst: &mut HipBlock, offset: usize, src: &[u8]) -> Result<(), GpuError> {
+        crate::fault::check("write")?;
         self.not_capturing("a write")?;
         assert!(offset + src.len() <= dst.len, "a write past the block's {} bytes", dst.len);
         self.bind()?;
@@ -603,6 +605,7 @@ impl Device for HipDevice {
     }
 
     fn alloc_host(&self, bytes: usize) -> Result<HipHost, GpuError> {
+        crate::fault::check("alloc_host")?;
         let (cap, mem) = match self.host_pool.take(bytes) {
             Some(taken) => taken,
             None => {
@@ -629,6 +632,7 @@ impl Device for HipDevice {
     }
 
     fn host_mut<'a>(&self, host: &'a mut HipHost) -> Result<&'a mut [u8], GpuError> {
+        crate::fault::check("host_mut")?;
         self.bind()?;
         let mem = host.mem();
         // SAFETY: the host block's event.
@@ -638,6 +642,7 @@ impl Device for HipDevice {
     }
 
     fn write_from_host(&self, dst: &mut HipBlock, offset: usize, host: &HipHost, range: core::ops::Range<usize>) -> Result<(), GpuError> {
+        crate::fault::check("write_from_host")?;
         self.not_capturing("a write")?;
         assert!(range.start <= range.end && range.end <= host.len, "a copy past the host block's {} bytes", host.len);
         assert!(offset + range.len() <= dst.len, "a write past the block's {} bytes", dst.len);
@@ -659,6 +664,7 @@ impl Device for HipDevice {
     }
 
     fn read_many(&self, reads: &mut [(&HipBlock, usize, &mut [u8])]) -> Result<(), GpuError> {
+        crate::fault::check("read")?;
         self.not_capturing("a read")?;
         self.bind()?;
         for (src, offset, dst) in reads.iter_mut() {
@@ -672,6 +678,7 @@ impl Device for HipDevice {
     }
 
     fn compile_many(&self, source: &str, defines: &str, entries: &[&str]) -> Result<Vec<HipKernel>, GpuError> {
+        crate::fault::check("compile")?;
         self.not_capturing("a compile")?;
         let full = self.unit(source, defines);
         let module = self.module(entries.first().copied().unwrap_or("module"), full)?;
@@ -689,6 +696,7 @@ impl Device for HipDevice {
     }
 
     fn launch(&self, kernel: &HipKernel, launch: Launch, args: &[Arg<'_, HipBlock>]) -> Result<(), GpuError> {
+        crate::fault::check("launch")?;
         assert!(args.len() <= MAX_ARGS, "a launch takes at most {MAX_ARGS} arguments");
         let mut values = [0u64; MAX_ARGS];
         for (slot, arg) in values.iter_mut().zip(args) {
@@ -720,6 +728,7 @@ impl Device for HipDevice {
     }
 
     fn sync(&self) -> Result<(), GpuError> {
+        crate::fault::check("sync")?;
         self.not_capturing("a wait")?;
         self.bind()?;
         // SAFETY: the device's stream.
@@ -728,6 +737,7 @@ impl Device for HipDevice {
 
     /// Stream capture in thread-local mode, instantiated and uploaded, as on CUDA.
     fn capture(&self, record: impl FnOnce() -> Result<(), GpuError>) -> Result<HipGraph, GpuError> {
+        crate::fault::check("capture")?;
         let open = OpenCapture::begin(self)?;
         let recorded = record();
         let graph = open.end();
@@ -751,6 +761,7 @@ impl Device for HipDevice {
     }
 
     fn replay(&self, graph: &HipGraph) -> Result<(), GpuError> {
+        crate::fault::check("replay")?;
         self.not_capturing("a replay")?;
         assert_eq!(graph.index, self.index, "a graph replays on the device it was captured on");
         self.bind()?;
