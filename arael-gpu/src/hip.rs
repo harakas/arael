@@ -397,6 +397,7 @@ impl HipDevice {
                 target,
                 warp: prop.warpSize as u32,
                 shared_bytes: prop.sharedMemPerBlock as u32,
+                multiprocessors: prop.multiProcessorCount as u32,
                 has_f64: true,
             };
             Ok(HipDevice {

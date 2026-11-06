@@ -198,7 +198,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         wide: Wide,
     ) -> Result<Self, GpuError> {
         let plan = Plan::new(sn, asym);
-        let lw = build_levels(&plan, params);
+        let lw = build_levels(&plan, params, dev.arch().multiprocessors);
         let fs = core::mem::size_of::<F>();
         let lu = params.lane_unroll.unwrap_or(if fs == 4 { 4 } else { 8 });
         assert!(lu >= 2 && lu.is_multiple_of(2), "the lane unroll is even and at least 2");
@@ -230,7 +230,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 n_tile_items: (w.tile_items.len() / 5) as u32,
                 big_items: 4 * pk.push(&w.big_items),
                 big_rects: 4 * pk.push(&w.big_rects),
-                n_big_items: (w.big_items.len() / 5) as u32,
+                n_big_items: (w.big_items.len() / plan::BIG_ITEM) as u32,
                 small: 4 * pk.push(&w.small_targets),
                 n_small: w.small_targets.len() as u32,
                 small_shared: small_shared as u32,
@@ -549,6 +549,7 @@ fn defines(scalar: &str, lu: usize) -> String {
         ("NB", NB),
         ("TB", TB),
         ("TK", TK),
+        ("BIG_ITEM", plan::BIG_ITEM),
         ("TR", TR),
         ("TC", TC),
         ("GROUP", GROUP),
@@ -601,7 +602,29 @@ mod tests {
 
     /// The parameters that put every kernel to work on a small grid.
     fn every_kernel_busy() -> GpuSupernodalParams {
-        GpuSupernodalParams { small_q: 8, big_pair_flops: 100.0, elem_cap: 256, solve_work: 512, lane_unroll: None }
+        GpuSupernodalParams {
+            small_q: 8,
+            small_flops: f64::INFINITY,
+            big_pair_flops: 100.0,
+            wide_pair_k: u32::MAX,
+            wide_pair_flops: f64::INFINITY,
+            elem_cap: 256,
+            solve_work: 512,
+            lane_unroll: None,
+            blocks_per_sm: 4,
+        }
+    }
+
+    /// Every supernode on the panel steps, however narrow: what the
+    /// `small_flops` bound sends a tall one to.
+    fn panel_steps_only() -> GpuSupernodalParams {
+        GpuSupernodalParams { small_flops: 0.0, ..GpuSupernodalParams::default() }
+    }
+
+    /// The big updates cut by rectangles and along k into shared tiles, as
+    /// on a device far larger than the grid's levels.
+    fn cut_updates() -> GpuSupernodalParams {
+        GpuSupernodalParams { blocks_per_sm: 1000, ..every_kernel_busy() }
     }
 
     /// The factor's lower parts against a reference, as err / max.
@@ -634,7 +657,10 @@ mod tests {
         let mut x_cpu = rhs.clone();
         supernodal_solve(&sn, &cpu, &mut x_cpu, &mut ctx, 1);
         let dev = device();
-        for params in [GpuSupernodalParams::default(), every_kernel_busy()] {
+        // the cut parameters do cut: some big tile is shared between items
+        let lw = plan::build_levels(&Plan::new(&sn, a.symbolic()), &cut_updates(), dev.arch().multiprocessors);
+        assert!(lw.iter().any(|w| w.big_items.chunks(plan::BIG_ITEM).any(|it| it[7] == 1)), "a tile cut between items");
+        for params in [GpuSupernodalParams::default(), every_kernel_busy(), panel_steps_only(), cut_updates()] {
             let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
             assert!(sn.n_supernodes() > 20, "a tree with levels");
             g.factorize(a.vals()).unwrap();
@@ -659,7 +685,7 @@ mod tests {
         let (a, dense, rhs, sn) = setup(24);
         let n = sn.dim();
         let dev = device();
-        for params in [GpuSupernodalParams::default(), every_kernel_busy()] {
+        for params in [GpuSupernodalParams::default(), every_kernel_busy(), panel_steps_only(), cut_updates()] {
             let mut g = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
             g.factorize(a.vals()).unwrap();
             let mut x = rhs.clone();
@@ -695,7 +721,7 @@ mod tests {
         let good = a.vals()[base];
         a.vals_mut()[base] = -1.0;
         let dev = device();
-        for params in [GpuSupernodalParams::default(), every_kernel_busy()] {
+        for params in [GpuSupernodalParams::default(), every_kernel_busy(), panel_steps_only(), cut_updates()] {
             let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, &asym, &params, Wide::F64).unwrap();
             assert!(matches!(g.factorize(a.vals()), Err(FactorizeError::NotPositiveDefinite)));
             // the flag is cleared by the next factorization

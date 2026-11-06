@@ -63,11 +63,23 @@ pub const HEADER: usize = 32;
 #[derive(Clone, Copy, Debug)]
 pub struct GpuSupernodalParams {
     /// Supernodes narrower than this (scalar columns) are factored by the
-    /// one-block small kernel; the others by the batched panel steps.
+    /// one-block small kernel, unless their rows below need more than
+    /// `small_flops`; the others by the batched panel steps.
     pub small_q: u32,
+    /// The most multiply-adds of a small supernode's solve of its rows below
+    /// (`q^2 h / 2`) the one-block kernel takes: a taller supernode goes to
+    /// the panel steps, whose solve runs on many blocks.
+    pub small_flops: f64,
     /// A descendant update of at least this many multiply-adds goes through
-    /// the GEMM-core kernel; smaller ones through the tile kernel.
+    /// the GEMM-core kernel; smaller ones through the tile kernel, unless
+    /// `wide_pair_k` and `wide_pair_flops` send them there.
     pub big_pair_flops: f64,
+    /// A descendant at least this many columns wide sends its updates of
+    /// at least `wide_pair_flops` multiply-adds through the GEMM-core
+    /// kernel too: it reuses each k slab across its tile, where the tile
+    /// kernel computes every element as a dot product of that length.
+    pub wide_pair_k: u32,
+    pub wide_pair_flops: f64,
     /// Elements of a target tile per block of the small-update kernel; a tile
     /// with more is cut into chunks.
     pub elem_cap: usize,
@@ -76,11 +88,25 @@ pub struct GpuSupernodalParams {
     /// Loads in flight per iteration of the backward dot products; `None`
     /// picks 8 for f64 and 4 for f32.
     pub lane_unroll: Option<usize>,
+    /// Blocks per multiprocessor a level's big updates are cut to fill: a
+    /// level whose tiles make fewer blocks has its tiles' updates split
+    /// across blocks, which then subtract atomically.
+    pub blocks_per_sm: u32,
 }
 
 impl Default for GpuSupernodalParams {
     fn default() -> Self {
-        GpuSupernodalParams { small_q: 96, big_pair_flops: 2e6, elem_cap: 16384, solve_work: 65536, lane_unroll: None }
+        GpuSupernodalParams {
+            small_q: 96,
+            small_flops: 1e6,
+            big_pair_flops: 2e6,
+            wide_pair_k: 64,
+            wide_pair_flops: 1e5,
+            elem_cap: 16384,
+            solve_work: 65536,
+            lane_unroll: None,
+            blocks_per_sm: 4,
+        }
     }
 }
 
@@ -351,7 +377,9 @@ pub(crate) struct LevelWork {
     pub tile_items: Vec<u32>,
     /// 4 per rectangle: pair, geometry (i0 | ni << 8 | j0 << 16 | nj << 24), dra, dca.
     pub tile_rects: Vec<u32>,
-    /// 5 per (target, tile): target, row0, col0, first rectangle, end.
+    /// [`BIG_ITEM`] per item: target, row0, col0, first rectangle, end, the
+    /// k range `[k0, k1)` of a rectangle cut along k (`k1` 0: every k), and
+    /// whether the tile is shared with other items (subtracted atomically).
     pub big_items: Vec<u32>,
     /// 5 per rectangle: pair, da, db, ca, cb.
     pub big_rects: Vec<u32>,
@@ -369,8 +397,15 @@ pub(crate) struct LevelWork {
     pub syrk_grid: Vec<u32>,
 }
 
-/// The level schedule of `p`: every supernode's work sorted into its level.
-pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams) -> Vec<LevelWork> {
+/// Words per big update item ([`LevelWork::big_items`]).
+pub const BIG_ITEM: usize = 8;
+
+/// The least work (multiply-adds) a big item is cut down to.
+const MIN_ITEM_WORK: f64 = (TB * TB * TK * 2) as f64;
+
+/// The level schedule of `p` on a device of `multiprocessors`: every
+/// supernode's work sorted into its level.
+pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: u32) -> Vec<LevelWork> {
     let mut lw: Vec<LevelWork> = (0..p.nlevels).map(|_| LevelWork::default()).collect();
     let mut g_works = vec![0usize; p.nlevels];
     for s in 0..p.ns {
@@ -378,7 +413,7 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams) -> Vec<LevelWork>
         let g_work = &mut g_works[p.level[s]];
         let q = p.dims[2 * s];
         let h = p.dims[2 * s + 1];
-        if q < kn.small_q {
+        if q < kn.small_q && (q as f64) * (q as f64) * (h as f64) / 2.0 <= kn.small_flops {
             w.small_targets.push(s as u32);
         } else {
             w.big_targets.push(s as u32);
@@ -427,7 +462,8 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams) -> Vec<LevelWork>
         for pi in p.pair_ptr[s] as usize..p.pair_ptr[s + 1] as usize {
             let pr = &p.pairs[pi];
             let dq = p.dims[2 * pr.d as usize];
-            if pr.m as f64 * pr.kw as f64 * dq as f64 >= kn.big_pair_flops {
+            let flops = pr.m as f64 * pr.kw as f64 * dq as f64;
+            if flops >= kn.big_pair_flops || (dq >= kn.wide_pair_k && flops >= kn.wide_pair_flops) {
                 bigs.push(pi);
                 continue;
             }
@@ -539,8 +575,14 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams) -> Vec<LevelWork>
                 (key & 0xfffff) as u32 * TB as u32,
                 rect0,
                 (w.big_rects.len() / 5) as u32,
+                0,
+                0,
+                0,
             ]);
         }
+    }
+    for w in &mut lw {
+        split_big(w, p, (multiprocessors * kn.blocks_per_sm) as usize);
     }
     // the panel steps' grid sizes
     for w in &mut lw {
@@ -566,6 +608,62 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams) -> Vec<LevelWork>
     lw
 }
 
+/// The level's big updates cut to fill `blocks` blocks: when its tiles
+/// make fewer, an item over the level's share of the work is cut by
+/// rectangles, and a rectangle over it by k ranges (multiples of TK); the
+/// items of a tile cut so are marked shared.
+fn split_big(w: &mut LevelWork, p: &Plan, blocks: usize) {
+    let n_items = w.big_items.len() / BIG_ITEM;
+    if n_items == 0 || n_items >= blocks {
+        return;
+    }
+    let rects = &w.big_rects;
+    // a rectangle's multiply-adds and its k extent
+    let work = |r: u32| -> (f64, u32) {
+        let r = r as usize;
+        let (pi, da, db, ca, cb) = (rects[5 * r] as usize, rects[5 * r + 1], rects[5 * r + 2], rects[5 * r + 3], rects[5 * r + 4]);
+        let dq = p.dims[2 * p.pairs[pi].d as usize];
+        ((db - da) as f64 * (cb - ca) as f64 * dq as f64, dq)
+    };
+    let total: f64 = (0..(rects.len() / 5) as u32).map(|r| work(r).0).sum();
+    let cap = (total / blocks as f64).max(MIN_ITEM_WORK);
+    let old = std::mem::take(&mut w.big_items);
+    for it in old.chunks(BIG_ITEM) {
+        let (s, row0, col0, r0, r1) = (it[0], it[1], it[2], it[3], it[4]);
+        let first = w.big_items.len();
+        let mut push = |w: &mut Vec<u32>, ra: u32, rb: u32, k0: u32, k1: u32| w.extend_from_slice(&[s, row0, col0, ra, rb, k0, k1, 0]);
+        let (mut start, mut acc) = (r0, 0.0);
+        for r in r0..r1 {
+            let (wr, dq) = work(r);
+            if wr > cap {
+                if start < r {
+                    push(&mut w.big_items, start, r, 0, 0);
+                }
+                let step = dq.div_ceil((wr / cap).ceil() as u32).next_multiple_of(TK as u32);
+                let mut k0 = 0;
+                while k0 < dq {
+                    push(&mut w.big_items, r, r + 1, k0, dq.min(k0 + step));
+                    k0 += step;
+                }
+                (start, acc) = (r + 1, 0.0);
+            } else if acc > 0.0 && acc + wr > cap {
+                push(&mut w.big_items, start, r, 0, 0);
+                (start, acc) = (r, wr);
+            } else {
+                acc += wr;
+            }
+        }
+        if start < r1 {
+            push(&mut w.big_items, start, r1, 0, 0);
+        }
+        if w.big_items.len() - first > BIG_ITEM {
+            for item in w.big_items[first..].chunks_mut(BIG_ITEM) {
+                item[7] = 1;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,11 +681,19 @@ mod tests {
 
     /// Every element of every descendant update that the factor needs (the
     /// tiles at or below the diagonal) is in exactly one rectangle, small or
-    /// big; the solve's items cover every mid row and every column once.
-    fn check_coverage(kn: &GpuSupernodalParams, both_kernels: bool) {
-        let (p, _, _) = analyse(12);
-        let lw = build_levels(&p, kn);
-        let mut hits: Vec<Vec<u8>> = p.pairs.iter().map(|pr| vec![0u8; (pr.m * pr.kw) as usize]).collect();
+    /// big, over all of its k once (a big item may cover a k range); the
+    /// solve's items cover every mid row and every column once.
+    fn check_coverage(kn: &GpuSupernodalParams, multiprocessors: u32, both_kernels: bool) {
+        check_coverage_of(12, kn, multiprocessors, both_kernels);
+    }
+
+    /// [`check_coverage`] on a `k x k` grid.
+    fn check_coverage_of(k: usize, kn: &GpuSupernodalParams, multiprocessors: u32, both_kernels: bool) {
+        let (p, _, _) = analyse(k);
+        let lw = build_levels(&p, kn, multiprocessors);
+        let dq = |pi: usize| p.dims[2 * p.pairs[pi].d as usize];
+        // per element of a pair, the k it is summed over
+        let mut hits: Vec<Vec<u32>> = p.pairs.iter().map(|pr| vec![0u32; (pr.m * pr.kw) as usize]).collect();
         let (mut small_rects, mut big_rects) = (0usize, 0usize);
         for w in &lw {
             for it in w.tile_items.chunks(5) {
@@ -597,19 +703,21 @@ mod tests {
                     let m = p.pairs[pi].m;
                     for jj in 0..nj {
                         for ii in 0..ni {
-                            hits[pi][((dca + jj) * m + dra + ii) as usize] += 1;
+                            hits[pi][((dca + jj) * m + dra + ii) as usize] += dq(pi);
                         }
                     }
                     small_rects += 1;
                 }
             }
-            for it in w.big_items.chunks(5) {
+            for it in w.big_items.chunks(BIG_ITEM) {
+                assert!(it[6] == 0 || it[4] == it[3] + 1, "a k range is of one rectangle");
                 for r in it[3] as usize..it[4] as usize {
                     let (pi, da, db, ca, cb) = (w.big_rects[5 * r] as usize, w.big_rects[5 * r + 1], w.big_rects[5 * r + 2], w.big_rects[5 * r + 3], w.big_rects[5 * r + 4]);
                     let m = p.pairs[pi].m;
+                    let k = if it[6] == 0 { dq(pi) } else { it[6] - it[5] };
                     for j in ca..cb {
                         for i in da..db {
-                            hits[pi][(j * m + i) as usize] += 1;
+                            hits[pi][(j * m + i) as usize] += k;
                         }
                     }
                     big_rects += 1;
@@ -625,7 +733,7 @@ mod tests {
                 for i in 0..pr.m as usize {
                     let needed = rmap[i] as usize / TR >= cmap[j] as usize / TC;
                     let h = hits[pi][j * pr.m as usize + i];
-                    assert_eq!(h, needed as u8, "pair {pi} element ({i}, {j}) covered {h} times, needed {needed}");
+                    assert_eq!(h, needed as u32 * dq(pi), "pair {pi} element ({i}, {j}) summed over {h} k, needed {needed}");
                 }
             }
         }
@@ -670,12 +778,107 @@ mod tests {
     #[test]
     fn plan_covers_every_update_once() {
         // the default threshold leaves a 12 x 12 grid without big pairs
-        check_coverage(&GpuSupernodalParams::default(), false);
+        check_coverage(&GpuSupernodalParams::default(), 128, false);
+    }
+
+    /// The parameters that put every kernel to work on a 12 x 12 grid.
+    fn every_kernel_busy() -> GpuSupernodalParams {
+        GpuSupernodalParams {
+            small_q: 8,
+            small_flops: f64::INFINITY,
+            big_pair_flops: 100.0,
+            wide_pair_k: u32::MAX,
+            wide_pair_flops: f64::INFINITY,
+            elem_cap: 256,
+            solve_work: 512,
+            lane_unroll: None,
+            blocks_per_sm: 4,
+        }
     }
 
     #[test]
     fn plan_covers_every_update_once_with_every_kernel_busy() {
-        check_coverage(&GpuSupernodalParams { small_q: 8, big_pair_flops: 100.0, elem_cap: 256, solve_work: 512, lane_unroll: None }, true);
+        check_coverage(&every_kernel_busy(), 1, true);
+    }
+
+    /// On a device too large for the grid's levels the big updates are cut
+    /// by rectangles and along k, each element still summed over its k once,
+    /// and the items of a cut tile are marked shared.
+    #[test]
+    fn big_updates_are_cut_to_fill_the_device() {
+        let kn = every_kernel_busy();
+        check_coverage_of(40, &kn, 10_000, true);
+        let (p, _, _) = analyse(40);
+        let (whole, cut) = (build_levels(&p, &kn, 1), build_levels(&p, &kn, 10_000));
+        let items = |lw: &[LevelWork]| lw.iter().map(|w| w.big_items.len() / BIG_ITEM).sum::<usize>();
+        assert!(items(&cut) > items(&whole), "{} items against {}", items(&cut), items(&whole));
+        let k_ranges = cut.iter().flat_map(|w| w.big_items.chunks(BIG_ITEM)).filter(|it| it[6] != 0).count();
+        assert!(k_ranges > 0, "some rectangle cut along k");
+        for w in &cut {
+            let mut tiles: HashMap<(u32, u32, u32), Vec<u32>> = HashMap::new();
+            for it in w.big_items.chunks(BIG_ITEM) {
+                tiles.entry((it[0], it[1], it[2])).or_default().push(it[7]);
+            }
+            for (tile, shared) in tiles {
+                let want = (shared.len() > 1) as u32;
+                assert!(shared.iter().all(|&f| f == want), "tile {tile:?}: {} items, shared flags {shared:?}", shared.len());
+            }
+        }
+    }
+
+    /// A supernode narrower than `small_q` goes to the small kernel only
+    /// while its solve of the rows below stays within `small_flops`.
+    #[test]
+    fn tall_narrow_supernodes_take_the_panel_steps() {
+        let (p, _, _) = analyse(12);
+        let work = |s: usize| {
+            let (q, h) = (p.dims[2 * s] as f64, p.dims[2 * s + 1] as f64);
+            q * q * h / 2.0
+        };
+        let narrow: Vec<usize> = (0..p.ns).filter(|&s| p.dims[2 * s] < 96).collect();
+        let mut works: Vec<f64> = narrow.iter().map(|&s| work(s)).collect();
+        works.sort_by(f64::total_cmp);
+        let bound = works[works.len() / 2];
+        assert!(works[0] <= bound && bound < works[works.len() - 1], "the grid has narrow supernodes either side of {bound}");
+        let kn = GpuSupernodalParams { small_flops: bound, ..GpuSupernodalParams::default() };
+        let lw = build_levels(&p, &kn, 128);
+        for w in &lw {
+            for &s in &w.small_targets {
+                assert!(work(s as usize) <= bound, "supernode {s} is small at {} multiply-adds", work(s as usize));
+            }
+            for &s in &w.big_targets {
+                let s = s as usize;
+                assert!(p.dims[2 * s] >= 96 || work(s) > bound, "supernode {s} takes the panel steps");
+            }
+        }
+        check_coverage(&kn, 128, false);
+    }
+
+    /// With the plain threshold off, the updates of descendants at least
+    /// `wide_pair_k` wide go to the GEMM-core kernel and the others to the
+    /// tile kernel.
+    #[test]
+    fn wide_descendants_take_the_gemm_core() {
+        let (p, _, _) = analyse(24);
+        let dq = |pi: u32| p.dims[2 * p.pairs[pi as usize].d as usize];
+        let mut widths: Vec<u32> = (0..p.pairs.len() as u32).map(dq).collect();
+        widths.sort_unstable();
+        let k = widths[widths.len() / 2];
+        assert!(widths[0] < k, "the grid has narrower and wider descendants than {k}");
+        let kn = GpuSupernodalParams { big_pair_flops: f64::INFINITY, wide_pair_k: k, wide_pair_flops: 0.0, ..GpuSupernodalParams::default() };
+        let lw = build_levels(&p, &kn, 128);
+        let (mut big, mut tile) = (0, 0);
+        for w in &lw {
+            for r in w.big_rects.chunks(5) {
+                assert!(dq(r[0]) >= k, "a big rectangle of a descendant {} wide", dq(r[0]));
+                big += 1;
+            }
+            for r in w.tile_rects.chunks(4) {
+                assert!(dq(r[0]) < k, "a tile rectangle of a descendant {} wide", dq(r[0]));
+                tile += 1;
+            }
+        }
+        assert!(big > 0 && tile > 0, "{big} big and {tile} tile rectangles");
     }
 
     #[test]

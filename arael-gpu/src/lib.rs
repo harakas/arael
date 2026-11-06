@@ -206,6 +206,9 @@ pub struct Arch {
     pub warp: u32,
     /// Shared memory one block may use, in bytes.
     pub shared_bytes: u32,
+    /// Multiprocessors (CUDA SMs, HIP compute units): how many blocks run
+    /// at once, a few each.
+    pub multiprocessors: u32,
     /// Whether the device computes in f64.
     pub has_f64: bool,
 }

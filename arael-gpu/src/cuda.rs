@@ -195,6 +195,7 @@ impl CudaDevice {
             warp: attr(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_WARP_SIZE)? as u32,
             shared_bytes: attr(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)?
                 as u32,
+            multiprocessors: attr(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)? as u32,
             has_f64: true,
         };
         Ok(CudaDevice {

@@ -133,10 +133,13 @@ KERNEL_THREADS(THREADS) void k_tile_update(GLOBAL const u32* RESTRICT items, GLO
     }
 }
 
-// The big descendants' updates: one block per (target, TB x TB tile)
-// looping over the rectangles that land in the tile with a shared-memory
-// GEMM core (TK-wide k slabs, 4 x 4 outputs per thread) into a shared tile,
-// the scatter through the pair's row and column maps, one subtraction.
+// The big descendants' updates: one block per item, a (target, TB x TB
+// tile) and some of the rectangles that land in it (all, unless the plan
+// cut the tile's work to fill the device), looping over them with a
+// shared-memory GEMM core (TK-wide k slabs, 4 x 4 outputs per thread) into a
+// shared tile, the scatter through the pair's row and column maps, one
+// subtraction: atomic when the tile is shared with other items. An item of
+// one rectangle may cover a range [k0, k1) of its k (k1 = 0: all of it).
 KERNEL_THREADS(THREADS) void k_big_update(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT rects, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor) {
     SHARED F u[TB * TB];
     SHARED F sa[TK * TB];
@@ -150,11 +153,14 @@ KERNEL_THREADS(THREADS) void k_big_update(GLOBAL const u32* RESTRICT items, GLOB
     u32 o_rmap = plan[H_RMAP];
     u32 o_cmap = plan[H_CMAP];
     u32 item = block_x();
-    u32 s = items[5 * item];
-    u32 row0 = items[5 * item + 1];
-    u32 col0 = items[5 * item + 2];
-    u32 r0 = items[5 * item + 3];
-    u32 r1 = items[5 * item + 4];
+    u32 s = items[BIG_ITEM * item];
+    u32 row0 = items[BIG_ITEM * item + 1];
+    u32 col0 = items[BIG_ITEM * item + 2];
+    u32 r0 = items[BIG_ITEM * item + 3];
+    u32 r1 = items[BIG_ITEM * item + 4];
+    u32 kb = items[BIG_ITEM * item + 5];
+    u32 ke = items[BIG_ITEM * item + 6];
+    u32 shared_tile = items[BIG_ITEM * item + 7];
     u32 q = plan[o_dims + 2 * s];
     u32 h = plan[o_dims + 2 * s + 1];
     u32 t = thread_x();
@@ -176,9 +182,10 @@ KERNEL_THREADS(THREADS) void k_big_update(GLOBAL const u32* RESTRICT items, GLOB
         u32 dp = plan[o_val_ptr + d] + pr0;
         u32 nr = db - da;
         u32 nc = cb - ca;
+        u32 k_end = ke == 0 ? dq : ke;
 #pragma unroll
         for (u32 z = 0; z < 16; z++) acc[z] = F(0);
-        for (u32 k0 = 0; k0 < dq; k0 += TK) {
+        for (u32 k0 = kb; k0 < k_end; k0 += TK) {
             BARRIER();
             for (u32 e2 = t; e2 < TK * TB; e2 += nt) {
                 u32 kk = e2 / TB;
@@ -186,8 +193,8 @@ KERNEL_THREADS(THREADS) void k_big_update(GLOBAL const u32* RESTRICT items, GLOB
                 u32 k = k0 + kk;
                 F va = F(0);
                 F vb = F(0);
-                if (k < dq && i < nr) va = factor[dp + k * dh + da + i];
-                if (k < dq && i < nc) vb = factor[dp + k * dh + ca + i];
+                if (k < k_end && i < nr) va = factor[dp + k * dh + da + i];
+                if (k < k_end && i < nc) vb = factor[dp + k * dh + ca + i];
                 sa[e2] = va;
                 sb[e2] = vb;
             }
@@ -242,7 +249,11 @@ KERNEL_THREADS(THREADS) void k_big_update(GLOBAL const u32* RESTRICT items, GLOB
     for (u32 e3 = t; e3 < TB * TB; e3 += nt) {
         u32 j = e3 / TB;
         u32 i = e3 - j * TB;
-        if (i < nrows && j < ncols && row0 + i >= col0 + j) factor[panel + (col0 + j) * h + row0 + i] -= u[e3];
+        if (i < nrows && j < ncols && row0 + i >= col0 + j) {
+            GLOBAL F* dst = &factor[panel + (col0 + j) * h + row0 + i];
+            if (shared_tile != 0u) atomic_add(dst, -u[e3]);
+            else *dst -= u[e3];
+        }
     }
 }
 

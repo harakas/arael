@@ -88,8 +88,22 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
 
 ## Knobs
 
-`GpuSupernodalParams`: the small-supernode width (96 columns), the
-multiply-adds from which a descendant update takes the GEMM-core kernel
-(2e6), the elements per block of the small-update kernel (16384), the
-multiply-adds per block of the solve's gather and GEMV (65536), and the
-loads in flight of the backward dot products (8 in f64, 4 in f32).
+`GpuSupernodalParams`:
+
+- `small_q` (96 columns) and `small_flops` (1e6): a supernode narrower
+  than `small_q` is factored by the one-block small kernel unless the
+  solve of its rows below takes more than `small_flops` multiply-adds; the
+  others take the panel steps, which spread over many blocks.
+- `big_pair_flops` (2e6): a descendant update of at least this many
+  multiply-adds takes the GEMM-core kernel; `wide_pair_k` (64) and
+  `wide_pair_flops` (1e5): an update from a descendant at least that wide
+  takes it from `wide_pair_flops` on, since it reuses each k slab across
+  its tile.
+- `blocks_per_sm` (4): a level whose big updates make fewer blocks than
+  this per multiprocessor has its tiles' updates cut across blocks (by
+  rectangles, then along k), the shared tiles subtracted atomically.
+- `elem_cap` (16384): the elements per block of the small-update kernel.
+- `solve_work` (65536): the multiply-adds per block of the solve's gather
+  and GEMV.
+- `lane_unroll`: the loads in flight of the backward dot products (8 in
+  f64, 4 in f32).
