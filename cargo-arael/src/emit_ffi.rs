@@ -1043,7 +1043,8 @@ pub struct CSolveFailure {{
     /// 3 SymbolicFactorization, 4 CoupledMarginalization,
     /// 5 MarginalizeMissingDiagonal, 6 BadMarginalizeSet,
     /// 7 IterativeSchurWithoutReduction, 8 SolverUnavailable,
-    /// 9 DegenerateDiagonal.
+    /// 9 DegenerateDiagonal, 10 Device (the operation and the runtime's
+    /// message in the last error's text).
     pub kind: i32,
     /// DegenerateDiagonal: 0 Nan, 1 Negative, 2 Zero.
     pub fault: i32,
@@ -1113,6 +1114,7 @@ fn failure_of(k: &arael::simple_lm::SolveFailureKind) -> CSolveFailure {{
                 D::Zero => 2,
             }};
         }}
+        K::Device(_) => c.kind = 10,
     }}
     c
 }}

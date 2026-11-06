@@ -374,7 +374,8 @@ A solver failure or a caught Rust panic raises
 `LmResult` when the solve got that far, `e.failure` the structured
 cause: a `SolveFailure` with its `SolveFailureKind`, the parameter /
 row / block indices (-1 where not applicable) and a `DiagonalFault`
-for a degenerate diagonal.
+for a degenerate diagonal. `SolveFailureKind.DEVICE` is a GPU operation
+that failed, the operation and the runtime's message in `e.message`.
 
 ```python
 try:

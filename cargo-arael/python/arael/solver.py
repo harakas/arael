@@ -158,6 +158,9 @@ class SolveFailureKind(enum.IntEnum):
     ITERATIVE_SCHUR_WITHOUT_REDUCTION = 7
     SOLVER_UNAVAILABLE = 8
     DEGENERATE_DIAGONAL = 9
+    # A GPU operation failed (its setup or a step of the solve); the
+    # operation and the runtime's message are in the error's text.
+    DEVICE = 10
 
 
 class DiagonalFault(enum.IntEnum):

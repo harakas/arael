@@ -101,6 +101,9 @@ enum class SolveFailureKind : int32_t {
     SolverUnavailable = 8,
     /// A parameter's Gauss-Newton diagonal went bad at this iterate.
     DegenerateDiagonal = 9,
+    /// A GPU operation failed (its setup or a step of the solve); the
+    /// operation and the runtime's message are in the last error's text.
+    Device = 10,
 };
 
 /// How a Gauss-Newton diagonal entry was bad (DegenerateDiagonal).

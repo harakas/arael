@@ -345,7 +345,8 @@ views are named by their container's nature: `PathPosesDeque`,
   the indices a caller can act on: the offending parameter for
   `UnconstrainedParameter` / `DegenerateDiagonal` with its
   `DiagonalFault`, row/col/kd for `BandOverflow`, and so on; -1
-  where not applicable). A caught
+  where not applicable; `Device` for a GPU operation that failed,
+  the operation and the runtime's message in `message`). A caught
   Rust panic (a stale ref, an unguarded Option read, a bad options
   tag) THROWS `arael::PanicError` with the panic text; the model's
   parameters are unchanged and a session in use was invalidated.
