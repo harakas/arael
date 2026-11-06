@@ -111,6 +111,14 @@ pub enum Wide {
 }
 
 impl Wide {
+    /// Its name: `f64` or `df32`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Wide::F64 => "f64",
+            Wide::Df32 => "df32",
+        }
+    }
+
     /// The `#define`s a source including [`WIDE`] is compiled with.
     pub fn defines(self) -> &'static str {
         match self {
@@ -238,6 +246,8 @@ pub enum GpuError {
     /// An operation a graph capture cannot hold: anything but a launch while
     /// a capture is open, or a capture inside another.
     Capture(String),
+    /// A kernel dump asked for (`ARAEL_KERNEL_DUMP`) could not be written.
+    Dump(String),
 }
 
 impl core::fmt::Display for GpuError {
@@ -248,6 +258,7 @@ impl core::fmt::Display for GpuError {
             GpuError::Compile { entry, log } => write!(f, "kernel `{entry}` did not compile:\n{log}"),
             GpuError::Limit(why) => write!(f, "beyond the GPU's limits: {why}"),
             GpuError::Capture(why) => write!(f, "not allowed in a graph capture: {why}"),
+            GpuError::Dump(why) => write!(f, "kernel dump not written: {why}"),
         }
     }
 }
@@ -377,6 +388,13 @@ pub trait Device: Send + Sync {
     /// The entry points `entries` of `source`, as [`compile`](Self::compile)
     /// gives each, the source looked up once.
     fn compile_many(&self, source: &str, defines: &str, entries: &[&str]) -> Result<Vec<Self::Kernel>, GpuError>;
+
+    /// The translation unit [`compile_many`](Self::compile_many) compiles
+    /// for `source` and `defines`: the architecture's defines, `defines`,
+    /// [`HEADER`], `source`.
+    fn unit(&self, source: &str, defines: &str) -> String {
+        format!("{}{defines}\n{HEADER}\n{source}", self.arch().defines())
+    }
 
     /// Queues `kernel` with `args` (at most [`MAX_ARGS`]).
     fn launch(

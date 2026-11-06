@@ -4,7 +4,7 @@
 use crate::disk::DiskCache;
 use crate::hip_sys::{rt, rtc};
 use crate::pool::{Pool, capacity};
-use crate::{Arch, Arg, Device, GpuError, HEADER, Launch, MAX_ARGS};
+use crate::{Arch, Arg, Device, GpuError, Launch, MAX_ARGS};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -673,7 +673,7 @@ impl Device for HipDevice {
 
     fn compile_many(&self, source: &str, defines: &str, entries: &[&str]) -> Result<Vec<HipKernel>, GpuError> {
         self.not_capturing("a compile")?;
-        let full = format!("{}{defines}\n{HEADER}\n{source}", self.arch.defines());
+        let full = self.unit(source, defines);
         let module = self.module(entries.first().copied().unwrap_or("module"), full)?;
         self.bind()?;
         entries
@@ -762,6 +762,7 @@ impl Device for HipDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HEADER;
 
     /// A cached entry the runtime refuses (not a code object at all, its
     /// length and checksum right) is compiled again and written over.

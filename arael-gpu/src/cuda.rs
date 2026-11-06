@@ -3,7 +3,7 @@
 
 use crate::disk::DiskCache;
 use crate::pool::{Pool, capacity};
-use crate::{Arch, Arg, Device, GpuError, HEADER, Launch, MAX_ARGS};
+use crate::{Arch, Arg, Device, GpuError, Launch, MAX_ARGS};
 use cudarc::driver::sys::{self, CUdevice_attribute, CUfunction_attribute};
 use cudarc::driver::{CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, result};
 use cudarc::nvrtc::{self, Ptx};
@@ -490,7 +490,7 @@ impl Device for CudaDevice {
 
     fn compile_many(&self, source: &str, defines: &str, entries: &[&str]) -> Result<Vec<CudaKernel>, GpuError> {
         self.not_capturing("a compile")?;
-        let full = format!("{}{defines}\n{HEADER}\n{source}", self.arch.defines());
+        let full = self.unit(source, defines);
         let module = self.module(entries.first().copied().unwrap_or("module"), full)?;
         entries
             .iter()
@@ -594,6 +594,7 @@ impl Device for CudaDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HEADER;
 
     /// A cached entry whose binary the driver refuses (not a cubin at all,
     /// its length and checksum right) is compiled again and written over.
