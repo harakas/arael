@@ -903,9 +903,10 @@ its parent's; the instances held at any depth, in collections or `Option`
 fields), over Euler-angle (simple and re-centred) and `QuaternionParam`
 rotations, `TransformParam` poses, `UnitVecParam` directions and
 `AngleParam` headings, guards included (each evaluated once per
-structure) and robust losses. A constraint writing `coo` pairs, or with
-an index `select` or `match` in its body or picking its loss, has none
-yet. `LmProblemInternals::device_unsupported` says why a root has none, and
+structure), robust losses and index selects (`select`, a `match` on an
+integer field, in the body or picking the loss; where the CPU's select
+panics the device's values are NaN). A constraint writing `coo` pairs
+has none yet. `LmProblemInternals::device_unsupported` says why a root has none, and
 then the CPU assembles and the Hessian's values are uploaded per damped
 solve. `SparseFaerOptions::with_gpu_assembly(false)` keeps the assembly
 on the CPU; `SchurPlan::gpu_assembly` reports which ran. The

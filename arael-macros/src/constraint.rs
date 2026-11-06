@@ -7832,12 +7832,11 @@ pub fn generate_root_methods(
         // self block of, in the order of the partials; a pair per cross
         // tile between two of them. The instances are walked along the
         // instance type's containment path, the body binding the names the
-        // plan's targets and the guard read.
+        // plan's targets and the guard read. A select whose arms write
+        // apart needs nothing of its own: the record holds every partial,
+        // an arm's absent ones zero, which sum as the CPU's skipped writes.
         if device_unsupported.is_none() {
             let built = (|| -> Result<(crate::device::DevConstraint, String, crate::device::DevGroup), String> {
-                if arm_writes.is_some() {
-                    return Err("a select whose arms write apart has no device form yet".into());
-                }
                 if plan.iter().any(|w| matches!(w, BlockWrite::Coo { .. })) {
                     return Err("a `coo` pair has no device form yet".into());
                 }

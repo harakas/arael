@@ -24,11 +24,12 @@
 //! and `QuaternionParam` rotations, `TransformParam` poses, `UnitVecParam`
 //! directions, whose references the device keeps and moves), atom caches
 //! (an `AngleParam`'s sin and cos, computed in the kernel from the angle)
-//! and `f32` or `f64` roots. A constraint has no device form when its rows
-//! write `coo` pairs, when an index `select` or `match` picks its rows or
-//! its loss, or when it reads a leaf that follows the parameters and that
-//! the device does not compute (a `ScaledTransformParam`'s scale); its
-//! root then assembles on the CPU.
+//! and `f32` or `f64` roots. Index selects print as C++ `switch`es (an
+//! integer or `bool` index leaf written into its float column, exact for
+//! any arm). A constraint has no device form when its rows write `coo`
+//! pairs, or when it reads a leaf that follows the parameters and that the
+//! device does not compute (a `ScaledTransformParam`'s scale); its root
+//! then assembles on the CPU.
 
 use std::collections::BTreeSet;
 
@@ -733,7 +734,7 @@ impl Record {
         quote! {
             {
                 let __acc = #acc;
-                #name { #( #fs: (#reads) as #scalar, )* #pad_field }
+                #name { #( #fs: ::arael::__gpu::DeviceLeaf::device_leaf(#reads) as #scalar, )* #pad_field }
             }
         }
     }
@@ -970,7 +971,7 @@ pub(crate) fn device_root(
         let values: Vec<TokenStream2> = mine.iter().map(|(c, _)| {
             let cid = c.cid;
             let reads: Vec<syn::Expr> = c.inst.iter().map(|d| syn::parse_str(d).expect("a data leaf is an expression")).collect();
-            let write = (!reads.is_empty()).then(|| quote! { __w.instance(#cid, __row[#cid], [#( (#reads) as #scalar ),*]); });
+            let write = (!reads.is_empty()).then(|| quote! { __w.instance(#cid, __row[#cid], [#( ::arael::__gpu::DeviceLeaf::device_leaf(#reads) as #scalar ),*]); });
             let msg = format!("{}: the model has more instances than its structure: it changed without LmSession::invalidate()", c.holder);
             quote! {
                 {

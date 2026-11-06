@@ -113,14 +113,25 @@ pub struct SceneW {
     pub observations: std::vec::Vec<ObsW>,
 }
 
-/// A point prior whose loss an index picks, which has no device form yet.
+/// A point held near the origin.
 #[arael::model]
-#[arael(constraint(hb, loss = |s| loss_select(priorpoint.kind, s, 1.0), { [priorpoint.pos.x - 1.0, priorpoint.pos.y, priorpoint.pos.z] }))]
+#[arael(constraint(hb, { [priorpoint.pos.x - 1.0, priorpoint.pos.y, priorpoint.pos.z] }))]
 #[derive(Clone)]
 pub struct PriorPoint {
     pub pos: Param<vect3<f64>>,
-    pub kind: u32,
     pub hb: SelfBlock<PriorPoint>,
+}
+
+/// Two points a unit apart, a `coo` constraint, which has no device form
+/// yet.
+#[arael::model]
+#[arael(constraint(coo, { [b.pos.x - a.pos.x - 1.0] }))]
+#[derive(Clone)]
+pub struct Apart {
+    #[arael(ref = root.points)]
+    pub a: Ref<PriorPoint>,
+    #[arael(ref = root.points)]
+    pub b: Ref<PriorPoint>,
 }
 
 #[arael::model]
@@ -128,6 +139,7 @@ pub struct PriorPoint {
 #[derive(Clone)]
 pub struct Priors {
     pub points: refs::Vec<PriorPoint>,
+    pub aparts: std::vec::Vec<Apart>,
 }
 
 /// A scene's cameras, points and observations.
@@ -326,10 +338,13 @@ fn an_f32_solve_through_the_device_assembly_reaches_the_cpu_optimum() {
 #[test]
 fn a_root_with_a_constraint_without_a_device_form_says_which() {
     let mut points = refs::Vec::new();
-    points.push(PriorPoint { pos: Param::new(vect3::new(0.0, 0.0, 0.0)), kind: 1, hb: SelfBlock::new() });
-    let s = Priors { points };
-    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a loss picked by an index has no device form yet");
-    assert!(why.contains("PriorPoint") && why.contains("select"), "{why}");
+    for _ in 0..2 {
+        points.push(PriorPoint { pos: Param::new(vect3::new(0.0, 0.0, 0.0)), hb: SelfBlock::new() });
+    }
+    let aparts = vec![Apart { a: points.ref_at(0), b: points.ref_at(1) }];
+    let s = Priors { points, aparts };
+    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a `coo` constraint has no device form yet");
+    assert!(why.contains("Apart") && why.contains("coo"), "{why}");
 }
 
 /// A camera turned by a `QuaternionParam`: the device composes its
@@ -2707,6 +2722,105 @@ fn the_root_as_a_side_assembles_and_solves_on_the_device_as_on_the_cpu() {
     let shape = arael::__gpu::DeviceRoot::<f64>::device_shape(&s);
     assert!(shape.constraints.iter().any(|k| k.sides.len() == 2 && k.pairs.len() == 1), "the sighting's pose and root");
     assembles_and_solves_as_on_the_cpu(offset_root, "the root as a side");
+}
+
+/// A one-coordinate point held near where it was seen, and again under the
+/// loss its `kind` picks of `loss_select`'s six.
+#[arael::model]
+#[arael(constraint(hb, { [(ptk.x - ptk.px) * 0.5] }))]
+#[arael(constraint(hb, loss = |s| loss_select(ptk.kind, s, ptk.k2), { [(ptk.x - ptk.px) * 2.0] }))]
+#[derive(Clone)]
+pub struct PtK {
+    pub x: Param<f64>,
+    pub px: f64,
+    pub kind: u32,
+    pub k2: f64,
+    pub hb: SelfBlock<PtK>,
+}
+
+/// A camera of three parameters, each held near where it was seen; its
+/// `model` picks which of them an observation reads.
+#[arael::model]
+#[arael(constraint(hb, { [(camk.f - camk.pf) * 0.3, (camk.k - camk.pk) * 0.3, (camk.c - camk.pc) * 0.3] }))]
+#[derive(Clone)]
+pub struct CamK {
+    pub model: u32,
+    pub f: Param<f64>,
+    pub k: Param<f64>,
+    pub c: Param<f64>,
+    pub pf: f64,
+    pub pk: f64,
+    pub pc: f64,
+    pub hb: SelfBlock<CamK>,
+}
+
+/// An observation whose camera's model picks the residual (model 0 reads
+/// f, 1 f and k, any other c: arms writing apart), behind a depth
+/// `branch`, under the loss its own `kind` picks.
+#[arael::model]
+#[arael(constraint(hb, loss = |s| match obsk.kind { 0 => s, _ => loss_cauchy(s, obsk.k2) }, {
+    [branch(pt.x, match cam.model {
+        0 => pt.x * cam.f - obsk.m,
+        1 => pt.x * cam.f * (1.0 + cam.k * pt.x * pt.x) - obsk.m,
+        _ => pt.x + cam.c - obsk.m,
+    }, 0.0)]
+}))]
+#[derive(Clone)]
+pub struct ObsK {
+    #[arael(ref = root.pts)]
+    pub pt: Ref<PtK>,
+    #[arael(ref = root.cams)]
+    pub cam: Ref<CamK>,
+    pub m: f64,
+    pub k2: f64,
+    pub kind: u32,
+    pub hb: CrossBlock<PtK, CamK>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct SelWorld {
+    pub pts: refs::Vec<PtK>,
+    pub cams: refs::Vec<CamK>,
+    pub obs: std::vec::Vec<ObsK>,
+}
+
+/// Four cameras of models 0, 1, 2 and 7 (7 outside the arms: the default),
+/// twelve points (two behind the depth `branch`), every camera seeing
+/// every point, the measurements the truth plus noise.
+fn sel_world() -> SelWorld {
+    let mut rng = Lcg(41);
+    let cam_truth = [(0u32, 1.5, 0.1, 0.4), (1, 0.8, 0.2, -0.3), (2, 1.1, -0.1, 0.7), (7, 1.3, 0.05, -0.6)];
+    let mut cams = refs::Vec::new();
+    for &(model, f, k, c) in &cam_truth {
+        cams.push(CamK { model, f: Param::new(f * 1.1), k: Param::new(k + 0.05), c: Param::new(c - 0.1), pf: f, pk: k, pc: c, hb: SelfBlock::new() });
+    }
+    let pt_truth: Vec<f64> = (0..12).map(|i| if i % 6 == 5 { -0.5 - 0.1 * i as f64 } else { 0.5 + 0.15 * i as f64 }).collect();
+    let mut pts = refs::Vec::new();
+    for (i, &x) in pt_truth.iter().enumerate() {
+        pts.push(PtK { x: Param::new(x + 0.05 * rng.uniform()), px: x, kind: (i % 6) as u32, k2: 0.04, hb: SelfBlock::new() });
+    }
+    let mut obs = std::vec::Vec::new();
+    for (i, &x) in pt_truth.iter().enumerate() {
+        for (j, &(model, f, k, c)) in cam_truth.iter().enumerate() {
+            let pred = match model {
+                0 => x * f,
+                1 => x * f * (1.0 + k * x * x),
+                _ => x + c,
+            };
+            obs.push(ObsK { pt: pts.ref_at(i), cam: cams.ref_at(j), m: pred + 0.01 * rng.uniform(), k2: 0.25, kind: ((i + j) % 2) as u32, hb: CrossBlock::new() });
+        }
+    }
+    SelWorld { pts, cams, obs }
+}
+
+/// Index selects in a body (arms writing apart, a default arm taken by a
+/// model outside the arms) and picking losses, from instance and entity
+/// data: the device assembles as the CPU does and solves to its optimum.
+#[test]
+fn index_selects_assemble_and_solve_on_the_device_as_on_the_cpu() {
+    assembles_and_solves_as_on_the_cpu(sel_world, "index selects");
 }
 
 /// A scale prior reading a `ScaledTransformParam`'s scale, which the CPU

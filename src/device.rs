@@ -211,6 +211,39 @@ fn word(rows: &[u32], w: usize, q: usize) -> impl Iterator<Item = u32> + Clone +
     rows.iter().skip(q).step_by(w).copied()
 }
 
+/// A data leaf of a model as `f64`, for the values walk to write into a
+/// column or record of the root's scalar: a float (`f32`, `f64`, `df32`),
+/// or an integer or `bool` field that picks a select's arm (exact as long
+/// as it is below 2^24 in `f32`, 2^53 in `f64`; a larger one stays outside
+/// any arm).
+pub trait DeviceLeaf {
+    fn device_leaf(self) -> f64;
+}
+
+macro_rules! device_leaf_as {
+    ($($t:ty),*) => { $(
+        impl DeviceLeaf for $t {
+            #[inline]
+            fn device_leaf(self) -> f64 { self as f64 }
+        }
+    )* };
+}
+device_leaf_as!(f32, f64, i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+
+impl DeviceLeaf for bool {
+    #[inline]
+    fn device_leaf(self) -> f64 {
+        u8::from(self) as f64
+    }
+}
+
+impl DeviceLeaf for crate::df32 {
+    #[inline]
+    fn device_leaf(self) -> f64 {
+        leaf_f64(self)
+    }
+}
+
 /// A model's leaf value (`f32`, `f64` or `df32`) as `f64`, for the walks
 /// the device head generates: a mixed parameter keeps its step and its
 /// reference rotation in the root's wide scalar.
