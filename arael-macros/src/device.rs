@@ -980,7 +980,8 @@ impl Record {
         }
     }
 
-    /// The record's value with each field read from `acc.<path>`. A path
+    /// The record's value with each field read from `acc.<path>` through
+    /// the values walk's writer `__w`, which counts the leaves' bits. A path
     /// through an optional sub-struct reads NaN where it is `None`: every
     /// entity's record is written, but only the instances a guard keeps
     /// read it, and an unguarded read turns the kernel's values NaN where
@@ -994,7 +995,7 @@ impl Record {
                 let ranges = option_reads(p);
                 if ranges.is_empty() {
                     let read: syn::Expr = syn::parse_str(&format!("__acc.{p}")).expect("a data path is an expression");
-                    return quote! { ::arael::__gpu::DeviceLeaf::device_leaf(#read) };
+                    return quote! { __w.leaf(#read) };
                 }
                 // each optional read as `.as_ref()?` in a closure
                 let mut chained = String::with_capacity(p.len());
@@ -1007,7 +1008,7 @@ impl Record {
                 chained.push_str(&p[at..]);
                 let read: syn::Expr = syn::parse_str(&format!("__acc.{chained}")).expect("a data path is an expression");
                 quote! {
-                    (|| ::core::option::Option::Some(::arael::__gpu::DeviceLeaf::device_leaf(#read)))().unwrap_or(f64::NAN)
+                    (|| ::core::option::Option::Some(__w.leaf(#read)))().unwrap_or(f64::NAN)
                 }
             })
             .collect();
@@ -1239,7 +1240,12 @@ pub(crate) fn device_root(
     // kept instance its data
     let values_entities: Vec<TokenStream2> = entities.iter().enumerate().map(|(e, en)| {
         let reads: Vec<syn::Expr> = en.params.iter().map(|p| syn::parse_str(&format!("__ent.{p}")).expect("a parameter path is an expression")).collect();
-        let fixed = quote! { __w.fixed(#e, __n, [#( ::arael::__gpu::leaf_f64(#reads) as #scalar ),*]); };
+        let fixed = quote! {
+            {
+                let __v = [#( __w.leaf(#reads) as #scalar ),*];
+                __w.fixed(#e, __n, __v);
+            }
+        };
         let refs: Vec<TokenStream2> = references.iter().enumerate().filter(|(_, (re, _))| *re == e).filter_map(|(r, (_, rf))| {
             let field: syn::Expr = syn::parse_str(&format!("__ent.{}", rf.path)).expect("a referenced field path");
             let read = rf.kind.read(&quote! { #field })?;
@@ -1247,7 +1253,12 @@ pub(crate) fn device_root(
         }).collect();
         let data = (!records[e].fields.is_empty()).then(|| {
             let value = records[e].value(&rec_ident(e), &quote! { __ent }, &scalar);
-            quote! { __w.entity_data(#e, __n, #value); }
+            quote! {
+                {
+                    let __v = #value;
+                    __w.entity_data(#e, __n, __v);
+                }
+            }
         });
         let walk = entity_walk(&en.ty, quote! {
             #fixed
@@ -1259,7 +1270,12 @@ pub(crate) fn device_root(
     }).collect();
     let values_root = (!root_record.fields.is_empty()).then(|| {
         let value = root_record.value(&root_ident, &quote! { self }, &scalar);
-        quote! { __w.root_data(#value); }
+        quote! {
+            {
+                let __v = #value;
+                __w.root_data(__v);
+            }
+        }
     });
     let mut structure_walks: Vec<TokenStream2> = Vec::new();
     let mut values_walks: Vec<TokenStream2> = Vec::new();
@@ -1297,7 +1313,10 @@ pub(crate) fn device_root(
         let values: Vec<TokenStream2> = mine.iter().map(|(c, _)| {
             let cid = c.cid;
             let reads: Vec<syn::Expr> = c.inst.iter().map(|d| syn::parse_str(d).expect("a data leaf is an expression")).collect();
-            let write = (!reads.is_empty()).then(|| quote! { __w.instance(#cid, __row[#cid], [#( ::arael::__gpu::DeviceLeaf::device_leaf(#reads) as #scalar ),*]); });
+            let write = (!reads.is_empty()).then(|| quote! {
+                let __v = [#( __w.leaf(#reads) as #scalar ),*];
+                __w.instance(#cid, __row[#cid], __v);
+            });
             let msg = format!("{}: the model has more instances than its structure: it changed without LmSession::invalidate()", c.holder);
             quote! {
                 {

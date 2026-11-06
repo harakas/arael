@@ -879,6 +879,7 @@ fn the_f64_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
         let x1 = perturbed(&x);
         let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
         assert!(chk.values > 0);
+        assert_eq!(chk.leaf_bits, 53, "an f64 model's leaves");
         assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
         assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
     }
@@ -895,9 +896,61 @@ fn the_f32_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
         s.serialize(&mut x);
         let x1 = perturbed(&x);
         let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert_eq!(chk.leaf_bits, 24, "an f32 model's leaves");
         // the CPU sums its f32 products in f32, the device in its wide scalar
         assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-5 * chk.cpu_cost, "{wide:?}: {chk:?}");
         assert!(chk.grad_err < 1e-4 && chk.hess_err < 1e-4, "{wide:?}: {chk:?}");
+    }
+}
+
+/// A point of f32 parameters and data in an f64 root.
+#[arael::model]
+#[arael(constraint(hb, { [(narrowpt.x - narrowpt.mx) * 2.0, narrowpt.x * narrowpt.x - narrowpt.mx] }))]
+#[derive(Clone)]
+pub struct NarrowPt {
+    pub x: Param<f32>,
+    pub mx: f32,
+    pub hb: SelfBlock<NarrowPt>,
+}
+
+/// A point of f64 parameters and data.
+#[arael::model]
+#[arael(constraint(hb, { [(widept.x - widept.mx) * 2.0] }))]
+#[derive(Clone)]
+pub struct WidePt {
+    pub x: Param<f64>,
+    pub mx: f64,
+    pub hb: SelfBlock<WidePt>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct NarrowRoot {
+    pub narrow: refs::Vec<NarrowPt>,
+    pub wide: refs::Vec<WidePt>,
+}
+
+/// An f32 entity in an f64 root: the CPU computes its rows in f32, the
+/// device in f64, and the device check reads the narrower leaves' bits.
+#[test]
+fn an_f32_entity_in_an_f64_root_reports_its_leaves_bits() {
+    use arael::__gpu::Wide;
+    let mut s = NarrowRoot { narrow: refs::Vec::new(), wide: refs::Vec::new() };
+    for k in 0..4 {
+        let t = 0.3 + 0.2 * k as f64;
+        s.narrow.push(NarrowPt { x: Param::new(t as f32), mx: (t + 0.1) as f32, hb: SelfBlock::new() });
+        s.wide.push(WidePt { x: Param::new(t), mx: t - 0.1, hb: SelfBlock::new() });
+    }
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x1 = perturbed(&x);
+    for wide in [Wide::F64, Wide::Df32] {
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert_eq!(chk.leaf_bits, 24, "{wide:?}: the f32 entity's leaves");
+        let tol = arael::__gpu::check_tolerance(chk.leaf_bits);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
     }
 }
 

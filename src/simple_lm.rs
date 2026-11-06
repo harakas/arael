@@ -2848,6 +2848,10 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     let mut failure: Option<SolveFailureKind> = None;
     let n = x0.len();
     debug_assert!(n > 0);
+    // ARAEL_DEVICE_CHECK: the root against its device assembly, before the
+    // solve touches it
+    #[cfg(feature = "gpu")]
+    crate::device::check_solve(problem, x0);
     solver.configure(config);
     ctx.set_threads(config.assembly_threads.unwrap_or(config.num_threads));
     // Gathering the solve's timing gathers the sweeps' too; a caller that

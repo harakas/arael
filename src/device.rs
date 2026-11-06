@@ -217,20 +217,26 @@ fn word(rows: &[u32], w: usize, q: usize) -> impl Iterator<Item = u32> + Clone +
 /// as it is below 2^24 in `f32`, 2^53 in `f64`; a larger one stays outside
 /// any arm).
 pub trait DeviceLeaf {
+    /// The significand bits the type carries: 24 for `f32`, 48 for `df32`,
+    /// 53 for `f64`; an integer or `bool` counts as 53, exact as data.
+    const BITS: u32;
     fn device_leaf(self) -> f64;
 }
 
 macro_rules! device_leaf_as {
-    ($($t:ty),*) => { $(
+    ($bits:literal: $($t:ty),*) => { $(
         impl DeviceLeaf for $t {
+            const BITS: u32 = $bits;
             #[inline]
             fn device_leaf(self) -> f64 { self as f64 }
         }
     )* };
 }
-device_leaf_as!(f32, f64, i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+device_leaf_as!(24: f32);
+device_leaf_as!(53: f64, i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
 
 impl DeviceLeaf for bool {
+    const BITS: u32 = 53;
     #[inline]
     fn device_leaf(self) -> f64 {
         u8::from(self) as f64
@@ -238,6 +244,7 @@ impl DeviceLeaf for bool {
 }
 
 impl DeviceLeaf for crate::df32 {
+    const BITS: u32 = 48;
     #[inline]
     fn device_leaf(self) -> f64 {
         leaf_f64(self)
@@ -267,10 +274,19 @@ pub struct DeviceWriter<'a, T> {
     root: (usize, usize),
     /// Per constraint: its instance columns' offsets and its rows.
     inst: Vec<(Vec<usize>, usize)>,
+    /// The fewest significand bits of the leaves read ([`DeviceLeaf::BITS`]).
+    bits: u32,
     _t: core::marker::PhantomData<fn(T)>,
 }
 
 impl<T: crate::utils::Float> DeviceWriter<'_, T> {
+    /// The leaf `l` as `f64`, its type's bits counted.
+    #[inline]
+    pub fn leaf<L: DeviceLeaf>(&mut self, l: L) -> f64 {
+        self.bits = self.bits.min(L::BITS);
+        l.device_leaf()
+    }
+
     /// The values `v` from byte `at` on, back to back.
     #[inline]
     fn run<V: Copy>(&mut self, at: usize, v: &[V]) {
@@ -370,6 +386,9 @@ pub struct DeviceCheck {
     pub hess_err: f64,
     /// The pattern's values.
     pub values: usize,
+    /// The fewest significand bits of the model's leaves
+    /// ([`DeviceAssembly::leaf_bits`]).
+    pub leaf_bits: u32,
 }
 
 /// Threads per block of every assembly kernel (`kernels/assembly.cpp`).
@@ -642,6 +661,9 @@ pub struct DeviceAssembly<T, D: Device> {
     values: HostBuf<D::Host>,
     kernels: Kernels<D::Kernel>,
     generation: u64,
+    /// The fewest significand bits of the model's leaves at the last
+    /// refresh ([`DeviceLeaf::BITS`]).
+    leaf_bits: u32,
     _t: core::marker::PhantomData<fn() -> T>,
 }
 
@@ -951,6 +973,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             values,
             kernels,
             generation: 0,
+            leaf_bits: 53,
             _t: core::marker::PhantomData,
         };
         asm.refresh(root)?;
@@ -988,9 +1011,11 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
                 .enumerate()
                 .map(|(c, k)| ((0..k.data).map(|j| at(&format!("C{c}_D{j}"))).collect(), self.counts[c]))
                 .collect(),
+            bits: 53,
             _t: core::marker::PhantomData,
         };
         root.device_values(&self.keep, &mut w);
+        self.leaf_bits = w.bits;
         let len = self.layout.host_bytes - base;
         self.values.upload(&*self.dev, &mut self.block, base, len)
     }
@@ -999,6 +1024,14 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     /// launches replays only under the generation it was captured in.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// The fewest significand bits of the model's leaves at the last
+    /// refresh ([`DeviceLeaf::BITS`]): below the root scalar's, a leaf of a
+    /// narrower type, whose rows the CPU computes in that type while the
+    /// device computes every row in the root's.
+    pub fn leaf_bits(&self) -> u32 {
+        self.leaf_bits
     }
 
     /// The scalar of the sums, the parameters, the targets and the references.
@@ -1218,7 +1251,145 @@ where
         let diff = dev.iter().zip(cpu).fold(0.0f64, |m, (d, c)| m.max((d - c.to_f64().unwrap()).abs()));
         if max > 0.0 { diff / max } else { diff }
     };
-    DeviceCheck { cpu_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv }
+    DeviceCheck { cpu_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv, leaf_bits: asm.leaf_bits() }
+}
+
+/// The environment variable that turns on the device check of solves:
+/// set (to anything but `0`), the first solve of each root type with a
+/// device assembly in a process assembles that root on the device too, at
+/// its starting point moved by up to three thousandths (of each
+/// parameter's size, or absolutely below 1), in both wide scalars
+/// ([`device_check`]), and panics where the device's cost, gradient or
+/// Hessian values differ from the CPU's beyond [`check_tolerance`] of the
+/// model's narrowest scalar (the root's, or a leaf's: an `f32` entity in an
+/// `f64` root has its rows computed in `f32` on the CPU). Any
+/// test suite then tests the device assembly of the models it solves:
+///
+/// ```sh
+/// ARAEL_DEVICE_CHECK=1 cargo test --features gpu-cuda
+/// ```
+pub const DEVICE_CHECK_VAR: &str = "ARAEL_DEVICE_CHECK";
+
+/// The environment variable naming a file the device check appends a line
+/// to per root type it meets: checked, with its largest differences, or
+/// without a device assembly, and why.
+pub const DEVICE_CHECK_LOG_VAR: &str = "ARAEL_DEVICE_CHECK_LOG";
+
+/// The device check's tolerance for a model whose narrowest scalar (the
+/// root's, or a leaf's, [`DeviceCheck::leaf_bits`]) carries `bits`
+/// significand bits: relative to the CPU's cost, and to the largest CPU
+/// entry of the gradient and of the Hessian. Where it is `f32` the CPU
+/// computes and sums in it, the device in its own scalars.
+pub fn check_tolerance(bits: u32) -> f64 {
+    match bits {
+        53.. => 1e-10,
+        48.. => 1e-8,
+        _ => 1e-4,
+    }
+}
+
+/// The device the check runs on: CUDA when it is compiled in, else HIP.
+#[cfg(feature = "gpu-cuda")]
+type CheckDevice = arael_gpu::cuda::CudaDevice;
+#[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
+type CheckDevice = arael_gpu::hip::HipDevice;
+
+/// The device check ([`DEVICE_CHECK_VAR`]) at a solve's start and at a
+/// root's assembly entry points: `problem`, of the root type `P`, at `x0`.
+/// Reads the variable once per process.
+#[doc(hidden)]
+pub fn check_solve<T, P>(problem: &mut P, x0: &[T])
+where
+    T: crate::utils::Float + 'static,
+    P: crate::simple_lm::LmProblemInternals<T>,
+{
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os(DEVICE_CHECK_VAR).is_some_and(|v| v != "0")) {
+        return;
+    }
+    // the root types checked, one check at a time (tests solve on several
+    // threads); a root is marked when its check ends, so a check a panic
+    // cuts short (a test's deliberately bad model) runs again at the next
+    // call
+    static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let name = std::any::type_name::<P>();
+    let mut seen = SEEN.lock().unwrap_or_else(|p| p.into_inner());
+    if seen.contains(&name) {
+        return;
+    }
+    let line = match problem.device_unsupported() {
+        Some(why) => format!("{name}: no device assembly: {why}"),
+        None => {
+            let precision = if core::mem::size_of::<T>() == 8 { "f64" } else { "f32" };
+            format!("{name} ({precision}): checked: {}", check_root(problem, x0, name))
+        }
+    };
+    seen.push(name);
+    drop(seen);
+    if let Some(path) = std::env::var_os(DEVICE_CHECK_LOG_VAR) {
+        use std::io::Write;
+        // one write per line: test processes append to one log at once
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()))
+            .unwrap_or_else(|e| panic!("{DEVICE_CHECK_LOG_VAR}: cannot append to {}: {e}", std::path::Path::new(&path).display()));
+    }
+}
+
+/// [`check_solve`]'s check of the root `name`: its largest differences,
+/// or a panic where one is beyond [`check_tolerance`].
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+fn check_root<T, P>(problem: &mut P, x0: &[T], name: &str) -> String
+where
+    T: crate::utils::Float + 'static,
+    P: crate::simple_lm::LmProblemInternals<T>,
+{
+    static DEV: std::sync::OnceLock<Arc<CheckDevice>> = std::sync::OnceLock::new();
+    let dev = DEV.get_or_init(|| Arc::new(CheckDevice::new(0).unwrap_or_else(|e| panic!("{DEVICE_CHECK_VAR}: no device: {e}"))));
+    // moved off the start by up to three thousandths of each parameter's
+    // size, or absolutely below 1: the residuals then stand well above the
+    // rounding of the terms they are made of, and the re-centred
+    // parameters' steps leave zero
+    let x1: Vec<T> = x0
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let v = v.to_f64().unwrap();
+            T::from(v + 1e-3 * ((i % 7) as f64 - 3.0) * v.abs().max(1.0)).unwrap()
+        })
+        .collect();
+    let root_bits = if core::mem::size_of::<T>() == 8 { 53 } else { 24 };
+    let mut worst = [0.0f64; 3];
+    let mut bits = root_bits;
+    for wide in [Wide::F64, Wide::Df32] {
+        let chk = device_check(problem, x0, &x1, dev, wide);
+        bits = root_bits.min(chk.leaf_bits);
+        let tol = check_tolerance(bits);
+        let cost = (chk.device_cost - chk.cpu_cost).abs() / chk.cpu_cost.abs().max(f64::MIN_POSITIVE);
+        if !(cost <= tol && chk.grad_err <= tol && chk.hess_err <= tol) {
+            panic!(
+                "{DEVICE_CHECK_VAR}: `{name}` assembles on the device ({wide:?} sums) other than on the CPU: \
+                 cost {} against {} ({cost:.1e}), gradient {:.1e}, Hessian {:.1e}, tolerance {tol:.0e}",
+                chk.device_cost, chk.cpu_cost, chk.grad_err, chk.hess_err
+            );
+        }
+        for (w, e) in worst.iter_mut().zip([cost, chk.grad_err, chk.hess_err]) {
+            *w = w.max(e);
+        }
+    }
+    let narrow = if bits < root_bits { format!(" (leaves of {bits} significand bits, tolerance {:.0e})", check_tolerance(bits)) } else { String::new() };
+    format!("cost {:.1e}, gradient {:.1e}, Hessian {:.1e}{narrow}", worst[0], worst[1], worst[2])
+}
+
+#[cfg(not(any(feature = "gpu-cuda", feature = "gpu-hip")))]
+fn check_root<T, P>(_problem: &mut P, _x0: &[T], name: &str) -> String
+where
+    T: crate::utils::Float + 'static,
+    P: crate::simple_lm::LmProblemInternals<T>,
+{
+    panic!("{DEVICE_CHECK_VAR}: `{name}`: the check needs a device runtime (feature gpu-cuda or gpu-hip)")
 }
 
 #[cfg(test)]

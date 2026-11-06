@@ -973,6 +973,24 @@ the whole unit it compiles (the layout's defines, the kernel headers, the
 shared kernels and the root's) as `<Root>.<target>.<wide>.cu`
 (`SPath.sm_89.df32.cu`); the line numbers of a compile error refer to it.
 
+The environment variable `ARAEL_DEVICE_CHECK` checks the device assembly
+of the models a program solves: set, the first solve of each root type
+with a device assembly also assembles that root on the device near its
+starting point (moved by up to three thousandths of each parameter, or
+absolutely below 1), in both wide scalars, and panics where the cost, the
+gradient or the Hessian's values differ from the CPU's beyond rounding:
+1e-10 relative for an f64 model, 1e-4 where the root or a leaf is f32 (an
+f32 entity in an f64 root has its rows computed in f32 on the CPU, in f64
+on the device).
+`ARAEL_DEVICE_CHECK_LOG` names a file it appends a line to per root type:
+checked, with the largest differences, or why the root has no device
+assembly. Over a test suite it tests the device assembly of every model
+the suite solves:
+
+```bash
+ARAEL_DEVICE_CHECK=1 ARAEL_DEVICE_CHECK_LOG=check.log cargo test --features gpu-cuda
+```
+
 The device sums without atomic writes, in its wide scalar: `f64`, or
 with `GpuDevice::with_wide(GpuWide::Df32)` df32, two f32 whose sum is the
 value, about 48 bits, for H, the gradient, the cost, the Schur reduction,

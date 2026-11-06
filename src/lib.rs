@@ -2629,6 +2629,24 @@ macro_rules! __gpu_items {
     ($($t:tt)*) => {};
 }
 
+/// The device check (`ARAEL_DEVICE_CHECK`) at a root's assembly entry
+/// points, `problem` at `params`: kept when arael has its `gpu` feature,
+/// dropped otherwise.
+#[cfg(feature = "gpu")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __device_check {
+    ($problem:expr, $params:expr) => {
+        $crate::__gpu::check_solve($problem, $params)
+    };
+}
+#[cfg(not(feature = "gpu"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __device_check {
+    ($problem:expr, $params:expr) => {};
+}
+
 /// One-stop imports for defining and solving models:
 /// `use arael::prelude::*;`.
 ///

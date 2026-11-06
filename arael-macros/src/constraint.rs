@@ -10502,6 +10502,7 @@ pub fn generate_root_methods(
         #(#summary_docs)*
         impl arael::simple_lm::LmProblem<#prec_type> for #root_name {
             fn calc_cost(&mut self, params: &[#prec_type]) -> #prec_type {
+                ::arael::__device_check!(self, params);
                 // One store, empty (a cost writes no block), the whole
                 // model in it.
                 let mut __stores = [#store_ty::default()];
@@ -10510,6 +10511,7 @@ pub fn generate_root_methods(
                 self.__cost_in(params, &mut __stores, &__cut, &mut __tm)
             }
             fn calc_grad_hessian_dense(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type]) -> #prec_type {
+                ::arael::__device_check!(self, params);
                 let mut __stores = [#store_ty::default()];
                 let __cut = arael::store::Cut::new();
                 let mut __tm = arael::threads::ParTiming::default();
@@ -10518,6 +10520,7 @@ pub fn generate_root_methods(
                 self.__gh_dense_in(params, grad, hessian, &mut __stores, &__cut, __tm)
             }
             fn calc_grad_hessian_sparse(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>) -> #prec_type {
+                ::arael::__device_check!(self, params);
                 let mut __stores = [#store_ty::default()];
                 let __cut = arael::store::Cut::new();
                 let mut __tm = arael::threads::ParTiming::default();
