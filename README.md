@@ -1007,11 +1007,12 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
     log.rs          info!/warn!/error! logging macros
   cpp/
     eigen_sparse.cpp  Eigen SimplicialLLT + CHOLMOD FFI bridge (optional)
-cargo-arael/        `cargo arael` subcommand: C ABI + C++ + Python + JavaScript (WebAssembly) interface generator (docs/CXX.md, docs/PYTHON.md, docs/WASM.md)
+cargo-arael/        `cargo arael` subcommand: C ABI + C++ + Python + JavaScript (WebAssembly) interface generator (docs/CXX.md, docs/PYTHON.md, docs/WASM.md), GPU kernels dump (docs/SOLVERS.md)
   src/
-    main.rs         `cargo arael export` / `check`: the driver
-    lib.rs          Library surface: the sidecar IR and the per-target emitters
+    main.rs         `cargo arael export` / `check` / `setup` / `kernels`: the driver
+    lib.rs          Library surface: the sidecar IR, the per-target emitters and the kernels dump
     export.rs       Export pipeline: build with the sidecar, harvest the JSON, emit the trees
+    kernels.rs      Kernels dump: build with ARAEL_KERNELS_DIR, list each root's kernels file
     ir.rs           The model IR, a typed mirror of the JSON sidecar
     leaves.rs       The settable-scalar leaf walk shared by the shim and Python emitters
     emit_ffi.rs     Rust FFI shim emitter (the C ABI capi crate)

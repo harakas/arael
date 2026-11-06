@@ -1,14 +1,19 @@
 //! `cargo arael` -- generate C ABI, C++, Python and JavaScript
-//! (WebAssembly) interfaces for arael root models. See docs/CXX.md,
-//! docs/PYTHON.md and docs/WASM.md for the generated interfaces and
-//! docs/SIDECAR.md for the model description it consumes.
+//! (WebAssembly) interfaces for arael root models, and write out the
+//! device kernels the models generate. See docs/CXX.md, docs/PYTHON.md and
+//! docs/WASM.md for the generated interfaces, docs/SIDECAR.md for the
+//! model description it consumes and docs/SOLVERS.md for the kernels.
 
-use cargo_arael::export;
+use cargo_arael::{export, kernels};
 
 const USAGE: &str = "\
-usage: cargo arael <command> [options]
+usage: cargo arael <command> [options] [-- <cargo build args>]
 
 commands:
+  kernels   build the crate and write the device kernels of every root it
+            expands, <out>/<crate>/<Root>.cu, commented with the model's
+            names and source lines (or why the root has none); no GPU
+            needed; the cargo build args default to --all-targets
   export    build the model crate, harvest its sidecar, and (re)generate
             the interface tree (capi/, cxx/, python/, wasm/); removes the
             files it generated and no longer writes; adds the macro build
@@ -27,6 +32,8 @@ options:
                           capi); default: `interfaces` under
                           [package.metadata.arael] in the crate's Cargo.toml,
                           else all four
+  --out <dir>             where kernels writes (default:
+                          <target dir>/arael-kernels, emptied first)
 ";
 
 fn main() {
@@ -39,9 +46,20 @@ fn main() {
     let mut root: Option<String> = None;
     let mut interfaces: Option<export::Interfaces> = None;
     let mut cmd: Option<String> = None;
+    let mut out: Option<std::path::PathBuf> = None;
+    let mut cargo_args: Vec<String> = Vec::new();
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--" => {
+                cargo_args = it.by_ref().collect();
+            }
+            "--out" => {
+                out = Some(it.next().map(Into::into).unwrap_or_else(|| {
+                    eprintln!("--out needs a value");
+                    std::process::exit(2);
+                }));
+            }
             "--manifest-dir" => {
                 dir = it.next().map(Into::into).unwrap_or_else(|| {
                     eprintln!("--manifest-dir needs a value");
@@ -74,6 +92,7 @@ fn main() {
         Some("export") => export::run_export_with(&dir, root.as_deref(), interfaces),
         Some("check") => export::run_check_with(&dir, root.as_deref(), interfaces),
         Some("setup") => export::run_setup(&dir),
+        Some("kernels") => kernels::run_kernels(&dir, out.as_deref(), &cargo_args),
         _ => {
             eprint!("{USAGE}");
             std::process::exit(2);

@@ -2474,8 +2474,9 @@
 //!   Schur-complement reduction, supernodal and envelope block Cholesky,
 //!   conjugate gradients, a nested-dissection ordering, and the worker
 //!   pool
-//! - `cargo-arael` -- the `cargo arael export` subcommand: generates the
-//!   C ABI, C++, Python and JavaScript (WebAssembly) interfaces
+//! - `cargo-arael` -- the `cargo arael` subcommand: `export` generates the
+//!   C ABI, C++, Python and JavaScript (WebAssembly) interfaces, `kernels`
+//!   writes the GPU kernels the roots generate
 //! - `arael-sketch`, `arael-sketch-solver`, `arael-sketch-backend` -- the
 //!   2D sketch editor: GUI, constraint-solver library, and headless
 //!   command/MCP backend

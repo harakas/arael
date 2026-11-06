@@ -38,6 +38,15 @@ written-once `Cargo.toml`, and a directory only once it is empty.
 The interfaces are additive across releases: a name once generated
 keeps its type.
 
+`cargo arael kernels` builds the crate and writes the GPU kernels of
+every root it expands, commented with the model's names and source
+lines, to `target/arael-kernels/<crate>/<Root>.cu` (or why a root has
+none); arguments after `--` go to `cargo build`:
+
+```bash
+cargo arael kernels -- --features gpu-cuda --tests
+```
+
 Reference: [docs/CXX.md](https://github.com/harakas/arael/blob/master/docs/CXX.md),
 [docs/PYTHON.md](https://github.com/harakas/arael/blob/master/docs/PYTHON.md),
 [docs/WASM.md](https://github.com/harakas/arael/blob/master/docs/WASM.md);
