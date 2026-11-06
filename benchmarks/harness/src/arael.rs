@@ -97,7 +97,9 @@ pub fn mixed_precision() -> Option<arael::simple_lm::MixedPrecision> {
 /// either with a device index (`cuda:1`). With ARAEL_F32_FACTOR the factor
 /// is f32 there, refined the same way. ARAEL_GPU_WIDE=df32 keeps the
 /// device's wide values in df32 (`GpuWide::Df32`), `f64` or unset in f64.
-/// The binary needs arael's `gpu-cuda` or `gpu-hip` feature. Every solver
+/// ARAEL_GPU_STAGING=pageable stages the device assembly's image in
+/// ordinary memory (`GpuStaging::Pageable`), `pinned` or unset in pinned
+/// memory. The binary needs arael's `gpu-cuda` or `gpu-hip` feature. Every solver
 /// of the process gets a clone of one device, so they share its stream and
 /// memory as repeated solves in an application would.
 pub fn gpu() -> Option<arael::simple_lm::GpuDevice> {
@@ -118,7 +120,12 @@ pub fn gpu() -> Option<arael::simple_lm::GpuDevice> {
                 Ok("df32") => arael::simple_lm::GpuWide::Df32,
                 Ok(other) => panic!("ARAEL_GPU_WIDE={other}: expected f64 or df32"),
             };
-            Some(device.with_wide(wide))
+            let staging = match std::env::var("ARAEL_GPU_STAGING").as_deref() {
+                Err(_) | Ok("pinned") => arael::simple_lm::GpuStaging::Pinned,
+                Ok("pageable") => arael::simple_lm::GpuStaging::Pageable,
+                Ok(other) => panic!("ARAEL_GPU_STAGING={other}: expected pinned or pageable"),
+            };
+            Some(device.with_wide(wide).with_staging(staging))
         })
         .clone()
 }
