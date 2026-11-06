@@ -198,6 +198,43 @@ KERNEL_THREADS(256) void k_euler_advance(GLOBAL W* RESTRICT refr, GLOBAL const F
     for (u32 i = 0; i < 9; i++) refr[r0 + i] = m[i];
 }
 
+// A SimpleEulerAngleParam: no reference, its parameters the angles
+// themselves; its values R(angles) (9) and their derivatives by the angles
+// (27, k-major), as the parameter's own precompute.
+KERNEL_THREADS(256) void k_simple_euler_values(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                               GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT wide,
+                                               GLOBAL F* RESTRICT val, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    u32 a = at[e];
+    W d[9];
+    euler_matrix((W)ev[a], (W)ev[a + 1], (W)ev[a + 2], d);
+#pragma unroll
+    for (u32 i = 0; i < 9; i++) {
+        wide[e * 9 + i] = d[i];
+        val[e * 9 + i] = (F)d[i];
+    }
+}
+
+KERNEL_THREADS(256) void k_simple_euler_derivatives(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                                    GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT wide,
+                                                    GLOBAL F* RESTRICT val, GLOBAL F* RESTRICT der, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    u32 a = at[e];
+    W d[9];
+    euler_matrix((W)ev[a], (W)ev[a + 1], (W)ev[a + 2], d);
+#pragma unroll
+    for (u32 i = 0; i < 9; i++) {
+        wide[e * 9 + i] = d[i];
+        val[e * 9 + i] = (F)d[i];
+    }
+    W dd[27];
+    euler_derivatives((W)ev[a], (W)ev[a + 1], (W)ev[a + 2], dd);
+#pragma unroll
+    for (u32 i = 0; i < 27; i++) der[e * 27 + i] = (F)dd[i];
+}
+
 // The rotation matrix of the unit quaternion q (w, x, y, z), row-major, as
 // quatern::rotation_matrix.
 DEVICE void quat_matrix(GLOBAL const W* RESTRICT q, W* m) {
