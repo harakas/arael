@@ -348,18 +348,54 @@ fn parameter_state(s: &str, sides: &[DevSide], (root_var, root_ty): (&str, &str)
         .then(|| format!("the device reads `{s}`, which follows the parameters of `{var}.{field}`, without computing it"))
 }
 
-/// A record field's name for the model path `path`: `prior_rot_t[0].x` is
-/// `prior_rot_t_0_x`. The same in the Rust and the C++ mirrors.
+/// The read of an optional sub-struct in a body symbol's path:
+/// `.as_ref().expect("<message>")`.
+const OPTION_READ: &str = ".as_ref().expect(\"";
+
+/// The byte ranges of `path`'s optional reads.
+fn option_reads(path: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(k) = path[from..].find(OPTION_READ) {
+        let start = from + k;
+        let end = match path[start + OPTION_READ.len()..].find("\")") {
+            Some(e) => start + OPTION_READ.len() + e + 2,
+            None => path.len(),
+        };
+        out.push(start..end);
+        from = end;
+    }
+    out
+}
+
+/// A record field's name for the model path `path`, the same in the Rust
+/// and the C++ mirrors: the path's optional reads dropped, then letters and
+/// digits as they are and every other character `_` and a letter (`_u` for
+/// `_`, `_d` for `.`, `_l` / `_r` for `[` / `]`, `_o` / `_c` for `(` / `)`,
+/// `_x<hex>_` for the rest), so no two paths take one name:
+/// `prior_rot[0].x` is `prior_urot_l0_r_dx`.
 pub(crate) fn field_name(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    for ch in path.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            out.push(ch);
-        } else if !out.ends_with('_') {
-            out.push('_');
+    let mut stripped = String::with_capacity(path.len());
+    let mut at = 0;
+    for r in option_reads(path) {
+        stripped.push_str(&path[at..r.start]);
+        at = r.end;
+    }
+    stripped.push_str(&path[at..]);
+    let mut out = String::with_capacity(stripped.len() + 8);
+    for ch in stripped.chars() {
+        match ch {
+            c if c.is_ascii_alphanumeric() => out.push(c),
+            '_' => out.push_str("_u"),
+            '.' => out.push_str("_d"),
+            '[' => out.push_str("_l"),
+            ']' => out.push_str("_r"),
+            '(' => out.push_str("_o"),
+            ')' => out.push_str("_c"),
+            c => out.push_str(&format!("_x{:x}_", c as u32)),
         }
     }
-    out.trim_end_matches('_').to_string()
+    out
 }
 
 /// What a leaf symbol reads in the kernel.
@@ -694,19 +730,20 @@ struct Record {
 }
 
 impl Record {
-    fn new(paths: &[String], ft: &str) -> Result<Record, String> {
+    /// The record of the data paths `paths`; a path met twice is one field
+    /// (paths of one name differ at most in their optional reads, which
+    /// read the same field).
+    fn new(paths: &[String], ft: &str) -> Record {
         let mut fields: Vec<(String, String)> = Vec::new();
         for p in paths {
             let f = field_name(p);
-            match fields.iter().find(|(n, _)| *n == f) {
-                Some((_, q)) if q != p => return Err(format!("the data fields `{q}` and `{p}` take one record field name `{f}`")),
-                Some(_) => {}
-                None => fields.push((f, p.clone())),
+            if !fields.iter().any(|(n, _)| *n == f) {
+                fields.push((f, p.clone()));
             }
         }
         let per16 = if ft == "f64" { 2 } else { 4 };
         let pad = (per16 - fields.len() % per16) % per16;
-        Ok(Record { fields, pad })
+        Record { fields, pad }
     }
 
     fn bytes(&self, ft: &str) -> usize {
@@ -754,19 +791,43 @@ impl Record {
     }
 
     /// The record's value with each field read from `acc.<path>`.
+    /// The record's value with each field read from `acc.<path>`. A path
+    /// through an optional sub-struct reads NaN where it is `None`: every
+    /// entity's record is written, but only the instances a guard keeps
+    /// read it, and an unguarded read turns the kernel's values NaN where
+    /// the CPU's panics.
     fn value(&self, name: &syn::Ident, acc: &TokenStream2, scalar: &syn::Type) -> TokenStream2 {
         let fs: Vec<syn::Ident> = self.fields.iter().map(|(f, _)| format_ident!("{}", f)).collect();
-        let reads: Vec<syn::Expr> = self
+        let reads: Vec<TokenStream2> = self
             .fields
             .iter()
-            .map(|(_, p)| syn::parse_str(&format!("__acc.{p}")).expect("a data path is an expression"))
+            .map(|(_, p)| {
+                let ranges = option_reads(p);
+                if ranges.is_empty() {
+                    let read: syn::Expr = syn::parse_str(&format!("__acc.{p}")).expect("a data path is an expression");
+                    return quote! { ::arael::__gpu::DeviceLeaf::device_leaf(#read) };
+                }
+                // each optional read as `.as_ref()?` in a closure
+                let mut chained = String::with_capacity(p.len());
+                let mut at = 0;
+                for r in ranges {
+                    chained.push_str(&p[at..r.start]);
+                    chained.push_str(".as_ref()?");
+                    at = r.end;
+                }
+                chained.push_str(&p[at..]);
+                let read: syn::Expr = syn::parse_str(&format!("__acc.{chained}")).expect("a data path is an expression");
+                quote! {
+                    (|| ::core::option::Option::Some(::arael::__gpu::DeviceLeaf::device_leaf(#read)))().unwrap_or(f64::NAN)
+                }
+            })
             .collect();
         let pad = self.pad;
         let pad_field = (pad > 0).then(|| quote! { _pad: [0.0 as #scalar; #pad], });
         quote! {
             {
                 let __acc = #acc;
-                #name { #( #fs: ::arael::__gpu::DeviceLeaf::device_leaf(#reads) as #scalar, )* #pad_field }
+                #name { #( #fs: (#reads) as #scalar, )* #pad_field }
             }
         }
     }
@@ -861,14 +922,8 @@ pub(crate) fn device_root(
         ids.push(Ids { sides, pairs, refs });
     }
     // the records and their mirrors
-    let records: Result<Vec<Record>, String> = entities.iter().map(|en| Record::new(&en.data, ft)).collect();
-    let (records, root_record) = match (records, Record::new(&root_data, ft)) {
-        (Ok(r), Ok(rr)) => (r, rr),
-        (Err(e), _) | (_, Err(e)) => {
-            let msg = format!("{root_name}: {e}");
-            return quote! { ::core::compile_error!(#msg); };
-        }
-    };
+    let records: Vec<Record> = entities.iter().map(|en| Record::new(&en.data, ft)).collect();
+    let root_record = Record::new(&root_data, ft);
     let rec_ident = |e: usize| format_ident!("__{}DevE{}", root_name, e);
     let root_ident = format_ident!("__{}DevRoot", root_name);
     let rust_records: Vec<TokenStream2> = records.iter().enumerate().map(|(e, r)| r.rust(&rec_ident(e), &scalar)).collect();

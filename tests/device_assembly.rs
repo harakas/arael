@@ -2994,6 +2994,100 @@ fn a_user_function_of_rust_code_has_no_device_form() {
     assert!(why.contains("OpaqueE") && why.contains("opaque_dev_eval") && why.contains("no C++ form"), "{why}");
 }
 
+/// Data fields whose paths look alike once spelled as record fields:
+/// `p.x` and `p_x` of an entity, `q.x` and `q_x` of the root.
+#[arael::model]
+#[arael(constraint(hb, { [(clash.x - clash.p.x - clash.p_x) * 2.0, (clash.x - clash.p.x - clash.p_x) * (root.q.x - root.q_x)] }))]
+#[derive(Clone)]
+pub struct Clash {
+    pub x: Param<f64>,
+    pub p: vect2<f64>,
+    pub p_x: f64,
+    pub hb: SelfBlock<Clash>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct ClashRoot {
+    pub items: refs::Vec<Clash>,
+    pub q: vect2<f64>,
+    pub q_x: f64,
+}
+
+fn clash_root() -> ClashRoot {
+    let mut items = refs::Vec::new();
+    for k in 0..5 {
+        let t = 0.4 * k as f64;
+        items.push(Clash { x: Param::new(t + 0.2), p: vect2::new(t, -1.0), p_x: 0.1 * t, hb: SelfBlock::new() });
+    }
+    ClashRoot { items, q: vect2::new(0.7, 9.0), q_x: -0.2 }
+}
+
+/// Paths that spell alike as record fields (`p.x`, `p_x`) take a field
+/// each; the model builds (it did not, with or without the `gpu`
+/// feature) and assembles on the device as on the CPU.
+#[test]
+fn data_fields_of_alike_names_assemble_and_solve_on_the_device_as_on_the_cpu() {
+    assembles_and_solves_as_on_the_cpu(clash_root, "alike names");
+}
+
+/// Optional data of an entity, read under a guard on it.
+#[arael::model]
+#[derive(Clone)]
+pub struct Extra {
+    pub off: f64,
+}
+
+#[arael::model]
+#[arael(constraint(hb, { [(optent.x - optent.px) * 0.5] }))]
+#[arael(constraint(hb, guard = self.has_extra, { [(optent.x - optent.extra.off) * 2.0] }))]
+#[arael(constraint(hb, guard = root.has_bias, { [(optent.x - optent.px) * root.bias.off] }))]
+#[derive(Clone)]
+pub struct OptEnt {
+    pub x: Param<f64>,
+    pub px: f64,
+    pub extra: Option<Extra>,
+    pub has_extra: bool,
+    pub hb: SelfBlock<OptEnt>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct OptRoot {
+    pub items: refs::Vec<OptEnt>,
+    pub bias: Option<Extra>,
+    pub has_bias: bool,
+}
+
+/// Six entities, every other one with its optional data; the root's
+/// optional data present or not.
+fn opt_root(bias: bool) -> OptRoot {
+    let mut items = refs::Vec::new();
+    for k in 0..6 {
+        let some = k % 2 == 0;
+        let px = 0.3 * k as f64;
+        items.push(OptEnt {
+            x: Param::new(px + 0.2),
+            px,
+            extra: some.then(|| Extra { off: px }),
+            has_extra: some,
+            hb: SelfBlock::new(),
+        });
+    }
+    OptRoot { items, bias: bias.then(|| Extra { off: 0.4 }), has_bias: bias }
+}
+
+/// Optional data of entities and of the root read under guards on it:
+/// the device writes what a `None` leaves as NaN, which no kept instance
+/// reads (it panicked writing it), and assembles as the CPU does.
+#[test]
+fn optional_data_read_under_a_guard_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    assembles_and_solves_as_on_the_cpu(|| opt_root(true), "the root's data present");
+    assembles_and_solves_as_on_the_cpu(|| opt_root(false), "the root's data absent");
+}
+
 /// A component whose value follows a reference its `update` moves after
 /// every accepted step (`ref_c`), which the device cannot run: its caches
 /// are computed from data, not from parameters alone.
