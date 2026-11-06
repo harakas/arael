@@ -10,7 +10,8 @@
 //! BENCH_THREADS sets the CPU factorization's threads (8); GPU_SMALL_Q,
 //! GPU_SMALL_FLOPS, GPU_BIG_PAIR_FLOPS, GPU_WIDE_PAIR_K, GPU_WIDE_PAIR_FLOPS,
 //! GPU_ELEM_CAP, GPU_SOLVE_WORK and GPU_BLOCKS_PER_SM override the device's
-//! `GpuSupernodalParams`.
+//! `GpuSupernodalParams`. GPU_CHECK_FACTOR=1 compares the f64 factor with
+//! the CPU's, supernode by supernode, and prints where they differ.
 
 #[path = "../scene.rs"]
 mod scene;
@@ -81,7 +82,26 @@ fn params() -> GpuSupernodalParams {
     p
 }
 
-fn run<D: Device>(dev: Arc<D>, r: &reduced::Reduced<SparseIndex>, sn: &SupernodalSymbolic, x_cpu: &[f64], rounds: usize) {
+/// The supernodes whose factor values differ from the CPU's by more than
+/// 1e-9 of the panel's largest entry, with the first such entry.
+fn check_factor(sn: &SupernodalSymbolic, got: &[f64], cpu: &[f64]) {
+    let mut bad = 0;
+    for s in 0..sn.n_supernodes() {
+        let (q, h) = sn.supernode_dims(s);
+        let base = sn.panel_range(s).start;
+        let max = (0..q).flat_map(|c| (c..h).map(move |r| (c, r))).fold(0.0f64, |m, (c, r)| m.max(cpu[base + c * h + r].abs()));
+        let first = (0..q).flat_map(|c| (c..h).map(move |r| (c, r))).find(|&(c, r)| (got[base + c * h + r] - cpu[base + c * h + r]).abs() > 1e-9 * max);
+        if let Some((c, r)) = first {
+            bad += 1;
+            if bad <= 8 {
+                println!("  supernode {s} ({q} x {h}): first difference at column {c}, row {r}: {} against {}", got[base + c * h + r], cpu[base + c * h + r]);
+            }
+        }
+    }
+    println!("  {bad} of {} supernodes differ", sn.n_supernodes());
+}
+
+fn run<D: Device>(dev: Arc<D>, r: &reduced::Reduced<SparseIndex>, sn: &SupernodalSymbolic, cpu_factor: &[f64], x_cpu: &[f64], rounds: usize) {
     let n = r.rhs.len();
     let mut vals = dev.alloc(8 * r.s.vals().len()).unwrap();
     dev.write(&mut vals, 0, bytemuck::cast_slice(r.s.vals())).unwrap();
@@ -91,9 +111,27 @@ fn run<D: Device>(dev: Arc<D>, r: &reduced::Reduced<SparseIndex>, sn: &Supernoda
         let mut f = GpuFactor::new(&dev, precision, sn, r.s.symbolic(), &params(), Wide::F64).unwrap();
         // through the host API once (compiles the kernels), checked
         f.factorize(r.s.vals()).unwrap();
+        if std::env::var_os("GPU_CHECK_FACTOR").is_some() {
+            if let GpuFactor::F64(g) = &f {
+                check_factor(sn, &g.factor_values().unwrap(), cpu_factor);
+            }
+        }
         let mut x = r.rhs.clone();
         f.solve(&mut x).unwrap();
         let diff = rel_diff(&x, x_cpu);
+        if std::env::var_os("GPU_CHECK_FACTOR").is_some() && precision == GpuPrecision::F64 {
+            // factorize and solve again and again: an intermittent fault shows
+            let (mut worst, mut off) = (0.0f64, 0);
+            for _ in 0..50 {
+                f.factorize(r.s.vals()).unwrap();
+                let mut y = r.rhs.clone();
+                f.solve(&mut y).unwrap();
+                let d = rel_diff(&y, x_cpu);
+                worst = worst.max(d);
+                off += (d > 1e-8) as usize;
+            }
+            println!("  50 more factorizations and solves: {off} off, the worst {worst:.1e}");
+        }
         let factor = times(rounds, || {
             f.factorize_device((&vals, 0), (&fail, 0)).unwrap();
             dev.sync().unwrap();
@@ -150,9 +188,9 @@ fn main() {
     println!("cpu  F64: factor {:8.2} ms, solve {:7.2} ms", median(cpu), median(cpu_solve));
     match std::env::var("ARAEL_GPU").as_deref().unwrap_or("cuda") {
         #[cfg(feature = "gpu-cuda")]
-        "cuda" => run(Arc::new(arael::__gpu::cuda::CudaDevice::new(0).unwrap()), &r, &sn, &x_cpu, rounds),
+        "cuda" => run(Arc::new(arael::__gpu::cuda::CudaDevice::new(0).unwrap()), &r, &sn, &factor, &x_cpu, rounds),
         #[cfg(feature = "gpu-hip")]
-        "hip" => run(Arc::new(arael::__gpu::hip::HipDevice::new(0).unwrap()), &r, &sn, &x_cpu, rounds),
+        "hip" => run(Arc::new(arael::__gpu::hip::HipDevice::new(0).unwrap()), &r, &sn, &factor, &x_cpu, rounds),
         other => panic!("ARAEL_GPU={other}: not a runtime this binary was built with (features gpu-cuda, gpu-hip)"),
     }
 }
