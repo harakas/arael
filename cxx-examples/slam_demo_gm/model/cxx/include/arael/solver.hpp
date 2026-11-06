@@ -292,6 +292,8 @@ enum class GpuBackend : uint32_t {
     None = 0,
     Cuda = 1,
     Hip = 2,
+    /// The CPU running the GPU kernels, for tests without a GPU.
+    Cpu = 3,
 };
 
 /// What the GPU keeps and sums its wide values in (SparseOptionsT::gpu_wide):

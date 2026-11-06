@@ -272,7 +272,8 @@ views are named by their container's nature: `PathPosesDeque`,
   f64 matrix, reported by the plan's `f32_factor`, `refinements` and
   `refinement_shortfalls`). Constructed with the actual Rust
   defaults; the one-argument `solve_sparse(cfg)` uses them.
-- **GPU**: `SparseOptions::gpu` (`GpuBackend` None / Cuda / Hip) and
+- **GPU**: `SparseOptions::gpu` (`GpuBackend` None / Cuda / Hip / Cpu,
+  the last the CPU running the GPU kernels, for tests without a GPU) and
   `gpu_index` run the block supernodal route on that device, the
   process's shared state of it, so repeated solves reuse its buffers;
   `gpu_assembly` (on by default) also assembles there and keeps the LM
@@ -285,8 +286,8 @@ views are named by their container's nature: `PathPosesDeque`,
   slow). The plan's
   `gpu_factor` and `gpu_assembly` report which ran. The interface must
   be built with the runtime: the CMake cache variable `ARAEL_GPU`
-  (`cuda` or `hip`) builds the capi crate with the feature of that name
-  (`gpu-cuda`, `gpu-hip`); without it the solve fails with
+  (`cuda`, `hip` or `cpu`) builds the capi crate with the feature of that
+  name (`gpu-cuda`, `gpu-hip`, `gpu-cpu`); without it the solve fails with
   `SolverUnavailable`. On such a solve the observer gets the parameters
   and a driver the vectors only when `LmConfig::device_observer_params`
   and `device_driver_vectors` ask. Compiled kernels are kept in a disk

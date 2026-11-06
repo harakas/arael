@@ -394,7 +394,7 @@ fields and pass it to `solve_sparse`: `schur` (`SchurPolicy`),
 `max_refinements` and `refine_tol` (an f32 factor refined against the
 f64 matrix; the plan's `f32_factor`, `refinements` and
 `refinement_shortfalls` report it), and the GPU: `gpu` (`GpuBackend`
-NONE / CUDA / HIP) with `gpu_index`, `gpu_assembly`, `gpu_wide`
+NONE / CUDA / HIP / CPU, the last the CPU running the GPU kernels) with `gpu_index`, `gpu_assembly`, `gpu_wide`
 (`GpuWide` F64 / DF32) and `gpu_staging` (`GpuStaging` PINNED /
 PAGEABLE), as in the C++
 interface (docs/CXX.md); the cdylib must then be built with the

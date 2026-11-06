@@ -12,6 +12,7 @@ slam-demo-gm = { path = ".." }
 arael = { path = "../../../.." }
 
 [features]
-# The GPU routes of SparseOptions::gpu, on CUDA or HIP.
+# The GPU routes of SparseOptions::gpu, on CUDA, HIP or the CPU device.
 gpu-cuda = ["arael/gpu-cuda"]
 gpu-hip = ["arael/gpu-hip"]
+gpu-cpu = ["arael/gpu-cpu"]

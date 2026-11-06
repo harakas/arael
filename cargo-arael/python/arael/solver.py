@@ -246,6 +246,8 @@ class GpuBackend(enum.IntEnum):
     NONE = 0
     CUDA = 1
     HIP = 2
+    # The CPU running the GPU kernels, for tests without a GPU.
+    CPU = 3
 
 
 class GpuWide(enum.IntEnum):
@@ -312,7 +314,7 @@ class SparseOptions(ctypes.Structure):
         # reduced route the device also reduces, and with gpu_assembly
         # (on by default) assembles and runs the LM loop when the model
         # has a device form. Needs the capi built with the matching
-        # feature (gpu-cuda, gpu-hip); without it the solve fails with
+        # feature (gpu-cuda, gpu-hip, gpu-cpu); without it the solve fails with
         # SolverUnavailable.
         ("_gpu", ctypes.c_uint32),
         ("gpu_index", ctypes.c_uint32),
