@@ -74,9 +74,9 @@
 //! assert!(body.stmts.contains("switch (arael_select_index(k, 2u))"));
 //! ```
 //!
-//! What has no C++ form yet is an error naming it: the other external
-//! functions (`#[arael::function]`, `fast_atan` and `fast_atan2` of
-//! `arael::utils`).
+//! An external function with no helper (a function whose value is Rust
+//! code, like a `#[arael::function]` with a numeric body) has no C++ form:
+//! an error naming it.
 
 use crate::cse::{Arm, Intermediate, Switch};
 use crate::{E, Expr, FuncKind};
@@ -437,6 +437,8 @@ pub const EXTERN_CPP: &[(&str, &str)] = &[
     ("arael::utils::epsilon_for", "arael_epsilon_for"),
     ("arael::utils::exp_m1", "expm1"),
     ("arael::utils::ln_1p", "log1p"),
+    ("arael::utils::fast_atan", "arael_fast_atan"),
+    ("arael::utils::fast_atan2", "arael_fast_atan2"),
 ];
 
 /// The C++ function an external function's call prints as.
@@ -728,7 +730,9 @@ mod tests {
         let x = symbol("x");
         let none = |_: &str| None;
         assert_eq!(x.to_cpp_with("f64", &none).unwrap_err().0, "the kernel has no value for `x`");
-        assert!(crate::fast_atan(x.clone()).to_cpp("f64").unwrap_err().0.contains("fast_atan"));
+        fn eval(a: &[f64]) -> f64 { a[0] }
+        let opaque = crate::extern_func1("opaque", "user::opaque", |x| [x * 0.0 + 1.0], eval);
+        assert_eq!(opaque(x.clone()).to_cpp("f64").unwrap_err().0, "`user::opaque` has no C++ form");
         assert!(x.to_cpp("f16").is_err());
     }
 
@@ -777,6 +781,10 @@ mod tests {
         assert_eq!(crate::epsilon_for(a.clone()).to_cpp("f32").unwrap(), "arael_epsilon_for(a)");
         let d = crate::safe_sqrt(a.clone()).diff("a").to_cpp("f64").unwrap();
         assert!(d.contains("arael_epsilon_for(a)"), "{d}");
-        assert_eq!(crate::rad_diff(a.clone(), b).diff("b").to_cpp("f64").unwrap(), "(-1.0)");
+        assert_eq!(crate::rad_diff(a.clone(), b.clone()).diff("b").to_cpp("f64").unwrap(), "(-1.0)");
+        assert_eq!(crate::fast_atan(a.clone()).to_cpp("f32").unwrap(), "arael_fast_atan(a)");
+        assert_eq!(crate::fast_atan2(a.clone(), b.clone()).to_cpp("f64").unwrap(), "arael_fast_atan2(a, b)");
+        // the exact rational derivatives
+        assert_eq!(crate::fast_atan(a.clone()).diff("a").to_cpp("f64").unwrap(), crate::atan(a).diff("a").to_cpp("f64").unwrap());
     }
 }
