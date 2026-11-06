@@ -95,6 +95,20 @@ pub struct World32 {
     pub mark_links: std::vec::Vec<MarkLink<f32>>,
 }
 
+/// Imported entities alone, of built-in types only: roots with a device
+/// assembly.
+#[arael::model]
+#[arael(root)]
+pub struct CalWorld64 {
+    pub cals: refs::Vec<Cal<f64>>,
+}
+
+#[arael::model]
+#[arael(root, f32)]
+pub struct CalWorld32 {
+    pub cals: refs::Vec<Cal<f32>>,
+}
+
 /// A local entity whose params couple to the root's through `[hb, coo]`.
 #[arael::model]
 #[arael(constraint([hb, coo], {
