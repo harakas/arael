@@ -86,6 +86,8 @@ struct Kernels<K> {
     fwd_trsv: K,
     bwd_gemv: K,
     bwd_trsv: K,
+    fwd_chain: K,
+    bwd_chain: K,
     perm_in: K,
     perm_out: K,
 }
@@ -185,6 +187,9 @@ pub struct GpuSupernodal<F: Scalar, D: Device> {
     ntiles: u32,
     levels: Vec<Level>,
     steps: Vec<Step>,
+    /// The solve's steps: a level's kernels, or a chain of levels (forward
+    /// in order, backward in reverse).
+    solve_steps: Vec<Step>,
     work: D::Block,
     sec: Sections,
     n: usize,
@@ -240,6 +245,8 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let q = |s: &u32| plan.dims[2 * *s as usize] as usize;
         let chain_flops = if fs == 4 { params.chain_flops_f32 } else { params.chain_flops_f64 };
         let chains = plan::chains(&lw, chain_flops, params.chain_items);
+        let solve_chains = plan::solve_chains(&lw, params.solve_chain_work);
+        let first_sn: Vec<u32> = lw.iter().map(|w| w.level_sn[0]).collect();
         let mut levels = Vec::with_capacity(lw.len());
         for w in lw {
             let small_q = w.small_targets.iter().map(q).max().unwrap_or(0);
@@ -289,6 +296,23 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             l = c.end;
         }
         steps.extend((l..levels.len()).map(Step::Level));
+        // the solve's chains: per level its gather items, its supernode, its GEMV items
+        let mut solve_steps = Vec::new();
+        let mut l = 0;
+        for c in &solve_chains {
+            solve_steps.extend((l..c.start).map(Step::Level));
+            let records: Vec<u32> = c
+                .clone()
+                .flat_map(|i| {
+                    let v = &levels[i];
+                    [v.g_items as u32 / 4, v.n_g, first_sn[i], v.bg_items as u32 / 4, v.n_bg]
+                })
+                .collect();
+            let shared = levels[c.clone()].iter().map(|v| v.trsv_shared).max().unwrap_or(0);
+            solve_steps.push(Step::Chain { records: 4 * pk.push(&records), n: c.len() as u32, shared });
+            l = c.end;
+        }
+        solve_steps.extend((l..levels.len()).map(Step::Level));
         let mut ints = dev.alloc(pk.words.len() * 4)?;
         dev.write(&mut ints, 0, bytemuck::cast_slice(&pk.words))?;
         let nvals = asym.val_count();
@@ -314,6 +338,8 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             fwd_trsv: c("k_fwd_trsv")?,
             bwd_gemv: c("k_bwd_gemv")?,
             bwd_trsv: c("k_bwd_trsv")?,
+            fwd_chain: c("k_fwd_chain")?,
+            bwd_chain: c("k_bwd_chain")?,
             perm_in: c("k_perm_in")?,
             perm_out: c("k_perm_out")?,
         };
@@ -326,6 +352,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             ntiles: (plan.tiles.len() / 6) as u32,
             levels,
             steps,
+            solve_steps,
             work,
             sec,
             n: plan.n,
@@ -470,13 +497,27 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let x = Arg::Block(x.0, x.1);
         let blocks = self.nb.div_ceil(THREADS).max(1);
         self.run(&self.k.perm_in, blocks, THREADS, 0, &[gate, plan, x, xb, Arg::U32(self.nb)])?;
-        for l in &self.levels {
+        for step in &self.solve_steps {
+            let l = match *step {
+                Step::Chain { records, n, shared } => {
+                    self.run(&self.k.fwd_chain, 1, THREADS, shared, &[gate, list(records), Arg::U32(n), plan, factor, xb])?;
+                    continue;
+                }
+                Step::Level(i) => &self.levels[i],
+            };
             if l.n_g > 0 {
                 self.run(&self.k.fwd_gather, l.n_g, THREADS, 0, &[gate, list(l.g_items), plan, factor, xb, xb])?;
             }
             self.run(&self.k.fwd_trsv, l.n_all, THREADS, l.trsv_shared, &[gate, list(l.all), plan, factor, xb])?;
         }
-        for l in self.levels.iter().rev() {
+        for step in self.solve_steps.iter().rev() {
+            let l = match *step {
+                Step::Chain { records, n, shared } => {
+                    self.run(&self.k.bwd_chain, 1, THREADS, shared, &[gate, list(records), Arg::U32(n), plan, factor, xb])?;
+                    continue;
+                }
+                Step::Level(i) => &self.levels[i],
+            };
             if l.n_bg > 0 {
                 self.run(&self.k.bwd_gemv, l.n_bg, THREADS, 0, &[gate, list(l.bg_items), plan, factor, xb])?;
             }
@@ -497,6 +538,18 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     #[cfg(test)]
     fn chained_levels(&self) -> usize {
         self.steps.iter().map(|s| if let Step::Chain { n, .. } = s { *n as usize } else { 0 }).sum()
+    }
+
+    /// The levels the solve runs in chains.
+    #[cfg(test)]
+    fn solve_chained_levels(&self) -> usize {
+        self.solve_steps.iter().map(|s| if let Step::Chain { n, .. } = s { *n as usize } else { 0 }).sum()
+    }
+
+    /// The levels of one supernode.
+    #[cfg(test)]
+    fn single_levels(&self) -> usize {
+        self.levels.iter().filter(|l| l.n_all == 1).count()
     }
 
     /// The levels of one small supernode and no big updates.
@@ -680,6 +733,7 @@ mod tests {
             chain_flops_f32: 0.0,
             chain_flops_f64: 0.0,
             chain_items: 0,
+            solve_chain_work: 0.0,
             solve_work: 512,
             lane_unroll: None,
             blocks_per_sm: 4,
@@ -711,6 +765,7 @@ mod tests {
             chain_flops_f32: f64::INFINITY,
             chain_flops_f64: f64::INFINITY,
             chain_items: u32::MAX,
+            solve_chain_work: f64::INFINITY,
             big_pair_flops: f64::INFINITY,
             wide_pair_flops: f64::INFINITY,
             ..small_kernel_only()
@@ -761,6 +816,9 @@ mod tests {
             assert!(sn.n_supernodes() > 20, "a tree with levels");
             if params.chain_flops_f64 == f64::INFINITY {
                 assert!(g.chained_levels() > 0 && g.chained_levels() == g.path_levels(), "the levels of one small supernode in chains");
+            }
+            if params.solve_chain_work == f64::INFINITY {
+                assert!(g.solve_chained_levels() > 0 && g.solve_chained_levels() == g.single_levels(), "the levels of one supernode in solve chains");
             }
             g.factorize(a.vals()).unwrap();
             let err = factor_err(&sn, &g.factor_values().unwrap(), &cpu);
@@ -874,6 +932,10 @@ mod tests {
                 ("potf2", &k.potf2),
                 ("trsm", &k.trsm),
                 ("syrk", &k.syrk),
+                ("fwd_trsv", &k.fwd_trsv),
+                ("bwd_trsv", &k.bwd_trsv),
+                ("fwd_chain", &k.fwd_chain),
+                ("bwd_chain", &k.bwd_chain),
             ];
             for (name, kernel) in kernels {
                 assert_eq!(kernel.local_bytes().unwrap(), 0, "k_{name} in {}: {} registers", F::CPP, kernel.registers().unwrap());

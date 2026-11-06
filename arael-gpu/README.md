@@ -105,6 +105,9 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
   factored by one block in one launch (the top of a tree, one small level
   above another). In f64 one block's multiply-add rate is the limit where
   f64 is slow.
+- `solve_chain_work` (1e5): a run of levels of one supernode each, each of
+  at most that many multiply-adds of solve, is solved by one block in one
+  launch forward and one backward.
 - `blocks_per_sm` (4): a level whose big updates make fewer blocks than
   this per multiprocessor has its tiles' updates cut across blocks (by
   rectangles, then along k), the shared tiles subtracted atomically; a

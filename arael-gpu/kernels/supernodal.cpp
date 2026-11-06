@@ -769,13 +769,13 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
     }
 }
 
-// Forward solve, part one: the gather. `items` has 4 entries per item
-// (pairs [pa, pb), mid rows [e0, e1) counted from pair pa's first); every
-// mid row subtracts its descendant row's dot product with the descendant's
-// final y from its target's x, atomically. `x` and `xa` are the same vector:
-// the descendants' y read through `x`, the targets written through `xa`.
-KERNEL_THREADS(THREADS) void k_fwd_gather(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT x, GLOBAL F* RESTRICT xa) {
-    if (gate[0] == 0) return;
+// Forward solve, part one: the gather of the item at `it` (4 words: pairs
+// [pa, pb), mid rows [e0, e1) counted from pair pa's first) by nt threads;
+// every mid row subtracts its descendant row's dot product with the
+// descendant's final y from its target's x, atomically. `x` and `xa` are
+// the same vector: the descendants' y read through `x`, the targets written
+// through `xa`.
+DEVICE_INLINE void fwd_gather_item(GLOBAL const u32* it, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL const F* x, GLOBAL F* xa, u32 t, u32 nt) {
     u32 o_dims = plan[H_DIMS];
     u32 o_val_ptr = plan[H_VAL_PTR];
     u32 o_sup_begin = plan[H_SUP_BEGIN];
@@ -786,14 +786,11 @@ KERNEL_THREADS(THREADS) void k_fwd_gather(GLOBAL const u32* RESTRICT gate, GLOBA
     u32 o_pr_cmap = plan[H_PR_CMAP];
     u32 o_cmap = plan[H_CMAP];
     u32 o_pair_kw_ptr = plan[H_PAIR_KW_PTR];
-    u32 item = block_x();
-    u32 pa = items[4 * item];
-    u32 pb = items[4 * item + 1];
-    u32 e0 = items[4 * item + 2];
-    u32 e1 = items[4 * item + 3];
+    u32 pa = it[0];
+    u32 pb = it[1];
+    u32 e0 = it[2];
+    u32 e1 = it[3];
     u32 base = plan[o_pair_kw_ptr + pa];
-    u32 t = thread_x();
-    const u32 nt = THREADS;
     for (u32 e = e0 + t; e < e1; e += nt) {
         u32 lo = pa;
         u32 hi = pb;
@@ -836,10 +833,16 @@ KERNEL_THREADS(THREADS) void k_fwd_gather(GLOBAL const u32* RESTRICT gate, GLOBA
     }
 }
 
+// The forward gather, one block per item (fwd_gather_item).
+KERNEL_THREADS(THREADS) void k_fwd_gather(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT x, GLOBAL F* RESTRICT xa) {
+    if (gate[0] == 0) return;
+    fwd_gather_item(items + 4 * block_x(), plan, factor, x, xa, thread_x(), THREADS);
+}
+
 // A lane's share of sum_i a[a0 + i] b[b0 + i] over i = lane, lane + 32, ...:
 // LU loads in flight per iteration into two alternating accumulators, then
 // the one-wide remainder.
-DEVICE F lane_dot(GLOBAL const F* a, u32 a0, SHARED_PTR const F* b, u32 b0, u32 n, u32 lane) {
+DEVICE_INLINE F lane_dot(GLOBAL const F* a, u32 a0, SHARED_PTR const F* b, u32 b0, u32 n, u32 lane) {
     F p0 = F(0);
     F p1 = F(0);
     u32 ii = lane;
@@ -868,7 +871,7 @@ DEVICE F lane_dot(GLOBAL const F* a, u32 a0, SHARED_PTR const F* b, u32 b0, u32 
 // The 32 x 32 lower tile at (j0, j0) into row-major `ls` (coalesced along
 // the column), and the reciprocal of its diagonal for this thread's lane.
 // 1024 / THREADS elements per thread.
-DEVICE F load_tile32(GLOBAL const F* factor, u32 panel, u32 h, u32 j0, u32 nb, SHARED_PTR F* ls) {
+DEVICE_INLINE F load_tile32(GLOBAL const F* factor, u32 panel, u32 h, u32 j0, u32 nb, SHARED_PTR F* ls) {
     u32 t = thread_x();
 #pragma unroll
     for (u32 i = 0; i < 1024 / THREADS; i++) {
@@ -886,21 +889,18 @@ DEVICE F load_tile32(GLOBAL const F* factor, u32 panel, u32 h, u32 j0, u32 nb, S
     return rd;
 }
 
-// Forward solve, part two: the trsv, one block of 256 threads per supernode.
-// In 32-column blocks: the diagonal tile's 32 sequential steps by the first
-// warp on shared data, the rows below updated by all threads with the full
-// block's 32 loads issued before its FMAs. Dynamic shared memory: 1024 + q
-// values for the widest supernode q of the launch.
-KERNEL_THREADS(THREADS) void k_fwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT x) {
-    if (gate[0] == 0) return;
-    DYNAMIC_SHARED(F, smem);
+// Forward solve, part two: the trsv of supernode s by the block of THREADS
+// threads. In 32-column blocks: the diagonal tile's 32 sequential steps by
+// the first warp on shared data, the rows below updated by all threads with
+// the full block's 32 loads issued before its FMAs. `smem`: 1024 + q values
+// (dynamic shared memory for the widest supernode q of the launch).
+DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* smem) {
     SHARED_PTR F* ls = smem;
     SHARED_PTR F* xs = smem + 1024;
     u32 o_dims = plan[H_DIMS];
     u32 o_val_ptr = plan[H_VAL_PTR];
     u32 o_sup_begin = plan[H_SUP_BEGIN];
     u32 o_sc_start = plan[H_SC_START];
-    u32 s = list[block_x()];
     u32 q = plan[o_dims + 2 * s];
     u32 h = plan[o_dims + 2 * s + 1];
     u32 col0 = plan[o_sc_start + plan[o_sup_begin + s]];
@@ -941,22 +941,27 @@ KERNEL_THREADS(THREADS) void k_fwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL 
     for (u32 c1 = t; c1 < q; c1 += nt) x[col0 + c1] = xs[c1];
 }
 
-// Backward solve, part one: x_s -= L_below^T x for the columns [c0, c1) of
-// a supernode (`items`, 3 per item); the rows' x gathered into shared memory
-// XR_CH at a time, a warp per column with the lanes over the rows.
-KERNEL_THREADS(THREADS) void k_bwd_gemv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT x) {
+// The forward trsv, one block per supernode of `list` (fwd_trsv_one).
+KERNEL_THREADS(THREADS) void k_fwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT x) {
     if (gate[0] == 0) return;
-    SHARED F xr[XR_CH];
+    DYNAMIC_SHARED(F, smem);
+    fwd_trsv_one(list[block_x()], plan, factor, x, smem);
+}
+
+// Backward solve, part one: x_s -= L_below^T x for the columns [c0, c1) of
+// a supernode (the item at `it`, 3 words) by the block of THREADS threads;
+// the rows' x gathered into `xr` XR_CH at a time, a warp per column with
+// the lanes over the rows.
+DEVICE_INLINE void bwd_gemv_item(GLOBAL const u32* it, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* xr) {
     u32 o_dims = plan[H_DIMS];
     u32 o_val_ptr = plan[H_VAL_PTR];
     u32 o_sup_begin = plan[H_SUP_BEGIN];
     u32 o_sc_start = plan[H_SC_START];
     u32 o_row_sc = plan[H_ROW_SC];
     u32 o_row_sc_off = plan[H_ROW_SC_OFF];
-    u32 item = block_x();
-    u32 s = items[3 * item];
-    u32 c0 = items[3 * item + 1];
-    u32 c1 = items[3 * item + 2];
+    u32 s = it[0];
+    u32 c0 = it[1];
+    u32 c1 = it[2];
     u32 q = plan[o_dims + 2 * s];
     u32 h = plan[o_dims + 2 * s + 1];
     u32 col0 = plan[o_sc_start + plan[o_sup_begin + s]];
@@ -980,20 +985,24 @@ KERNEL_THREADS(THREADS) void k_bwd_gemv(GLOBAL const u32* RESTRICT gate, GLOBAL 
     }
 }
 
-// Backward solve, part two: the transposed trsv, one block of 256 threads
-// per supernode; 32-column blocks from the last, the block's columns against
-// the rows below it (a warp per column), then the diagonal tile's steps by
-// the first warp on shared data. Dynamic shared memory as k_fwd_trsv's.
-KERNEL_THREADS(THREADS) void k_bwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT x) {
+// The backward GEMV, one block per item (bwd_gemv_item).
+KERNEL_THREADS(THREADS) void k_bwd_gemv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT x) {
     if (gate[0] == 0) return;
-    DYNAMIC_SHARED(F, smem);
+    SHARED F xr[XR_CH];
+    bwd_gemv_item(items + 3 * block_x(), plan, factor, x, xr);
+}
+
+// Backward solve, part two: the transposed trsv of supernode s by the block
+// of THREADS threads; 32-column blocks from the last, the block's columns
+// against the rows below it (a warp per column), then the diagonal tile's
+// steps by the first warp on shared data. `smem` as fwd_trsv_one's.
+DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* smem) {
     SHARED_PTR F* ls = smem;
     SHARED_PTR F* xs = smem + 1024;
     u32 o_dims = plan[H_DIMS];
     u32 o_val_ptr = plan[H_VAL_PTR];
     u32 o_sup_begin = plan[H_SUP_BEGIN];
     u32 o_sc_start = plan[H_SC_START];
-    u32 s = list[block_x()];
     u32 q = plan[o_dims + 2 * s];
     u32 h = plan[o_dims + 2 * s + 1];
     u32 col0 = plan[o_sc_start + plan[o_sup_begin + s]];
@@ -1032,6 +1041,54 @@ KERNEL_THREADS(THREADS) void k_bwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL 
         BARRIER();
     }
     for (u32 c1 = t; c1 < q; c1 += nt) x[col0 + c1] = xs[c1];
+}
+
+// The backward trsv, one block per supernode of `list` (bwd_trsv_one).
+KERNEL_THREADS(THREADS) void k_bwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT x) {
+    if (gate[0] == 0) return;
+    DYNAMIC_SHARED(F, smem);
+    bwd_trsv_one(list[block_x()], plan, factor, x, smem);
+}
+
+// A chain of the solve's levels, one supernode each, by one block in one
+// launch: per level (`levels`, 5 words: the word offsets into `plan` of its
+// gather items and their count, its supernode, the word offset of its GEMV
+// items and their count), forward its gather items and its trsv, level
+// after level. The levels read what the levels before them wrote, so `x` is
+// one plain pointer (not the read-only path); `smem` is the trsvs' dynamic
+// shared memory, for the chain's widest supernode.
+KERNEL_THREADS_REGS(THREADS) void k_fwd_chain(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* x) {
+    if (gate[0] == 0) return;
+    DYNAMIC_SHARED(F, smem);
+    u32 t = thread_x();
+    for (u32 lv = 0; lv < nlevels; lv++) {
+        GLOBAL const u32* rec = levels + 5 * lv;
+        for (u32 g = 0; g < rec[1]; g++) fwd_gather_item(plan + rec[0] + 4 * g, plan, factor, x, x, t, THREADS);
+        // the gathers in; the previous trsv's reads of `smem` done
+        BARRIER();
+        fwd_trsv_one(rec[2], plan, factor, x, smem);
+        // its x, read by the next level's gathers
+        BARRIER();
+    }
+}
+
+// The backward half of k_fwd_chain's chain: its levels from the last, each
+// its GEMV items and its transposed trsv.
+KERNEL_THREADS_REGS(THREADS) void k_bwd_chain(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* x) {
+    if (gate[0] == 0) return;
+    SHARED F xr[XR_CH];
+    DYNAMIC_SHARED(F, smem);
+    u32 lv = nlevels;
+    while (lv > 0) {
+        lv -= 1;
+        GLOBAL const u32* rec = levels + 5 * lv;
+        for (u32 g = 0; g < rec[4]; g++) bwd_gemv_item(plan + rec[3] + 3 * g, plan, factor, x, xr);
+        // the GEMVs' x in; the previous trsv's reads of `smem` done
+        BARRIER();
+        bwd_trsv_one(rec[2], plan, factor, x, smem);
+        // its x, read by the next (lower) level's GEMVs
+        BARRIER();
+    }
 }
 
 // The right-hand side into the factor's ordering and scalar: one thread per

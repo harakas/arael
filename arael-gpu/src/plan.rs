@@ -96,6 +96,11 @@ pub struct GpuSupernodalParams {
     pub chain_flops_f32: f64,
     pub chain_flops_f64: f64,
     pub chain_items: u32,
+    /// A run of levels of one supernode each, each of at most this many
+    /// multiply-adds of solve (its gather, its GEMV, its two trsvs), is
+    /// solved by one block in one launch forward and one backward; 0 turns
+    /// it off.
+    pub solve_chain_work: f64,
     /// Blocks per multiprocessor a level's updates are cut to fill: a level
     /// whose big tiles make fewer blocks has their updates split across
     /// blocks, which then subtract atomically; the small updates are cut
@@ -114,6 +119,7 @@ impl Default for GpuSupernodalParams {
             chain_flops_f32: 3e5,
             chain_flops_f64: 0.0,
             chain_items: 32,
+            solve_chain_work: 1e5,
             solve_work: 65536,
             lane_unroll: None,
             blocks_per_sm: 4,
@@ -355,6 +361,8 @@ pub(crate) struct LevelWork {
     /// The multiply-adds of the small updates and of the small targets' factors.
     pub pair_work: f64,
     pub small_work: f64,
+    /// The multiply-adds of the level's solve: its gather, GEMV and trsvs.
+    pub solve_work: f64,
     /// [`BIG_ITEM`] per item: target, row0, col0, first rectangle, end, the
     /// k range `[k0, k1)` of a rectangle cut along k (`k1` 0: every k), and
     /// whether the tile is shared with other items (subtracted atomically).
@@ -407,12 +415,14 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
             w.maxq_big = w.maxq_big.max(q);
         }
         w.level_sn.push(s as u32);
+        w.solve_work += (q as f64) * (q as f64) + (h - q) as f64 * q as f64;
         // the solve's items: the pairs of s appended to the level's open gather
         // item while it stays under the work bound, a wide pair cut into row ranges
         for pi in p.pair_ptr[s] as usize..p.pair_ptr[s + 1] as usize {
             let pr = &p.pairs[pi];
             let dq = p.dims[2 * pr.d as usize] as usize;
             let work = pr.kw as usize * dq;
+            w.solve_work += work as f64;
             let ng = w.g_items.len() / 4;
             let open = ng > 0
                 && w.g_items[4 * ng - 3] as usize == pi
@@ -546,13 +556,24 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
 /// factors a level's supernodes in turn), without big updates, each of at
 /// most `chain_flops` multiply-adds and `chain_items` update pieces.
 pub(crate) fn chains(lw: &[LevelWork], chain_flops: f64, chain_items: u32) -> Vec<std::ops::Range<usize>> {
-    let fits = |w: &LevelWork| {
+    runs(lw, |w| {
         w.big_items.is_empty()
             && w.big_targets.is_empty()
             && w.small_targets.len() == 1
             && w.pair_work + w.small_work <= chain_flops
             && w.pair_items.len() / PAIR_ITEM <= chain_items as usize
-    };
+    })
+}
+
+/// The runs of consecutive levels of `lw` that the solve's chain kernels
+/// solve, one block a run: levels of one supernode, each of at most
+/// `solve_chain_work` multiply-adds of solve.
+pub(crate) fn solve_chains(lw: &[LevelWork], solve_chain_work: f64) -> Vec<std::ops::Range<usize>> {
+    runs(lw, |w| w.level_sn.len() == 1 && w.solve_work <= solve_chain_work)
+}
+
+/// The maximal runs of consecutive levels of `lw` that `fits`.
+fn runs(lw: &[LevelWork], fits: impl Fn(&LevelWork) -> bool) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
     let mut l = 0;
     while l < lw.len() {
@@ -799,6 +820,7 @@ mod tests {
             chain_flops_f32: 0.0,
             chain_flops_f64: 0.0,
             chain_items: 0,
+            solve_chain_work: 0.0,
             solve_work: 512,
             lane_unroll: None,
             blocks_per_sm: 4,
@@ -931,6 +953,29 @@ mod tests {
             assert_eq!(cs.iter().any(|c| c.contains(&l)), small(w), "level {l}");
         }
         assert!(chains(&lw, 0.0, n).is_empty() && chains(&lw, flops, 0).is_empty(), "chains off");
+    }
+
+    /// The solve's chains are runs of consecutive levels of one supernode
+    /// within the bound, each level in one at most.
+    #[test]
+    fn solve_chains_take_runs_of_single_supernodes() {
+        let (p, _, _) = analyse(24);
+        let lw = build_levels(&p, &GpuSupernodalParams::default(), 128);
+        let mut works: Vec<f64> = lw.iter().filter(|w| w.level_sn.len() == 1).map(|w| w.solve_work).collect();
+        works.sort_by(f64::total_cmp);
+        assert!(works.len() > 2, "the grid has levels of one supernode");
+        let bound = works[works.len() / 2];
+        let cs = solve_chains(&lw, bound);
+        let mut end = 0;
+        for c in &cs {
+            assert!(c.start >= end && c.start < c.end, "chains {cs:?} in order, apart");
+            end = c.end;
+        }
+        for (l, w) in lw.iter().enumerate() {
+            let fits = w.level_sn.len() == 1 && w.solve_work <= bound;
+            assert_eq!(cs.iter().any(|c| c.contains(&l)), fits, "level {l}");
+        }
+        assert!(!cs.is_empty() && solve_chains(&lw, 0.0).is_empty());
     }
 
     #[test]
