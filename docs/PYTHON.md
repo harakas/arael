@@ -393,8 +393,9 @@ fields and pass it to `solve_sparse`: `schur` (`SchurPolicy`),
 `max_refinements` and `refine_tol` (an f32 factor refined against the
 f64 matrix; the plan's `f32_factor`, `refinements` and
 `refinement_shortfalls` report it), and the GPU: `gpu` (`GpuBackend`
-NONE / CUDA / HIP) with `gpu_index`, `gpu_assembly` and `gpu_wide`
-(`GpuWide` F64 / DF32), as in the C++
+NONE / CUDA / HIP) with `gpu_index`, `gpu_assembly`, `gpu_wide`
+(`GpuWide` F64 / DF32) and `gpu_staging` (`GpuStaging` PINNED /
+PAGEABLE), as in the C++
 interface (docs/CXX.md); the cdylib must then be built with the
 runtime's feature (`cargo build --release -p <crate>-capi --features
 gpu-cuda`), or the solve fails with `SolverUnavailable`. An enum setter

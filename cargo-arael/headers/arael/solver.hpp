@@ -298,6 +298,15 @@ enum class GpuWide : uint32_t {
     Df32 = 1,
 };
 
+/// Where the device assembly writes its image of the model before copying
+/// it to the device (SparseOptionsT::gpu_staging): pinned memory (the copies
+/// are asynchronous) or pageable memory (the runtime stages each copy; for
+/// platforms where copies from pinned memory are slow).
+enum class GpuStaging : uint32_t {
+    Pinned = 0,
+    Pageable = 1,
+};
+
 /// The sparse backend's options (mirrors arael's SparseFaerOptions).
 /// The generated SparseOptions fills the Rust defaults at
 /// construction; edit fields and pass to solve_sparse. Layout is part
@@ -355,6 +364,9 @@ struct SparseOptionsT {
     bool gpu_assembly;
     /// The GPU's wide values (Rust's GpuDevice::with_wide).
     GpuWide gpu_wide;
+    /// Where the device assembly's image is staged (Rust's
+    /// GpuDevice::with_staging).
+    GpuStaging gpu_staging;
 };
 
 /// Per-phase wall-clock seconds plus call counts, gathered when

@@ -485,6 +485,9 @@ pub struct CSparseOptions {
     pub gpu_assembly: bool,
     /// The GPU's wide values (GpuWide): 0 f64, 1 df32.
     pub gpu_wide: u32,
+    /// Where the device assembly's image is staged (GpuStaging): 0 pinned,
+    /// 1 pageable.
+    pub gpu_staging: u32,
 }
 
 impl CSparseOptions {
@@ -549,6 +552,10 @@ impl CSparseOptions {
                 0 => arael::simple_lm::GpuWide::F64,
                 1 => arael::simple_lm::GpuWide::Df32,
                 t => panic!("unknown gpu_wide tag {t}"),
+            }).with_staging(match self.gpu_staging {
+                0 => arael::simple_lm::GpuStaging::Pinned,
+                1 => arael::simple_lm::GpuStaging::Pageable,
+                t => panic!("unknown gpu_staging tag {t}"),
             })))
             .with_gpu_assembly(self.gpu_assembly);
         let cg = arael::simple_lm::CgParams {
@@ -625,6 +632,10 @@ pub unsafe extern "C" fn decay_sparse_options(out: *mut CSparseOptions) {
         gpu_wide: match d.gpu.as_ref().map(|g| g.wide()) {
             None | Some(arael::simple_lm::GpuWide::F64) => 0,
             Some(arael::simple_lm::GpuWide::Df32) => 1,
+        },
+        gpu_staging: match d.gpu.as_ref().map(|g| g.staging()) {
+            None | Some(arael::simple_lm::GpuStaging::Pinned) => 0,
+            Some(arael::simple_lm::GpuStaging::Pageable) => 1,
         },
     };
 }
@@ -2633,6 +2644,9 @@ pub struct CSparseOptions {
     pub gpu_assembly: bool,
     /// The GPU's wide values (GpuWide): 0 f64, 1 df32.
     pub gpu_wide: u32,
+    /// Where the device assembly's image is staged (GpuStaging): 0 pinned,
+    /// 1 pageable.
+    pub gpu_staging: u32,
 }
 
 impl CSparseOptions {
@@ -2697,6 +2711,10 @@ impl CSparseOptions {
                 0 => arael::simple_lm::GpuWide::F64,
                 1 => arael::simple_lm::GpuWide::Df32,
                 t => panic!("unknown gpu_wide tag {t}"),
+            }).with_staging(match self.gpu_staging {
+                0 => arael::simple_lm::GpuStaging::Pinned,
+                1 => arael::simple_lm::GpuStaging::Pageable,
+                t => panic!("unknown gpu_staging tag {t}"),
             })))
             .with_gpu_assembly(self.gpu_assembly);
         let cg = arael::simple_lm::CgParams {
@@ -2773,6 +2791,10 @@ pub unsafe extern "C" fn line_sparse_options(out: *mut CSparseOptions) {
         gpu_wide: match d.gpu.as_ref().map(|g| g.wide()) {
             None | Some(arael::simple_lm::GpuWide::F64) => 0,
             Some(arael::simple_lm::GpuWide::Df32) => 1,
+        },
+        gpu_staging: match d.gpu.as_ref().map(|g| g.staging()) {
+            None | Some(arael::simple_lm::GpuStaging::Pinned) => 0,
+            Some(arael::simple_lm::GpuStaging::Pageable) => 1,
         },
     };
 }

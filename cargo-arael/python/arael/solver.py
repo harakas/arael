@@ -253,6 +253,15 @@ class GpuWide(enum.IntEnum):
     DF32 = 1
 
 
+class GpuStaging(enum.IntEnum):
+    """Where the device assembly writes its image of the model before
+    copying it to the device (SparseOptions.gpu_staging): pinned memory
+    (the copies are asynchronous) or pageable memory (the runtime stages
+    each copy; for platforms where copies from pinned memory are slow)."""
+    PINNED = 0
+    PAGEABLE = 1
+
+
 class SparseOptions(ctypes.Structure):
     """The sparse backend's options (mirror of arael's
     SparseFaerOptions): whether and when to marginalize, the
@@ -307,6 +316,8 @@ class SparseOptions(ctypes.Structure):
         ("gpu_assembly", ctypes.c_bool),
         # The GPU's wide values (GpuWide).
         ("_gpu_wide", ctypes.c_uint32),
+        # Where the device assembly's image is staged (GpuStaging).
+        ("_gpu_staging", ctypes.c_uint32),
     ]
 
     schur = _enum_property("_schur", SchurPolicy)
@@ -316,6 +327,7 @@ class SparseOptions(ctypes.Structure):
     block_supernodal = _enum_property("_block_supernodal", BlockSupernodalMode)
     gpu = _enum_property("_gpu", GpuBackend)
     gpu_wide = _enum_property("_gpu_wide", GpuWide)
+    gpu_staging = _enum_property("_gpu_staging", GpuStaging)
 
 
 class _OptDouble(ctypes.Structure):

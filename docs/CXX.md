@@ -278,7 +278,11 @@ views are named by their container's nature: `PathPosesDeque`,
   `gpu_assembly` (on by default) also assembles there and keeps the LM
   loop on the device when the model has a device form; `gpu_wide`
   (`GpuWide` F64 / Df32) keeps the device's wide values in f64 or df32
-  (two floats, for cards whose f64 is slow). The plan's
+  (two floats, for cards whose f64 is slow); `gpu_staging`
+  (`GpuStaging` Pinned / Pageable) writes the device assembly's image
+  into pinned host memory (asynchronous copies, the default) or into
+  ordinary memory (for platforms where copies from pinned memory are
+  slow). The plan's
   `gpu_factor` and `gpu_assembly` report which ran. The interface must
   be built with the runtime: the CMake cache variable `ARAEL_GPU`
   (`cuda` or `hip`) builds the capi crate with the feature of that name
