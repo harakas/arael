@@ -28,11 +28,13 @@
 //! `exp(log_s)`, a user component's values), computed in the kernel from
 //! their expressions when those read parameters alone, and `f32` or `f64`
 //! roots. Index selects print as C++ `switch`es (an integer or `bool`
-//! index leaf written into its float column, exact for any arm). A
-//! constraint has no device form when its rows write `coo` pairs, or when
-//! it reads a leaf that follows the parameters and that the device does not
-//! compute (a cache over data a component's update moves, a `compute =`
-//! field); its root then assembles on the CPU.
+//! index leaf written into its float column, exact for any arm); user
+//! functions with a symbolic body inline; `fast_atan` and `fast_atan2`
+//! call their kernel library twins. A constraint has no device form when
+//! its rows write `coo` pairs, when it calls a function whose value is
+//! Rust code, or when it reads a leaf that follows the parameters and that
+//! the device does not compute (a cache over data a component's update
+//! moves, a `compute =` field); its root then assembles on the CPU.
 
 use std::collections::BTreeSet;
 

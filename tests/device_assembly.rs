@@ -2434,8 +2434,15 @@ pub struct PoseWorld {
     pub points: refs::Vec<PointM>,
 }
 
+/// A 2D position.
+type P2 = (f64, f64);
+
+/// An image of the mixed scenes: its pose, its camera, and per observation
+/// its point, its measurement and whether its guard keeps it.
+type MixedImage = (usize, usize, Vec<(usize, P2, bool)>);
+
 /// The truth of the mixed scenes: six poses, three cameras, twelve points.
-fn mixed_truth() -> (Vec<(f64, f64)>, Vec<f64>, Vec<(f64, f64)>) {
+fn mixed_truth() -> (Vec<P2>, Vec<f64>, Vec<P2>) {
     let poses = (0..6).map(|i| (0.4 * i as f64, -0.2 * i as f64 + 0.1)).collect();
     let cams = vec![1.5, 0.8, 1.2];
     let points = (0..12).map(|k| (1.0 + 0.3 * (k % 4) as f64, 0.5 - 0.25 * (k / 4) as f64)).collect();
@@ -2446,19 +2453,19 @@ fn mixed_truth() -> (Vec<(f64, f64)>, Vec<f64>, Vec<(f64, f64)>) {
 /// camera 1 an image of no observations. Every image sees every point but
 /// every seventh, the measurements the truth plus noise, some past the
 /// Huber knee; every fifth observation guarded off.
-fn mixed_images() -> Vec<(usize, usize, Vec<(usize, (f64, f64), bool)>)> {
+fn mixed_images() -> Vec<MixedImage> {
     let (tp, tc, tk) = mixed_truth();
     let mut rng = Lcg(21);
     let mut n = 0;
     let mut images = Vec::new();
-    for i in 0..tp.len() {
+    for (i, &(px, py)) in tp.iter().enumerate() {
         for j in [i % 3, (i + 1) % 3] {
             let obs = (0..tk.len())
                 .filter(|_| !(i == 4 && j == 1))
                 .filter_map(|k| {
                     n += 1;
                     (n % 7 != 0).then(|| {
-                        let m = (tc[j] * (tk[k].0 - tp[i].0) + 0.05 * rng.uniform(), tc[j] * (tk[k].1 - tp[i].1) + 0.05 * rng.uniform());
+                        let m = (tc[j] * (tk[k].0 - px) + 0.05 * rng.uniform(), tc[j] * (tk[k].1 - py) + 0.05 * rng.uniform());
                         (k, m, n % 5 != 2)
                     })
                 })
@@ -2821,6 +2828,170 @@ fn sel_world() -> SelWorld {
 #[test]
 fn index_selects_assemble_and_solve_on_the_device_as_on_the_cpu() {
     assembles_and_solves_as_on_the_cpu(sel_world, "index selects");
+}
+
+/// The kernel library's fast atan and atan2 against arael::utils' on the
+/// CPU, over signs, zeros, the folds' boundaries and wide magnitudes: the
+/// same folds, polynomial and constants, equal to rounding (the device may
+/// contract a product and an add into one rounding), in f32 and f64.
+#[test]
+fn the_device_fast_atan_is_the_cpus() {
+    use arael::__gpu::{Arg, Device, Launch, Wide, ASSEMBLY, WIDE};
+    const KERNEL: &str = r#"
+KERNEL void fast_atans(GLOBAL const double* in, GLOBAL double* out_d, GLOBAL float* out_f, u32 n) {
+    const u32 i = global_x();
+    if (i >= n) return;
+    const double y = in[2 * i], x = in[2 * i + 1];
+    out_d[2 * i] = arael_fast_atan(y);
+    out_d[2 * i + 1] = arael_fast_atan2(y, x);
+    out_f[2 * i] = arael_fast_atan((float)y);
+    out_f[2 * i + 1] = arael_fast_atan2((float)y, (float)x);
+}
+"#;
+    let dev = device();
+    let source = format!("{WIDE}\n{ASSEMBLY}\n{KERNEL}");
+    let kernel = dev.compile(&source, &format!("{}#define SCALAR double\n", Wide::F64.defines()), "fast_atans").unwrap();
+    let mags = [0.0, 1e-8, 0.1, 0.2679491924311227, 0.268, 0.5, 0.57735, 1.0, 1.0000001, 3.7320508, 10.0, 1e6];
+    let vals: Vec<f64> = mags.iter().flat_map(|&m| [m, -m]).collect();
+    let pairs: Vec<(f64, f64)> = vals.iter().flat_map(|&y| vals.iter().map(move |&x| (y, x))).collect();
+    let n = pairs.len();
+    let input: Vec<f64> = pairs.iter().flat_map(|&(y, x)| [y, x]).collect();
+    let mut inp = dev.alloc(8 * input.len()).unwrap();
+    dev.write(&mut inp, 0, arael::__gpu::bytemuck::cast_slice(&input)).unwrap();
+    let (out_d, out_f) = (dev.alloc(16 * n).unwrap(), dev.alloc(8 * n).unwrap());
+    let args = [Arg::Block(&inp, 0), Arg::Block(&out_d, 0), Arg::Block(&out_f, 0), Arg::U32(n as u32)];
+    dev.launch(&kernel, Launch::linear(n as u32, 256), &args).unwrap();
+    let (mut d, mut f) = (vec![0f64; 2 * n], vec![0f32; 2 * n]);
+    dev.read(&out_d, 0, arael::__gpu::bytemuck::cast_slice_mut(&mut d)).unwrap();
+    dev.read(&out_f, 0, arael::__gpu::bytemuck::cast_slice_mut(&mut f)).unwrap();
+    for (k, &(y, x)) in pairs.iter().enumerate() {
+        let (yf, xf) = (y as f32, x as f32);
+        let cpu_d = [arael::utils::fast_atan(y), arael::utils::fast_atan2(y, x)];
+        let cpu_f = [arael::utils::fast_atan(yf), arael::utils::fast_atan2(yf, xf)];
+        for j in 0..2 {
+            assert!((d[2 * k + j] - cpu_d[j]).abs() <= 8.0 * f64::EPSILON, "f64 ({y}, {x}) [{j}]: {} vs {}", d[2 * k + j], cpu_d[j]);
+            assert!((f[2 * k + j] - cpu_f[j]).abs() <= 8.0 * f32::EPSILON, "f32 ({y}, {x}) [{j}]: {} vs {}", f[2 * k + j], cpu_f[j]);
+        }
+    }
+}
+
+/// A purely symbolic user function (Form A), inlined into the body.
+#[arael::function]
+fn sq_dev(x: arael::sym::E) -> arael::sym::E {
+    x * x
+}
+
+/// A typed user function (Form C), inlined into the body.
+#[arael::function]
+fn offset_dev(p: arael::sym::vect2sym, l: arael::sym::vect2sym) -> arael::sym::vect2sym {
+    l - p
+}
+
+/// A 2D pose held near where it was seen.
+#[arael::model]
+#[arael(constraint(hb, { [(poseb.pos.x - poseb.px) * 0.2, (poseb.pos.y - poseb.py) * 0.2, (poseb.th - poseb.pth) * 0.2] }))]
+#[derive(Clone)]
+pub struct PoseB {
+    pub pos: Param<vect2<f64>>,
+    pub th: Param<f64>,
+    pub px: f64,
+    pub py: f64,
+    pub pth: f64,
+    pub hb: SelfBlock<PoseB>,
+}
+
+/// A landmark at a known place seen from a pose by bearing and squared
+/// range, through the user functions; the root's atan2 the fast one.
+#[arael::model]
+#[arael(constraint(p.hb, {
+    let d = offset_dev(p.pos, bearing.l);
+    [rad_diff(atan2(d.y, d.x) - p.th, bearing.b) * 20.0, (sq_dev(d.x) + sq_dev(d.y) - bearing.r2) * 0.5]
+}))]
+#[derive(Clone)]
+pub struct Bearing {
+    #[arael(ref = root.poses)]
+    pub p: Ref<PoseB>,
+    pub l: vect2<f64>,
+    pub b: f64,
+    pub r2: f64,
+}
+
+#[arael::model]
+#[arael(root, fast_atan)]
+#[derive(Clone)]
+pub struct BearingWorld {
+    pub poses: refs::Vec<PoseB>,
+    pub bearings: std::vec::Vec<Bearing>,
+}
+
+/// Six poses on a circle seeing five landmarks, the measurements the truth
+/// plus noise, the poses moved off it.
+fn bearing_world() -> BearingWorld {
+    let mut rng = Lcg(61);
+    let truth: Vec<(f64, f64, f64)> = (0..6).map(|k| {
+        let a = k as f64;
+        (3.0 * a.cos(), 3.0 * a.sin(), a + 1.2)
+    }).collect();
+    let marks = [(0.5, 0.3), (-1.0, 1.5), (2.0, -1.0), (-2.5, -2.0), (4.5, 1.0)];
+    let mut poses = refs::Vec::new();
+    for &(x, y, th) in &truth {
+        poses.push(PoseB {
+            pos: Param::new(vect2::new(x + 0.1 * rng.uniform(), y + 0.1 * rng.uniform())),
+            th: Param::new(th + 0.05 * rng.uniform()),
+            px: x,
+            py: y,
+            pth: th,
+            hb: SelfBlock::new(),
+        });
+    }
+    let mut bearings = std::vec::Vec::new();
+    for (k, &(x, y, th)) in truth.iter().enumerate() {
+        for &(lx, ly) in &marks {
+            let (dx, dy) = (lx - x, ly - y);
+            bearings.push(Bearing {
+                p: poses.ref_at(k),
+                l: vect2::new(lx, ly),
+                b: arael::utils::rad_diff(dy.atan2(dx), th) + 0.002 * rng.uniform(),
+                r2: dx * dx + dy * dy + 0.01 * rng.uniform(),
+            });
+        }
+    }
+    BearingWorld { poses, bearings }
+}
+
+/// A root's fast atan2 and user functions with a symbolic body (inlined)
+/// assemble on the device as on the CPU and solve to its optimum.
+#[test]
+fn fast_atan_and_symbolic_user_functions_assemble_and_solve_on_the_device_as_on_the_cpu() {
+    assembles_and_solves_as_on_the_cpu(bearing_world, "fast atan2 and user functions");
+}
+
+/// A user function whose value is Rust code (Form B): no C++ form.
+#[arael::function(opaque_dev, derivs = [x * 0.0 + 1.0])]
+fn opaque_dev_eval(x: f64) -> f64 {
+    x
+}
+
+#[arael::model]
+#[arael(constraint(hb, { [opaque_dev(opaquee.x) - 1.0] }))]
+#[derive(Clone)]
+pub struct OpaqueE {
+    pub x: Param<f64>,
+    pub hb: SelfBlock<OpaqueE>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct OpaqueRoot {
+    pub items: refs::Vec<OpaqueE>,
+}
+
+#[test]
+fn a_user_function_of_rust_code_has_no_device_form() {
+    let s = OpaqueRoot { items: refs::Vec::new() };
+    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a Rust-coded user function has no device form");
+    assert!(why.contains("OpaqueE") && why.contains("opaque_dev_eval") && why.contains("no C++ form"), "{why}");
 }
 
 /// A component whose value follows a reference its `update` moves after
