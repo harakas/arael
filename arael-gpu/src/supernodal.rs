@@ -21,6 +21,11 @@ pub(crate) struct Packer {
 }
 
 impl Packer {
+    /// A packer with room for `words` words.
+    pub fn with_capacity(words: usize) -> Self {
+        Packer { words: Vec::with_capacity(words) }
+    }
+
     /// Append `v`, returning where it starts, in words.
     pub fn push(&mut self, v: &[u32]) -> usize {
         let at = self.words.len().div_ceil(64) * 64;
@@ -35,6 +40,7 @@ const SOURCE: &str = include_str!("../kernels/supernodal.cpp");
 
 /// Threads per block of every kernel but `k_trsm`, which runs TB.
 const THREADS: u32 = 256;
+const _: () = assert!(plan::GATHER_ITEM_ROWS == THREADS, "a gather item is a row a thread");
 
 /// The dynamic shared memory of `k_small_factor` on a supernode of `q`
 /// columns in a scalar of `fs` bytes: the diagonal block, the step's
@@ -125,6 +131,8 @@ struct Level {
     n_all: u32,
     /// Dynamic shared memory of the trsv kernels: 1024 + q values for the widest supernode.
     trsv_shared: u32,
+    /// The level's gather rows: their word offset in the structure block and count.
+    g_rows: (u32, u32),
     g_items: usize,
     n_g: u32,
     bg_items: usize,
@@ -237,8 +245,18 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let lw = build_levels(&plan, params, dev.arch().multiprocessors);
         let lu = params.lane_unroll.unwrap_or(if fs == 4 { 4 } else { 8 });
         assert!(lu >= 2 && lu.is_multiple_of(2), "the lane unroll is even and at least 2");
-        let mut pk = Packer::default();
-        let at_plan = pk.push(&plan.pack());
+        // room for every array and its alignment, so the block is not regrown
+        let plan_words = plan.pack();
+        let level_words: usize = lw
+            .iter()
+            .map(|w| {
+                let lists = [&w.pair_items, &w.big_items, &w.big_rects, &w.small_targets, &w.big_targets, &w.level_sn, &w.g_rows, &w.bg_items];
+                lists.iter().map(|v| v.len()).sum::<usize>() + w.g_items.len() / 2 * 3 + 16 * 64
+            })
+            .sum();
+        // (the chains' records: 4 and 5 words a level)
+        let mut pk = Packer::with_capacity(plan_words.len() + plan.tiles.len() + level_words + 9 * lw.len() + 1024);
+        let at_plan = pk.push(&plan_words);
         debug_assert_eq!(at_plan, 0, "the plan's header offsets are relative to the block start");
         let at_tiles = pk.push(&plan.tiles);
         let at_on = pk.push(&[1]);
@@ -259,6 +277,10 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                     "the solve needs {trsv_shared} bytes of shared memory for a supernode of {max_q} columns, the device gives {limit}"
                 )));
             }
+            // the gather items with their first row's word offset in the structure block
+            let g_at = pk.push(&w.g_rows) as u32;
+            let g_n = (w.g_rows.len() / plan::GATHER_ROW) as u32;
+            let g_items: Vec<u32> = w.g_items.chunks(2).flat_map(|it| [g_at + it[0], it[1], g_n]).collect();
             levels.push(Level {
                 pair_items: 4 * pk.push(&w.pair_items),
                 n_pair_items: (w.pair_items.len() / plan::PAIR_ITEM) as u32,
@@ -276,8 +298,9 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 all: 4 * pk.push(&w.level_sn),
                 n_all: w.level_sn.len() as u32,
                 trsv_shared: trsv_shared as u32,
-                g_items: 4 * pk.push(&w.g_items),
-                n_g: (w.g_items.len() / 4) as u32,
+                g_rows: (g_at, g_n),
+                g_items: 4 * pk.push(&g_items),
+                n_g: (w.g_items.len() / 2) as u32,
                 bg_items: 4 * pk.push(&w.bg_items),
                 n_bg: (w.bg_items.len() / 3) as u32,
             });
@@ -305,7 +328,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 .clone()
                 .flat_map(|i| {
                     let v = &levels[i];
-                    [v.g_items as u32 / 4, v.n_g, first_sn[i], v.bg_items as u32 / 4, v.n_bg]
+                    [v.g_rows.0, v.g_rows.1, first_sn[i], v.bg_items as u32 / 4, v.n_bg]
                 })
                 .collect();
             let shared = levels[c.clone()].iter().map(|v| v.trsv_shared).max().unwrap_or(0);
@@ -683,17 +706,18 @@ fn defines(scalar: &str, lu: usize) -> String {
         ("H_PAIR_PTR", H_PAIR_PTR),
         ("H_PR_D", H_PR_D),
         ("H_PR_R0", H_PR_R0),
-        ("H_PR_S", H_PR_S),
         ("H_PR_RMAP", H_PR_RMAP),
         ("H_PR_CMAP", H_PR_CMAP),
         ("H_RMAP", H_RMAP),
         ("H_CMAP", H_CMAP),
-        ("H_PAIR_KW_PTR", H_PAIR_KW_PTR),
         ("H_ROW_SC", H_ROW_SC),
         ("H_ROW_SC_OFF", H_ROW_SC_OFF),
         ("H_ORDER", H_ORDER),
         ("H_BLK_WIDTH", H_BLK_WIDTH),
         ("H_PART", H_PART),
+        ("H_SOLVE_HEAD", H_SOLVE_HEAD),
+        ("SOLVE_HEAD", plan::SOLVE_HEAD),
+        ("GATHER_ROW", plan::GATHER_ROW),
     ];
     for (name, v) in consts {
         writeln!(s, "#define {name} {v}u").unwrap();

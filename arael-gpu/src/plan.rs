@@ -43,19 +43,22 @@ pub const H_SC_START: usize = 3;
 pub const H_PAIR_PTR: usize = 4;
 pub const H_PR_D: usize = 5;
 pub const H_PR_R0: usize = 6;
-pub const H_PR_S: usize = 7;
-pub const H_PR_RMAP: usize = 8;
-pub const H_PR_CMAP: usize = 9;
-pub const H_RMAP: usize = 10;
-pub const H_CMAP: usize = 11;
-pub const H_PAIR_KW_PTR: usize = 12;
-pub const H_ROW_SC: usize = 13;
-pub const H_ROW_SC_OFF: usize = 14;
+pub const H_PR_RMAP: usize = 7;
+pub const H_PR_CMAP: usize = 8;
+pub const H_RMAP: usize = 9;
+pub const H_CMAP: usize = 10;
+pub const H_ROW_SC: usize = 11;
+pub const H_ROW_SC_OFF: usize = 12;
 /// The permutation, for the device-side solve: the block elimination order,
 /// the permuted block widths, and the matrix's scalar partition.
-pub const H_ORDER: usize = 15;
-pub const H_BLK_WIDTH: usize = 16;
-pub const H_PART: usize = 17;
+pub const H_ORDER: usize = 13;
+pub const H_BLK_WIDTH: usize = 14;
+pub const H_PART: usize = 15;
+/// The solve's header of every supernode, [`SOLVE_HEAD`] words: its
+/// columns q, its rows h, its first scalar column, its panel's offset, and
+/// the offset of its rows below in the row map (`H_ROW_SC`).
+pub const H_SOLVE_HEAD: usize = 16;
+pub const SOLVE_HEAD: usize = 5;
 /// Words of the header.
 pub const HEADER: usize = 32;
 
@@ -164,7 +167,6 @@ pub(crate) struct Plan {
     pub cmap: Vec<u32>,
     pub pr_rmap: Vec<u32>,
     pub pr_cmap: Vec<u32>,
-    pub pair_kw_ptr: Vec<u32>,
     pub row_sc: Vec<u32>,
     pub row_sc_off: Vec<u32>,
 }
@@ -299,10 +301,6 @@ impl Plan {
             debug_assert_eq!(self.row_sc.len() as u32 - self.row_sc_off[s], self.dims[2 * s + 1] - self.dims[2 * s]);
         }
         self.row_sc_off.push(self.row_sc.len() as u32);
-        self.pair_kw_ptr = vec![0u32; self.pairs.len() + 1];
-        for i in 0..self.pairs.len() {
-            self.pair_kw_ptr[i + 1] = self.pair_kw_ptr[i] + self.pairs[i].kw;
-        }
     }
 
     /// The plan arrays packed into one buffer behind the header that says
@@ -311,8 +309,13 @@ impl Plan {
         let mut buf: Vec<u32> = vec![0; HEADER];
         let pr_d: Vec<u32> = self.pairs.iter().map(|x| x.d).collect();
         let pr_r0: Vec<u32> = self.pairs.iter().map(|x| x.r0).collect();
-        let pr_s: Vec<u32> = self.pairs.iter().map(|x| x.s).collect();
-        let arrays: [(usize, &[u32]); 18] = [
+        let head: Vec<u32> = (0..self.ns)
+            .flat_map(|s| {
+                let col0 = self.sc_start[self.sup_begin[s] as usize];
+                [self.dims[2 * s], self.dims[2 * s + 1], col0, self.val_ptr[s], self.row_sc_off[s]]
+            })
+            .collect();
+        let arrays: [(usize, &[u32]); 17] = [
             (H_ORDER, &self.order),
             (H_BLK_WIDTH, &self.blk_width),
             (H_PART, &self.part),
@@ -323,14 +326,13 @@ impl Plan {
             (H_PAIR_PTR, &self.pair_ptr),
             (H_PR_D, &pr_d),
             (H_PR_R0, &pr_r0),
-            (H_PR_S, &pr_s),
             (H_PR_RMAP, &self.pr_rmap),
             (H_PR_CMAP, &self.pr_cmap),
             (H_RMAP, &self.rmap),
             (H_CMAP, &self.cmap),
-            (H_PAIR_KW_PTR, &self.pair_kw_ptr),
             (H_ROW_SC, &self.row_sc),
             (H_ROW_SC_OFF, &self.row_sc_off),
+            (H_SOLVE_HEAD, &head),
         ];
         for (slot, v) in arrays {
             buf[slot] = buf.len() as u32;
@@ -372,7 +374,15 @@ pub(crate) struct LevelWork {
     pub small_targets: Vec<u32>,
     pub big_targets: Vec<u32>,
     pub level_sn: Vec<u32>,
-    /// 4 per gather item: pairs [pa, pb), mid rows [e0, e1) counted from pair pa's first.
+    /// [`GATHER_ROW`] fields per mid row of the level's pairs, field by
+    /// field (field f of row r at `f * rows + r`, so a warp's loads of a field
+    /// are contiguous): the descendant's row at its column 0 (a factor
+    /// offset), the target's x index, and the descendant (its height, width
+    /// and first column in its solve header, `H_SOLVE_HEAD`).
+    pub g_rows: Vec<u32>,
+    /// The gather rows' fields while the level is built, one vector a field.
+    g_fields: [Vec<u32>; GATHER_ROW],
+    /// 2 per gather item: its first row of `g_rows` and its rows.
     pub g_items: Vec<u32>,
     /// 3 per GEMV item: supernode, columns [c0, c1).
     pub bg_items: Vec<u32>,
@@ -385,6 +395,12 @@ pub(crate) struct LevelWork {
 
 /// Words per big update item ([`LevelWork::big_items`]).
 pub const BIG_ITEM: usize = 8;
+
+/// Words per gather row ([`LevelWork::g_rows`]).
+pub const GATHER_ROW: usize = 3;
+
+/// The most rows of a gather item: one a thread of the gather's block.
+pub const GATHER_ITEM_ROWS: u32 = 256;
 
 /// Words per small update piece ([`LevelWork::pair_items`]).
 pub const PAIR_ITEM: usize = 11;
@@ -416,33 +432,29 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
         }
         w.level_sn.push(s as u32);
         w.solve_work += (q as f64) * (q as f64) + (h - q) as f64 * q as f64;
-        // the solve's items: the pairs of s appended to the level's open gather
-        // item while it stays under the work bound, a wide pair cut into row ranges
+        // the solve's gather: a record per mid row of s's pairs, appended to
+        // the level's open item while it stays under the work bound and
+        // GATHER_ITEM_ROWS
+        let col0 = p.sc_start[p.sup_begin[s] as usize];
         for pi in p.pair_ptr[s] as usize..p.pair_ptr[s + 1] as usize {
             let pr = &p.pairs[pi];
-            let dq = p.dims[2 * pr.d as usize] as usize;
-            let work = pr.kw as usize * dq;
-            w.solve_work += work as f64;
-            let ng = w.g_items.len() / 4;
-            let open = ng > 0
-                && w.g_items[4 * ng - 3] as usize == pi
-                && w.g_items[4 * ng - 2] == 0
-                && w.g_items[4 * ng - 1] == p.pair_kw_ptr[pi] - p.pair_kw_ptr[w.g_items[4 * ng - 4] as usize];
-            if work > kn.solve_work {
-                let per = ((kn.solve_work / dq) as u32).max(1);
-                let mut e0 = 0;
-                while e0 < pr.kw {
-                    w.g_items.extend_from_slice(&[pi as u32, pi as u32 + 1, e0, pr.kw.min(e0 + per)]);
-                    e0 += per;
+            let d = pr.d as usize;
+            let dq = p.dims[2 * d];
+            w.solve_work += (pr.kw * dq) as f64;
+            for i in 0..pr.kw {
+                let row = w.g_fields[0].len() as u32;
+                let tc = p.cmap[(p.pr_cmap[pi] + i) as usize];
+                for (f, v) in [p.val_ptr[d] + pr.r0 + i, col0 + tc, d as u32].into_iter().enumerate() {
+                    w.g_fields[f].push(v);
                 }
-                *g_work = kn.solve_work + 1;
-            } else if open && *g_work + work <= kn.solve_work {
-                w.g_items[4 * ng - 3] = pi as u32 + 1;
-                w.g_items[4 * ng - 1] = p.pair_kw_ptr[pi + 1] - p.pair_kw_ptr[w.g_items[4 * ng - 4] as usize];
-                *g_work += work;
-            } else {
-                w.g_items.extend_from_slice(&[pi as u32, pi as u32 + 1, 0, pr.kw]);
-                *g_work = work;
+                let ng = w.g_items.len() / 2;
+                if ng > 0 && *g_work + dq as usize <= kn.solve_work && w.g_items[2 * ng - 1] < GATHER_ITEM_ROWS {
+                    w.g_items[2 * ng - 1] += 1;
+                    *g_work += dq as usize;
+                } else {
+                    w.g_items.extend_from_slice(&[row, 1]);
+                    *g_work = dq as usize;
+                }
             }
         }
         if h > q {
@@ -520,6 +532,14 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
                 0,
                 0,
             ]);
+        }
+    }
+    // the gather rows field by field
+    for w in &mut lw {
+        let fields = std::mem::take(&mut w.g_fields);
+        w.g_rows = Vec::with_capacity(fields.iter().map(Vec::len).sum());
+        for f in &fields {
+            w.g_rows.extend_from_slice(f);
         }
     }
     let blocks = (multiprocessors * kn.blocks_per_sm) as usize;
@@ -765,21 +785,31 @@ mod tests {
                 }
             }
         }
-        // the gather items: every mid row of every pair once
-        let mut rows: Vec<u32> = vec![0; p.pairs.len()];
-        for w in &lw {
-            for it in w.g_items.chunks(4) {
-                let (pa, pb, e0, e1) = (it[0] as usize, it[1] as usize, it[2], it[3]);
-                let base = p.pair_kw_ptr[pa];
-                for e in e0..e1 {
-                    let pi = (pa..pb).rev().find(|&q| p.pair_kw_ptr[q] - base <= e).unwrap();
-                    rows[pi] += 1;
-                }
+        // the gather items: every mid row of every pair once, its record right
+        let mut want: HashMap<[u32; GATHER_ROW], u32> = HashMap::new();
+        for (pi, pr) in p.pairs.iter().enumerate() {
+            let (s, d) = (pr.s as usize, pr.d as usize);
+            for i in 0..pr.kw {
+                let tgt = p.sc_start[p.sup_begin[s] as usize] + p.cmap[(p.pr_cmap[pi] + i) as usize];
+                let rec = [p.val_ptr[d] + pr.r0 + i, tgt, d as u32];
+                *want.entry(rec).or_default() += 1;
             }
         }
-        for (pi, pr) in p.pairs.iter().enumerate() {
-            assert_eq!(rows[pi], pr.kw, "pair {pi}: gather rows");
+        let mut got: HashMap<[u32; GATHER_ROW], u32> = HashMap::new();
+        for w in &lw {
+            let n = (w.g_rows.len() / GATHER_ROW) as u32;
+            let mut next = 0;
+            for it in w.g_items.chunks(2) {
+                assert_eq!(it[0], next, "the items cover the level's rows in turn");
+                for r in it[0]..it[0] + it[1] {
+                    let rec: [u32; GATHER_ROW] = std::array::from_fn(|f| w.g_rows[(f as u32 * n + r) as usize]);
+                    *got.entry(rec).or_default() += 1;
+                }
+                next = it[0] + it[1];
+            }
+            assert_eq!(next, n);
         }
+        assert_eq!(got, want, "gather rows");
         // the GEMV items: every column of every supernode with rows below, once
         let mut cols: Vec<u32> = vec![0; p.ns];
         for w in &lw {
