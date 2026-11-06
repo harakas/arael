@@ -14,16 +14,11 @@
 // the loops run to EW or KW and skip what is past the block's width, so the
 // arrays stay in registers (arael_gpu.h's rule, from k_trsm).
 
-// SCHUR_STAGED: k_schur_w and k_schur_tiles read their small blocks once,
-// into registers and shared memory, instead of from global memory at every
-// use, and k_schur_tiles takes a tile per wavefront (TILE_LANES threads, 64
-// on AMD GCN and CDNA). On HIP and the CPU device; CUDA keeps the plain
-// loops until measured there (TODO.md).
-#if ARAEL_CUDA
-#define SCHUR_STAGED 0
-#else
-#define SCHUR_STAGED 1
-#endif
+// SCHUR_STAGED (from schur.rs, `staged`; not on CUDA until measured there,
+// TODO.md): k_schur_w and k_schur_tiles read their small blocks once, into
+// registers and shared memory, instead of from global memory at every use;
+// k_schur_w takes a thread per row of W, k_schur_tiles a wavefront per
+// tile (TILE_LANES threads, 64 on AMD GCN and CDNA).
 
 // One plane: the threads of the tile, rhs and symv kernels.
 #define PLANE 32u
@@ -131,6 +126,39 @@ KERNEL_THREADS_REGS(THREADS) void k_schur_elim(GLOBAL const u32* RESTRICT plan, 
     }
 }
 
+#if SCHUR_STAGED
+// Stage 2, KW threads per observer, one per row of W_o (those past wo
+// idle): row i of W_o = C_o D_e^-1, row-major wo x we, the row of C_o read
+// once into registers. Neighbouring threads read and write neighbouring
+// rows.
+KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const W* RESTRICT dinv, GLOBAL W* RESTRICT w, u32 no) {
+    u32 x = global_x();
+    u32 o = x / KW;
+    u32 i = x - o * KW;
+    if (o >= no) return;
+    u32 wo = plan[plan[SO_W] + o];
+    if (i >= wo) return;
+    u32 e = plan[plan[SO_E] + o];
+    u32 we = plan[plan[SE_W] + e];
+    u32 ca = plan[plan[SO_CA_OFF] + o];
+    u32 trans = plan[plan[SO_TRANS] + o];
+    u32 doff = plan[plan[SE_DINV_OFF] + e];
+    u32 woff = plan[plan[SO_W_OFF] + o];
+    W c[EW];
+#pragma unroll
+    for (u32 k = 0; k < EW; k++) c[k] = k < we ? coupling(h, ca, trans, wo, we, i, k) : W(0.0f);
+#pragma unroll
+    for (u32 l = 0; l < EW; l++) {
+        if (l < we) {
+            W v = 0.0f;
+#pragma unroll
+            for (u32 k = 0; k < EW; k++)
+                if (k < we) v = wide_fma(v, c[k], dinv[doff + k + l * we]);
+            w[woff + i * we + l] = v;
+        }
+    }
+}
+#else
 // Stage 2, one thread per observer: W_o = C_o D_e^-1, row-major wo x we.
 KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const W* RESTRICT dinv, GLOBAL W* RESTRICT w, u32 no) {
     u32 o = global_x();
@@ -142,7 +170,6 @@ KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL c
     u32 trans = plan[plan[SO_TRANS] + o];
     u32 doff = plan[plan[SE_DINV_OFF] + e];
     u32 woff = plan[plan[SO_W_OFF] + o];
-#if !SCHUR_STAGED
     for (u32 i = 0; i < wo; i++) {
         for (u32 l = 0; l < we; l++) {
             W v = 0.0f;
@@ -150,33 +177,8 @@ KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL c
             w[woff + i * we + l] = v;
         }
     }
-#else
-    // D_e^-1 and each row of C_o read once, into registers
-    W d[EW * EW];
-#pragma unroll
-    for (u32 l = 0; l < EW; l++)
-#pragma unroll
-        for (u32 k = 0; k < EW; k++) d[k + l * EW] = (k < we && l < we) ? dinv[doff + k + l * we] : W(0.0f);
-#pragma unroll
-    for (u32 i = 0; i < KW; i++) {
-        if (i < wo) {
-            W c[EW];
-#pragma unroll
-            for (u32 k = 0; k < EW; k++) c[k] = k < we ? coupling(h, ca, trans, wo, we, i, k) : W(0.0f);
-#pragma unroll
-            for (u32 l = 0; l < EW; l++) {
-                if (l < we) {
-                    W v = 0.0f;
-#pragma unroll
-                    for (u32 k = 0; k < EW; k++)
-                        if (k < we) v = wide_fma(v, c[k], d[k + l * EW]);
-                    w[woff + i * we + l] = v;
-                }
-            }
-        }
-    }
-#endif
 }
+#endif
 
 #if SCHUR_STAGED
 // Stage 3, one block of TILE_LANES threads per tile of S (the wavefront):

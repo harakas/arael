@@ -527,8 +527,10 @@ pub struct GpuSchur<D: Device> {
     ne: u32,
     no: u32,
     nt: u32,
-    /// Threads per tile of S in `k_schur_tiles`.
+    /// Threads per tile of S in `k_schur_tiles`, and per observer in
+    /// `k_schur_w`.
     lanes: u32,
+    w_rows: u32,
     nk: u32,
     n: usize,
     nks: usize,
@@ -557,17 +559,18 @@ impl<D: Device> GpuSchur<D> {
     }
 
     fn build(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide) -> Result<Self, GpuError> {
-        let lanes = if D::RUNTIME == "cuda" { PLANE } else { dev.arch().warp.max(PLANE) };
+        let lanes = if staged::<D>() { dev.arch().warp.max(PLANE) } else { PLANE };
         Self::build_lanes(dev, p, nh, wide, lanes)
     }
 
     /// [`build`](Self::build) with `lanes` threads per tile of S in
     /// `k_schur_tiles`: the device's whole wavefront where the kernels stage
-    /// their blocks (not on CUDA, see `SCHUR_STAGED` in schur.cpp), else a
-    /// plane.
+    /// their blocks ([`staged`]), else a plane.
     fn build_lanes(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide, lanes: u32) -> Result<Self, GpuError> {
-        assert!(lanes == PLANE || D::RUNTIME != "cuda", "CUDA's k_schur_tiles takes a plane per tile");
-        let defines = format!("{}{}", wide.defines(), defines(&p, lanes));
+        assert!(lanes == PLANE || staged::<D>(), "the unstaged k_schur_tiles takes a plane per tile");
+        // k_schur_w's threads per observer: a row of W each, or the whole of W
+        let w_rows = if staged::<D>() { p.kw_cap as u32 } else { 1 };
+        let defines = format!("{}{}", wide.defines(), defines(&p, lanes, staged::<D>()));
         let (kt_ptr_words, kt_words) = tiles_by_kept_block(&p);
         let mut pk = Packer { words: p.words };
         let on = 4 * pk.push(&[1]);
@@ -616,6 +619,7 @@ impl<D: Device> GpuSchur<D> {
             no: p.no,
             nt: p.nt,
             lanes,
+            w_rows,
             nk: p.nk,
             n: p.n,
             nks: p.nks,
@@ -738,7 +742,7 @@ impl<D: Device> GpuSchur<D> {
         self.run(&self.k.zero_u32, 1, PLANE, &[w(self.flag_at(0)), Arg::U32(N_FLAGS as u32)])?;
         let elim = [plan, w(s.h), w(s.rhs), w(s.dinv), w(s.z), w(self.flag_at(F_ELIM)), Arg::U32(self.ne)];
         self.run(&self.k.elim, self.ne.div_ceil(THREADS), THREADS, &elim)?;
-        self.run(&self.k.w, self.no.div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.dinv), w(s.w), Arg::U32(self.no)])?;
+        self.run(&self.k.w, (self.no * self.w_rows).div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.dinv), w(s.w), Arg::U32(self.no)])?;
         self.run(&self.k.tiles, self.nt, self.lanes, &[plan, w(s.h), w(s.w), w(s.s)])?;
         self.run(&self.k.rhs, self.nk, PLANE, &[plan, w(s.h), w(s.rhs), w(s.z), w(s.rhs_kept)])
     }
@@ -941,14 +945,22 @@ fn tiles_by_kept_block(p: &SchurPlan) -> (Vec<u32>, Vec<u32>) {
     (ptr, tiles)
 }
 
+/// Whether the Schur kernels read their small blocks once into registers
+/// and shared memory (`SCHUR_STAGED` in schur.cpp): everywhere but CUDA,
+/// which keeps the plain loops until measured there (TODO.md).
+fn staged<D: Device>() -> bool {
+    D::RUNTIME != "cuda"
+}
+
 /// The `#define`s of `schur.cpp`: the block sizes, the width classes, and
 /// the plan header's and the status's slots of [`crate::schur`].
-fn defines(p: &SchurPlan, lanes: u32) -> String {
+fn defines(p: &SchurPlan, lanes: u32, staged: bool) -> String {
     let mut s = String::new();
     define_u32s(
         &mut s,
         &[
             ("THREADS", THREADS as usize),
+            ("SCHUR_STAGED", staged as usize),
             ("TILE_LANES", lanes as usize),
             ("EW", p.ew_cap),
             ("KW", p.kw_cap),
@@ -1066,8 +1078,8 @@ mod tests {
     /// 32.
     #[test]
     fn a_tile_on_64_lanes_is_the_tile_on_32() {
-        if <TestDevice as Device>::RUNTIME == "cuda" {
-            // CUDA's k_schur_tiles takes a plane per tile (SCHUR_STAGED)
+        if !staged::<TestDevice>() {
+            // the unstaged k_schur_tiles takes a plane per tile
             return;
         }
         let (h, _, rhs, elim) = ba_like(40, 300, 5);
