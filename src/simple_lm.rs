@@ -4746,7 +4746,7 @@ impl Default for SchurMethod {
 /// ```
 #[derive(Clone, Debug)]
 pub struct GpuDevice {
-    /// The runtime (feature `gpu-cuda` or `gpu-hip`).
+    /// The runtime (feature `gpu-cuda`, `gpu-hip` or `gpu-cpu`).
     pub backend: GpuBackend,
     /// The device, as the runtime numbers them.
     pub index: usize,
@@ -4756,14 +4756,16 @@ pub struct GpuDevice {
     cuda: DeviceSlot<arael_gpu::cuda::CudaDevice>,
     #[cfg(feature = "gpu-hip")]
     hip: DeviceSlot<arael_gpu::hip::HipDevice>,
+    #[cfg(feature = "gpu-cpu")]
+    cpu: DeviceSlot<arael_gpu::cpu::CpuDevice>,
 }
 
 /// A [`GpuDevice`]'s device state, shared by its clones, made on first use.
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
 type DeviceSlot<D> = std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<D>>>>;
 
 /// The device in `slot`, made by `make` on first use.
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
 fn device_in<D>(slot: &DeviceSlot<D>, make: impl FnOnce() -> Result<D, arael_gpu::GpuError>) -> Result<std::sync::Arc<D>, arael_gpu::GpuError> {
     let mut shared = slot.lock().unwrap();
     if let Some(d) = shared.as_ref() {
@@ -4775,7 +4777,7 @@ fn device_in<D>(slot: &DeviceSlot<D>, make: impl FnOnce() -> Result<D, arael_gpu
 }
 
 /// What `f` reads of the device in `slot`; 0 before its first use.
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
 fn device_stat<D: arael_gpu::Device>(slot: &DeviceSlot<D>, f: impl Fn(&D) -> usize) -> usize {
     slot.lock().unwrap().as_deref().map_or(0, f)
 }
@@ -4791,6 +4793,8 @@ impl GpuDevice {
             cuda: Default::default(),
             #[cfg(feature = "gpu-hip")]
             hip: Default::default(),
+            #[cfg(feature = "gpu-cpu")]
+            cpu: Default::default(),
         }
     }
 
@@ -4802,6 +4806,12 @@ impl GpuDevice {
     /// HIP device `index` (feature `gpu-hip`).
     pub fn hip(index: usize) -> Self {
         Self::new(GpuBackend::Hip, index)
+    }
+
+    /// The CPU running the GPU route's kernels (feature `gpu-cpu`), for
+    /// tests without a GPU; compiles them with the host's C++ compiler.
+    pub fn cpu() -> Self {
+        Self::new(GpuBackend::Cpu, 0)
     }
 
     /// The device with its wide values in `wide`.
@@ -4863,6 +4873,8 @@ impl GpuDevice {
             GpuBackend::Cuda => device_stat(&self.cuda, arael_gpu::Device::reserved_bytes),
             #[cfg(feature = "gpu-hip")]
             GpuBackend::Hip => device_stat(&self.hip, arael_gpu::Device::reserved_bytes),
+            #[cfg(feature = "gpu-cpu")]
+            GpuBackend::Cpu => device_stat(&self.cpu, arael_gpu::Device::reserved_bytes),
             #[allow(unreachable_patterns)]
             _ => 0,
         }
@@ -4876,6 +4888,8 @@ impl GpuDevice {
             GpuBackend::Cuda => device_stat(&self.cuda, arael_gpu::Device::allocations),
             #[cfg(feature = "gpu-hip")]
             GpuBackend::Hip => device_stat(&self.hip, arael_gpu::Device::allocations),
+            #[cfg(feature = "gpu-cpu")]
+            GpuBackend::Cpu => device_stat(&self.cpu, arael_gpu::Device::allocations),
             #[allow(unreachable_patterns)]
             _ => 0,
         }
@@ -4889,6 +4903,9 @@ pub enum GpuBackend {
     Cuda,
     /// AMD, through HIP.
     Hip,
+    /// The CPU: the kernels compiled by the host's C++ compiler, for tests
+    /// and CI without a GPU.
+    Cpu,
 }
 
 /// What a [`GpuDevice`] keeps and sums its wide values in: H, the gradient,
@@ -5720,12 +5737,12 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
     sn: &arael_faer::supernodal::SupernodalSymbolic,
     asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
 ) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SolveFailureKind> {
-    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
     let wide = match dev.wide() {
         GpuWide::F64 => arael_gpu::Wide::F64,
         GpuWide::Df32 => arael_gpu::Wide::Df32,
     };
-    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
     let staging = match dev.staging() {
         GpuStaging::Pinned => crate::device::Staging::Pinned,
         GpuStaging::Pageable => crate::device::Staging::Pageable,
@@ -5755,13 +5772,25 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
             let _ = (precision, sn, asym);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the HIP runtime is not compiled in (feature gpu-hip)" }.into())
         }
+        #[cfg(feature = "gpu-cpu")]
+        GpuBackend::Cpu => {
+            let made = device_in(&dev.cpu, || arael_gpu::cpu::CpuDevice::new(dev.index));
+            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging));
+            report_kernel_cache();
+            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("setup of the CPU device's factor", e))?))
+        }
+        #[cfg(not(feature = "gpu-cpu"))]
+        GpuBackend::Cpu => {
+            let _ = (precision, sn, asym);
+            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the CPU device is not compiled in (feature gpu-cpu)" }.into())
+        }
     }
 }
 
 /// A kernel cache entry the runtime could not write, logged once.
 #[cfg(feature = "gpu")]
 fn report_kernel_cache() {
-    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
     if let Some(why) = arael_gpu::take_cache_failure() {
         warn!("GPU: {why}");
     }

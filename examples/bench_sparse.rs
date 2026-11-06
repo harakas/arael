@@ -408,7 +408,7 @@ fn main() {
 
             // No min_diagonal floor here, so the damping scale IS the diagonal --
             // both parameters are shared refs, so the same slice serves for both.
-            solver.solve_damped(n, &mut matrix, &diagonal, &diagonal, 0.001, &grad, &mut delta);
+            let _definite = solver.solve_damped(n, &mut matrix, &diagonal, &diagonal, 0.001, &grad, &mut delta).expect("the damped solve");
 
             // Measure: assembly (compute)
             let mut assembly_us = Vec::new();
@@ -426,7 +426,7 @@ fn main() {
             for _ in 0..runs {
                 let t0 = std::time::Instant::now();
 
-                solver.solve_damped(n, &mut matrix, &diagonal, &diagonal, 0.001, &grad, &mut delta);
+                let _definite = solver.solve_damped(n, &mut matrix, &diagonal, &diagonal, 0.001, &grad, &mut delta).expect("the damped solve");
                 solve_us.push(t0.elapsed().as_nanos() as f64 / 1000.0);
             }
 

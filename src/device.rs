@@ -1288,11 +1288,14 @@ pub fn check_tolerance(bits: u32) -> f64 {
     }
 }
 
-/// The device the check runs on: CUDA when it is compiled in, else HIP.
+/// The device the check runs on: CUDA when it is compiled in, else HIP,
+/// else the CPU device.
 #[cfg(feature = "gpu-cuda")]
 type CheckDevice = arael_gpu::cuda::CudaDevice;
 #[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
 type CheckDevice = arael_gpu::hip::HipDevice;
+#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+type CheckDevice = arael_gpu::cpu::CpuDevice;
 
 /// The device check ([`DEVICE_CHECK_VAR`]) at a solve's start and at a
 /// root's assembly entry points: `problem`, of the root type `P`, at `x0`.
@@ -1340,7 +1343,7 @@ where
 
 /// [`check_solve`]'s check of the root `name`: its largest differences,
 /// or a panic where one is beyond [`check_tolerance`].
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
 fn check_root<T, P>(problem: &mut P, x0: &[T], name: &str) -> String
 where
     T: crate::utils::Float + 'static,
@@ -1383,13 +1386,13 @@ where
     format!("cost {:.1e}, gradient {:.1e}, Hessian {:.1e}{narrow}", worst[0], worst[1], worst[2])
 }
 
-#[cfg(not(any(feature = "gpu-cuda", feature = "gpu-hip")))]
+#[cfg(not(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu")))]
 fn check_root<T, P>(_problem: &mut P, _x0: &[T], name: &str) -> String
 where
     T: crate::utils::Float + 'static,
     P: crate::simple_lm::LmProblemInternals<T>,
 {
-    panic!("{DEVICE_CHECK_VAR}: `{name}`: the check needs a device runtime (feature gpu-cuda or gpu-hip)")
+    panic!("{DEVICE_CHECK_VAR}: `{name}`: the check needs a device runtime (feature gpu-cuda, gpu-hip or gpu-cpu)")
 }
 
 #[cfg(test)]

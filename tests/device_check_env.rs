@@ -2,7 +2,7 @@
 // assembly against the CPU's and logs it (ARAEL_DEVICE_CHECK_LOG), a root
 // without one logs why. The variables are read once per process: this file
 // is a process of its own, and sets them before the first solve.
-#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
 
 use arael::model::{Param, SelfBlock};
 use arael::refs;

@@ -1,13 +1,15 @@
 //! Expressions printed by arael-sym's C++ printer (`cpp_body_with`),
-//! compiled for the device (CUDA, else HIP) and run there,
-//! agree with arael-sym's own evaluation, in double and in float.
-#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+//! compiled for the device (CUDA, else HIP, else the CPU device) and run
+//! there, agree with arael-sym's own evaluation, in double and in float.
+#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
 
 use arael::sym::*;
 #[cfg(feature = "gpu-cuda")]
 use arael_gpu::cuda::CudaDevice as Dev;
 #[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
 use arael_gpu::hip::HipDevice as Dev;
+#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+use arael_gpu::cpu::CpuDevice as Dev;
 use arael_gpu::bytemuck;
 use arael_gpu::{Arg, Device, Launch};
 use std::collections::HashMap;

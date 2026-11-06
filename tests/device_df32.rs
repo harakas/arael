@@ -1,13 +1,15 @@
-//! The device df32 (`arael-gpu/kernels/wide.h`, feature `gpu-cuda` or
-//! `gpu-hip`) against the host's `arael::df32`: the same
+//! The device df32 (`arael-gpu/kernels/wide.h`, feature `gpu-cuda`,
+//! `gpu-hip` or `gpu-cpu`) against the host's `arael::df32`: the same
 //! operations give the same bits.
-#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
 
 use arael::__gpu::bytemuck;
 #[cfg(feature = "gpu-cuda")]
 use arael::__gpu::cuda::CudaDevice as Dev;
 #[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
 use arael::__gpu::hip::HipDevice as Dev;
+#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+use arael::__gpu::cpu::CpuDevice as Dev;
 use arael::__gpu::{Arg, Device, Launch, WIDE, Wide};
 use arael::df32;
 

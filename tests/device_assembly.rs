@@ -2,7 +2,7 @@
 //! constraints all have a device form assembles its gradient, Hessian
 //! tiles and cost on the GPU to what the CPU assembly gives against the
 //! same pattern.
-#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
 
 use arael::df32;
 use arael::angle::AngleParam;
@@ -257,6 +257,8 @@ fn devices() -> Vec<GpuDevice> {
     v.extend([GpuDevice::cuda(0), GpuDevice::cuda(0).with_wide(arael::simple_lm::GpuWide::Df32)]);
     #[cfg(feature = "gpu-hip")]
     v.extend([GpuDevice::hip(0), GpuDevice::hip(0).with_wide(arael::simple_lm::GpuWide::Df32)]);
+    #[cfg(feature = "gpu-cpu")]
+    v.extend([GpuDevice::cpu(), GpuDevice::cpu().with_wide(arael::simple_lm::GpuWide::Df32)]);
     v
 }
 
@@ -265,6 +267,7 @@ fn label(d: &GpuDevice) -> String {
     let runtime = match d.backend {
         arael::simple_lm::GpuBackend::Cuda => "cuda",
         arael::simple_lm::GpuBackend::Hip => "hip",
+        arael::simple_lm::GpuBackend::Cpu => "cpu",
     };
     match d.wide() {
         arael::simple_lm::GpuWide::F64 => runtime.to_string(),
@@ -850,7 +853,7 @@ fn the_first_linearization_is_assembled_on_the_device() {
     }
 }
 
-/// A device: CUDA when it is compiled in, else HIP.
+/// A device: CUDA when it is compiled in, else HIP, else the CPU device.
 #[cfg(feature = "gpu-cuda")]
 fn device() -> std::sync::Arc<arael::__gpu::cuda::CudaDevice> {
     std::sync::Arc::new(arael::__gpu::cuda::CudaDevice::new(0).unwrap())
@@ -858,6 +861,10 @@ fn device() -> std::sync::Arc<arael::__gpu::cuda::CudaDevice> {
 #[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
 fn device() -> std::sync::Arc<arael::__gpu::hip::HipDevice> {
     std::sync::Arc::new(arael::__gpu::hip::HipDevice::new(0).unwrap())
+}
+#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+fn device() -> std::sync::Arc<arael::__gpu::cpu::CpuDevice> {
+    std::sync::Arc::new(arael::__gpu::cpu::CpuDevice::new(0).unwrap())
 }
 
 /// The device assembly matches the CPU's in both wide scalars: in df32 the

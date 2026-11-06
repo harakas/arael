@@ -1,12 +1,12 @@
 //! A device failure ends a solve with `SolveFailureKind::Device`, never a
-//! panic (feature `gpu-cuda` or `gpu-hip`): every device operation of a
+//! panic (feature `gpu-cuda`, `gpu-hip` or `gpu-cpu`): every device operation of a
 //! solve fails in turn (`arael_gpu::fault`), on each route, and each solve
 //! returns the failure; its partial result, when it has one, holds
 //! parameters and a cost that agree with the model as the failed solve
 //! left it; and the next solve on the same device reaches the optimum.
 //! The fault injector is process-wide, so this file is a binary of its
 //! own and its tests take turns ([`one_at_a_time`]).
-#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
 
 use arael::__gpu::fault;
 use arael::model::{CrossBlock, MixedEulerAngleParam, Param, SelfBlock};
@@ -101,6 +101,10 @@ fn gpu() -> GpuDevice {
 #[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
 fn gpu() -> GpuDevice {
     GpuDevice::hip(0)
+}
+#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+fn gpu() -> GpuDevice {
+    GpuDevice::cpu()
 }
 
 /// The routes a GPU solve takes: the reduced system with the device

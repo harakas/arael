@@ -4,7 +4,7 @@
 //! guarded off), checked in an f64 root, an f32 root and an f32 root with
 //! `wide = df32`, in both of the device's wide scalars, at points across
 //! the function's domain and off its kinks and cuts, and at its edges.
-#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
 
 use arael::df32;
 use arael::model::{Param, SelfBlock};
@@ -258,11 +258,13 @@ fn perturbed<T: Float>(x: &[T]) -> Vec<T> {
     x.iter().enumerate().map(|(i, &v)| v * T::from(1.0 + 1e-3 * ((i % 7) as f64 - 3.0)).unwrap()).collect()
 }
 
-/// The device: CUDA when it is compiled in, else HIP.
+/// The device: CUDA when it is compiled in, else HIP, else the CPU device.
 #[cfg(feature = "gpu-cuda")]
 type Dev = arael::__gpu::cuda::CudaDevice;
 #[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
 type Dev = arael::__gpu::hip::HipDevice;
+#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+type Dev = arael::__gpu::cpu::CpuDevice;
 
 /// One device per test: its compiled kernels are found again in memory.
 fn device() -> std::sync::Arc<Dev> {

@@ -878,6 +878,13 @@ SparseFaer::from_options(&SparseFaerOptions::default()
     .with_gpu(Some(GpuDevice::cuda(0))))                   // an f32 factor there, solves refined to f64
 ```
 
+`gpu-cpu` runs the same kernels on the CPU, `GpuDevice::cpu()`, for
+testing the GPU route on machines and CI runners without a GPU: the
+host's C++ compiler (`ARAEL_CPU_CXX`, else `CXX`, else `c++`; GCC or
+Clang) compiles them, contracting products into sums as the GPU
+compilers do, and a block's threads run as fibers that switch at
+barriers. It is slow, a test target only.
+
 The factor lives on the device, in the solver's scalar or in `f32` under
 `with_mixed_precision` with the same refinement against the `f64`
 matrix. On the reduced (Schur) route the device does the whole damped
@@ -1003,6 +1010,7 @@ the suite solves:
 
 ```bash
 ARAEL_DEVICE_CHECK=1 ARAEL_DEVICE_CHECK_LOG=check.log cargo test --features gpu-cuda
+ARAEL_DEVICE_CHECK=1 cargo test --features gpu-cpu   # without a GPU
 ```
 
 The device sums without atomic writes, in its wide scalar: `f64`, or

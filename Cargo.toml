@@ -50,11 +50,13 @@ threads = ["dep:rayon", "faer/rayon", "arael-faer/threads", "arael-macros/thread
 rayon = ["threads"]
 # The supernodal block route on a GPU through arael-gpu
 # (`SparseFaerOptions::with_gpu`): `gpu-cuda` and `gpu-hip` pick the runtime,
-# whose libraries load at run time. Off by default; the CPU routes stay the
-# default.
+# whose libraries load at run time; `gpu-cpu` runs the same kernels on the
+# CPU (compiled by the host's C++ compiler), for tests and CI without a GPU.
+# Off by default; the CPU routes stay the default.
 gpu = ["dep:arael-gpu"]
 gpu-cuda = ["gpu", "arael-gpu/cuda"]
 gpu-hip = ["gpu", "arael-gpu/hip"]
+gpu-cpu = ["gpu", "arael-gpu/cpu"]
 
 [dependencies]
 arael-macros = { workspace = true }
