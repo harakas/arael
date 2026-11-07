@@ -29,23 +29,27 @@ pub const TB: usize = 64;
 pub const TK: usize = 16;
 /// The panel step: columns factored per round of the three panel kernels.
 pub const NB: usize = 32;
-/// The blocked panel steps' block ([`wide_syrk`]): columns whose trailing
-/// update past the block runs once, at the block's last step.
-pub const NB_WIDE: usize = 128;
 
-/// The blocked `k_syrk` at panel step `step`: the solved columns from `k0`,
+/// The trailing update (`k_syrk`) of panel step `step` in blocks of
+/// `block` columns, a multiple of [`NB`]: the solved columns from `k0`,
 /// `kn` of them at most, update the columns before `cend` (all of them at
-/// `u32::MAX`). A step inside an [`NB_WIDE`] block updates the rest of its
-/// block; the block's last step updates everything past the block with the
-/// block's columns, so the trailing part is read and written once per
-/// block instead of once per step.
-pub fn wide_syrk(step: usize) -> (u32, u32, u32) {
-    let per = NB_WIDE / NB;
-    let block = step / per;
+/// `u32::MAX`). A step inside a block updates the rest of its block; the
+/// block's last step updates everything past the block with the block's
+/// columns, so the trailing part is read and written once per block. In
+/// blocks of [`NB`] every step updates everything past it.
+///
+/// ```ignore
+/// assert_eq!(syrk_update(5, 32), (160, 32, u32::MAX));
+/// assert_eq!(syrk_update(5, 128), (160, 32, 256)); // inside the block [128, 256)
+/// assert_eq!(syrk_update(7, 128), (128, 128, u32::MAX)); // the block's last step
+/// ```
+pub fn syrk_update(step: usize, block: usize) -> (u32, u32, u32) {
+    let per = block / NB;
+    let b = step / per;
     if step % per == per - 1 {
-        ((block * NB_WIDE) as u32, NB_WIDE as u32, u32::MAX)
+        ((b * block) as u32, block as u32, u32::MAX)
     } else {
-        ((step * NB) as u32, NB as u32, ((block + 1) * NB_WIDE) as u32)
+        ((step * NB) as u32, NB as u32, ((b + 1) * block) as u32)
     }
 }
 /// Rows of x staged per pass of the backward GEMV.
@@ -128,6 +132,28 @@ pub struct GpuSupernodalParams {
     /// blocks, which then subtract atomically; the small updates are cut
     /// into pieces of the level's share of the work.
     pub blocks_per_sm: u32,
+    /// Columns per block of the panel steps' trailing update
+    /// ([`syrk_update`]), a multiple of [`NB`]: in blocks of [`NB`] every
+    /// step updates everything past it; in wider blocks the trailing part
+    /// is read and written once per block. `None` takes the device's choice
+    /// ([`Self::syrk_block_on`]).
+    pub syrk_block: Option<u32>,
+}
+
+impl GpuSupernodalParams {
+    /// [`syrk_block`](Self::syrk_block) on the device `arch`, unset: 128 on
+    /// an integrated GPU or the CPU device, [`NB`] on a discrete GPU.
+    /// Measured on bundle adjustment and SLAM reduced systems: blocks of 128
+    /// are faster on AMD integrated GPUs, whose memory bandwidth bounds the
+    /// update, and slower on an NVIDIA discrete GPU, where the update's
+    /// launches are bound by latency. Discrete AMD GPUs are not measured.
+    ///
+    /// ```ignore
+    /// let block = GpuSupernodalParams::default().syrk_block_on(dev.arch());
+    /// ```
+    pub fn syrk_block_on(&self, arch: &crate::Arch) -> u32 {
+        self.syrk_block.unwrap_or(if arch.integrated { 128 } else { NB as u32 })
+    }
 }
 
 impl Default for GpuSupernodalParams {
@@ -145,6 +171,7 @@ impl Default for GpuSupernodalParams {
             solve_work: 65536,
             lane_unroll: None,
             blocks_per_sm: 4,
+            syrk_block: None,
         }
     }
 }
@@ -407,11 +434,10 @@ pub(crate) struct LevelWork {
     pub bg_items: Vec<u32>,
     /// The widest big target: the number of panel steps is `ceil(maxq_big / NB)`.
     pub maxq_big: u32,
-    /// Per panel step, the trsm and syrk grid sizes, as the kernels count them.
+    /// Per panel step, the trsm and syrk grid sizes, as the kernels count
+    /// them (the syrk's for [`build_levels`]' blocks, [`syrk_update`]).
     pub trsm_grid: Vec<u32>,
     pub syrk_grid: Vec<u32>,
-    /// Per panel step, the blocked syrk's grid size ([`wide_syrk`]).
-    pub syrk_wide_grid: Vec<u32>,
 }
 
 /// Words per big update item ([`LevelWork::big_items`]).
@@ -434,7 +460,7 @@ const MIN_ITEM_WORK: f64 = (TB * TB * TK * 2) as f64;
 
 /// The level schedule of `p` on a device of `multiprocessors`: every
 /// supernode's work sorted into its level.
-pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: u32) -> Vec<LevelWork> {
+pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: u32, syrk_block: usize) -> Vec<LevelWork> {
     let mut lw: Vec<LevelWork> = (0..p.nlevels).map(|_| LevelWork::default()).collect();
     let mut g_works = vec![0usize; p.nlevels];
     let mut small_pairs: Vec<Vec<usize>> = vec![Vec::new(); p.nlevels];
@@ -572,28 +598,23 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
     for w in &mut lw {
         let mut j = 0u32;
         while j < w.maxq_big {
-            let (k0, kn, cend) = wide_syrk(j as usize / NB);
-            let (mut tg, mut sg, mut wg) = (0u32, 0u32, 0u32);
+            let (k0, kn, cend) = syrk_update(j as usize / NB, syrk_block);
+            let (mut tg, mut sg) = (0u32, 0u32);
             for &s in &w.big_targets {
                 let (q, h) = (p.dims[2 * s as usize], p.dims[2 * s as usize + 1]);
                 if k0 < q {
                     let (k1, c1) = ((k0 + kn).min(q), cend.min(q));
                     if k1 < c1 {
-                        wg += (h - k1).div_ceil(TB as u32) * (c1 - k1).div_ceil(TB as u32);
+                        sg += (h - k1).div_ceil(TB as u32) * (c1 - k1).div_ceil(TB as u32);
                     }
                 }
-                if j >= q {
-                    continue;
-                }
-                let nb = (NB as u32).min(q - j);
-                tg += (h - j - nb).div_ceil(TB as u32);
-                if j + nb < q {
-                    sg += (h - j - nb).div_ceil(TB as u32) * (q - j - nb).div_ceil(TB as u32);
+                if j < q {
+                    let nb = (NB as u32).min(q - j);
+                    tg += (h - j - nb).div_ceil(TB as u32);
                 }
             }
             w.trsm_grid.push(tg);
             w.syrk_grid.push(sg);
-            w.syrk_wide_grid.push(wg);
             j += NB as u32;
         }
     }
@@ -764,7 +785,7 @@ mod tests {
     /// [`check_coverage`] on a `k x k` grid.
     fn check_coverage_of(k: usize, kn: &GpuSupernodalParams, multiprocessors: u32, both_kernels: bool) {
         let (p, _, _) = analyse(k);
-        let lw = build_levels(&p, kn, multiprocessors);
+        let lw = build_levels(&p, kn, multiprocessors, NB);
         let dq = |pi: usize| p.dims[2 * p.pairs[pi].d as usize];
         // per element of a pair, the k it is summed over
         let mut hits: Vec<Vec<u32>> = p.pairs.iter().map(|pr| vec![0u32; (pr.m * pr.kw) as usize]).collect();
@@ -883,6 +904,7 @@ mod tests {
             solve_work: 512,
             lane_unroll: None,
             blocks_per_sm: 4,
+            syrk_block: None,
         }
     }
 
@@ -899,7 +921,7 @@ mod tests {
         let kn = every_kernel_busy();
         check_coverage_of(40, &kn, 10_000, true);
         let (p, _, _) = analyse(40);
-        let (whole, cut) = (build_levels(&p, &kn, 1), build_levels(&p, &kn, 10_000));
+        let (whole, cut) = (build_levels(&p, &kn, 1, NB), build_levels(&p, &kn, 10_000, NB));
         let items = |lw: &[LevelWork]| lw.iter().map(|w| w.big_items.len() / BIG_ITEM).sum::<usize>();
         assert!(items(&cut) > items(&whole), "{} items against {}", items(&cut), items(&whole));
         let k_ranges = cut.iter().flat_map(|w| w.big_items.chunks(BIG_ITEM)).filter(|it| it[6] != 0).count();
@@ -931,7 +953,7 @@ mod tests {
         let bound = works[works.len() / 2];
         assert!(works[0] <= bound && bound < works[works.len() - 1], "the grid has narrow supernodes either side of {bound}");
         let kn = GpuSupernodalParams { small_flops: bound, ..GpuSupernodalParams::default() };
-        let lw = build_levels(&p, &kn, 128);
+        let lw = build_levels(&p, &kn, 128, NB);
         for w in &lw {
             for &s in &w.small_targets {
                 assert!(work(s as usize) <= bound, "supernode {s} is small at {} multiply-adds", work(s as usize));
@@ -950,7 +972,7 @@ mod tests {
     fn small_updates_are_cut_to_fill_the_device() {
         let (p, _, _) = analyse(40);
         let kn = GpuSupernodalParams::default();
-        let (whole, cut) = (build_levels(&p, &kn, 1), build_levels(&p, &kn, 10_000));
+        let (whole, cut) = (build_levels(&p, &kn, 1, NB), build_levels(&p, &kn, 10_000, NB));
         let items = |lw: &[LevelWork]| lw.iter().map(|w| w.pair_items.len() / PAIR_ITEM).sum::<usize>();
         assert!(items(&cut) > items(&whole), "{} pieces against {}", items(&cut), items(&whole));
         check_coverage_of(40, &kn, 1, false);
@@ -969,7 +991,7 @@ mod tests {
         let k = widths[widths.len() / 2];
         assert!(widths[0] < k, "the grid has narrower and wider descendants than {k}");
         let kn = GpuSupernodalParams { big_pair_flops: f64::INFINITY, wide_pair_k: k, wide_pair_flops: 0.0, ..GpuSupernodalParams::default() };
-        let lw = build_levels(&p, &kn, 128);
+        let lw = build_levels(&p, &kn, 128, NB);
         let (mut big, mut small) = (0, 0);
         for w in &lw {
             for r in w.big_rects.chunks(5) {
@@ -990,7 +1012,7 @@ mod tests {
     #[test]
     fn chains_take_runs_of_small_levels() {
         let (p, _, _) = analyse(24);
-        let lw = build_levels(&p, &GpuSupernodalParams::default(), 128);
+        let lw = build_levels(&p, &GpuSupernodalParams::default(), 128, NB);
         let work = |w: &LevelWork| w.pair_work + w.small_work;
         let items = |w: &LevelWork| (w.pair_items.len() / PAIR_ITEM) as u32;
         let mut works: Vec<f64> = lw.iter().map(work).collect();
@@ -1019,7 +1041,7 @@ mod tests {
     #[test]
     fn solve_chains_take_runs_of_single_supernodes() {
         let (p, _, _) = analyse(24);
-        let lw = build_levels(&p, &GpuSupernodalParams::default(), 128);
+        let lw = build_levels(&p, &GpuSupernodalParams::default(), 128, NB);
         let mut works: Vec<f64> = lw.iter().filter(|w| w.level_sn.len() == 1).map(|w| w.solve_work).collect();
         works.sort_by(f64::total_cmp);
         assert!(works.len() > 2, "the grid has levels of one supernode");
@@ -1035,6 +1057,47 @@ mod tests {
             assert_eq!(cs.iter().any(|c| c.contains(&l)), fits, "level {l}");
         }
         assert!(!cs.is_empty() && solve_chains(&lw, 0.0).is_empty());
+    }
+
+    /// Unset, the trailing update takes blocks of 128 columns on an
+    /// integrated device and of NB on a discrete one; set, the blocks are
+    /// what it says on every device.
+    #[test]
+    fn the_syrk_block_is_the_devices_unless_set() {
+        let arch = |integrated| crate::Arch { name: String::new(), target: String::new(), warp: 32, shared_bytes: 49152, multiprocessors: 2, has_f64: true, integrated };
+        let unset = GpuSupernodalParams::default();
+        assert_eq!(unset.syrk_block_on(&arch(true)), 128);
+        assert_eq!(unset.syrk_block_on(&arch(false)), NB as u32);
+        let set = GpuSupernodalParams { syrk_block: Some(256), ..unset };
+        assert_eq!((set.syrk_block_on(&arch(true)), set.syrk_block_on(&arch(false))), (256, 256));
+    }
+
+    /// The trailing updates of a block's steps cover every column past each
+    /// solved column once: in blocks of NB, 64, 128 and 256 the columns each
+    /// solved column updates are all those past it.
+    #[test]
+    fn the_syrk_updates_cover_the_trailing_columns_once() {
+        let q = 1000u32;
+        for block in [NB, 64, 128, 256] {
+            // updates[c][k]: how often solved column k updated column c
+            let mut updates = vec![vec![0u32; q as usize]; q as usize];
+            for step in 0..(q as usize).div_ceil(NB) {
+                let (k0, kn, cend) = syrk_update(step, block);
+                let (k1, c1) = ((k0 + kn).min(q), cend.min(q));
+                for c in k1..c1 {
+                    for k in k0..k1 {
+                        updates[c as usize][k as usize] += 1;
+                    }
+                }
+            }
+            for c in 0..q as usize {
+                // column c is updated by every column of the steps before its own
+                let solved_before = c / NB * NB;
+                for k in 0..q as usize {
+                    assert_eq!(updates[c][k], (k < solved_before) as u32, "block {block}: column {c} by {k}");
+                }
+            }
+        }
     }
 
     #[test]

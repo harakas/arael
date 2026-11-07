@@ -464,6 +464,7 @@ impl HipDevice {
                 shared_bytes: prop.sharedMemPerBlock as u32,
                 multiprocessors: prop.multiProcessorCount as u32,
                 has_f64: true,
+                integrated: prop.integrated != 0,
             };
             Ok(HipDevice {
                 l,

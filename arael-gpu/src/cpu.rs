@@ -310,7 +310,7 @@ impl CpuDevice {
         has_fma()?;
         runtime()?;
         Ok(CpuDevice {
-            arch: Arch { name: "CPU".into(), target: "host".into(), warp: 32, shared_bytes: 64 * 1024, multiprocessors: 1, has_f64: true },
+            arch: Arch { name: "CPU".into(), target: "host".into(), warp: 32, shared_bytes: 64 * 1024, multiprocessors: 1, has_f64: true, integrated: true },
             modules: Mutex::new(HashMap::new()),
             capture: Mutex::new(None),
             stream: Mutex::new(()),

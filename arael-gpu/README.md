@@ -125,3 +125,11 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
   and GEMV.
 - `lane_unroll`: the loads in flight of the backward dot products (8 in
   f64, 4 in f32).
+- `syrk_block`: the columns per block of the panel steps' trailing update,
+  a multiple of 32. In blocks of 32 every 32-column step updates
+  everything past it; in wider blocks the trailing part is read and
+  written once per block. Unset, 128 on an integrated GPU (and the CPU
+  device) and 32 on a discrete one: on bundle adjustment and SLAM reduced
+  systems blocks of 128 are faster on AMD integrated GPUs, whose memory
+  bandwidth bounds the update, and slower on an NVIDIA discrete GPU.
+  Discrete AMD GPUs are not measured.

@@ -226,6 +226,9 @@ pub struct Arch {
     pub multiprocessors: u32,
     /// Whether the device computes in f64.
     pub has_f64: bool,
+    /// Whether the device shares the host's memory: an integrated GPU, or
+    /// the CPU device.
+    pub integrated: bool,
 }
 
 impl Arch {
