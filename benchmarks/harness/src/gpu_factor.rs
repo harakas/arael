@@ -9,10 +9,10 @@
 //! ARAEL_GPU (`cuda` or `hip`); GPU_SMALL_Q, GPU_SMALL_FLOPS,
 //! GPU_BIG_PAIR_FLOPS, GPU_WIDE_PAIR_K, GPU_WIDE_PAIR_FLOPS,
 //! GPU_CHAIN_FLOPS_F32, GPU_CHAIN_FLOPS_F64, GPU_CHAIN_ITEMS,
-//! GPU_SOLVE_CHAIN_WORK, GPU_SOLVE_WORK and GPU_BLOCKS_PER_SM override the
-//! device's
-//! `GpuSupernodalParams`; GPU_CHECK_FACTOR=1 compares the f64 factor with
-//! the CPU's, supernode by supernode, and checks 50 more factorizations;
+//! GPU_SOLVE_CHAIN_WORK, GPU_SOLVE_WORK, GPU_BLOCKS_PER_SM and
+//! GPU_SYRK_BLOCK override the device's `GpuSupernodalParams`;
+//! GPU_CHECK_FACTOR=1 compares the f64 factor with the CPU's, supernode by
+//! supernode, and checks 50 more factorizations;
 //! GPU_ORDER picks the elimination order, `amd` (the default) or `nd`
 //! (nested dissection); GPU_LEVELS=1 prints the elimination tree's levels (as the device runs
 //! them, leaves first): supernodes, the widest and the tallest, the
@@ -91,6 +91,9 @@ fn params() -> GpuSupernodalParams {
     }
     if let Some(v) = var("GPU_BLOCKS_PER_SM") {
         p.blocks_per_sm = v as u32;
+    }
+    if let Some(v) = var("GPU_SYRK_BLOCK") {
+        p.syrk_block = Some(v as u32);
     }
     p
 }
