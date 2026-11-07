@@ -10,7 +10,7 @@
 //! GPU_BIG_PAIR_FLOPS, GPU_WIDE_PAIR_K, GPU_WIDE_PAIR_FLOPS,
 //! GPU_CHAIN_FLOPS_F32, GPU_CHAIN_FLOPS_F64, GPU_CHAIN_ITEMS,
 //! GPU_SOLVE_CHAIN_WORK, GPU_GATHER_WORK, GPU_GEMV_WORK, GPU_BLOCKS_PER_SM,
-//! GPU_SYRK_BLOCK and GPU_TRSM_ROWS override the device's
+//! GPU_SYRK_BLOCK, GPU_SYRK_TILE and GPU_TRSM_ROWS override the device's
 //! `GpuSupernodalParams`;
 //! GPU_CHECK_FACTOR=1 compares the f64 factor with the CPU's, supernode by
 //! supernode, and checks 50 more factorizations;
@@ -101,6 +101,9 @@ fn params() -> GpuSupernodalParams {
     }
     if let Some(v) = var("GPU_TRSM_ROWS") {
         p.trsm_rows = Some(v as u32);
+    }
+    if let Some(v) = var("GPU_SYRK_TILE") {
+        p.syrk_tile = Some(v as u32);
     }
     p
 }

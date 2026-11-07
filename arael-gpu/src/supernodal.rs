@@ -259,8 +259,10 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         assert!(syrk_block as usize >= NB && (syrk_block as usize).is_multiple_of(NB), "syrk_block {syrk_block} is a multiple of {NB}");
         let trsm_rows = params.trsm_rows_on(dev.arch());
         assert!(trsm_rows as usize >= NB && (NB * NB).is_multiple_of(trsm_rows as usize), "trsm_rows {trsm_rows} is at least {NB} and divides {NB} * {NB}");
+        let syrk_tile = params.syrk_tile_on(dev.arch(), fs);
+        assert!(syrk_tile == 32 || syrk_tile == 64, "syrk_tile {syrk_tile} is 32 or 64");
         let plan = Plan::new(sn, asym);
-        let lw = build_levels(&plan, params, dev.arch());
+        let lw = build_levels(&plan, params, dev.arch(), fs);
         let lu = params.lane_unroll.unwrap_or(if fs == 4 { 4 } else { 8 });
         assert!(lu >= 2 && lu.is_multiple_of(2), "the lane unroll is even and at least 2");
         // room for every array and its alignment, so the block is not regrown
@@ -362,7 +364,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let work = dev.alloc(sec.bytes)?;
         // the seed's threads per stored tile: the device's lockstep width
         let seed_lanes = dev.arch().warp;
-        let defines = format!("{}{}", wide.defines(), defines(F::CPP, lu, seed_lanes, syrk_block, trsm_rows));
+        let defines = format!("{}{}", wide.defines(), defines(F::CPP, lu, seed_lanes, syrk_block, syrk_tile, trsm_rows));
         let source = format!("{WIDE}\n{SOURCE}");
         let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_f64", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out", "k_tile_inv"];
         let [zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv]: [D::Kernel; 21] =
@@ -706,9 +708,11 @@ impl<D: Device> GpuFactor<D> {
 
 /// The `#define`s of `supernodal.cpp`: the scalar, the lane unroll, the
 /// block sizes, and the tile sizes and plan header slots of [`crate::plan`].
-fn defines(scalar: &str, lu: usize, seed_lanes: u32, syrk_block: u32, trsm_rows: u32) -> String {
+fn defines(scalar: &str, lu: usize, seed_lanes: u32, syrk_block: u32, syrk_tile: u32, trsm_rows: u32) -> String {
     use plan::*;
-    let mut s = format!("#define SCALAR {scalar}\n#define LU {lu}u\n#define THREADS {THREADS}u\n#define SEED_LANES {seed_lanes}u\n#define SYRK_BLOCK {syrk_block}u\n#define TRSM_ROWS {trsm_rows}u\n");
+    let mut s = format!(
+        "#define SCALAR {scalar}\n#define LU {lu}u\n#define THREADS {THREADS}u\n#define SEED_LANES {seed_lanes}u\n#define SYRK_BLOCK {syrk_block}u\n#define SYRK_TB {syrk_tile}u\n#define TRSM_ROWS {trsm_rows}u\n"
+    );
     let consts = [
         ("NB", NB),
         ("TB", TB),
@@ -787,6 +791,7 @@ mod tests {
             blocks_per_sm: 4,
             syrk_block: None,
             trsm_rows: None,
+            syrk_tile: None,
         }
     }
 
@@ -865,7 +870,7 @@ mod tests {
         supernodal_solve(&sn, &cpu, &mut x_cpu, &mut ctx, 1);
         let dev = device();
         // the cut parameters do cut: some big tile is shared between items
-        let lw = plan::build_levels(&Plan::new(&sn, a.symbolic()), &cut_updates(), dev.arch());
+        let lw = plan::build_levels(&Plan::new(&sn, a.symbolic()), &cut_updates(), dev.arch(), 8);
         assert!(lw.iter().any(|w| w.big_items.chunks(plan::BIG_ITEM).any(|it| it[7] == 1)), "a tile cut between items");
         for params in [GpuSupernodalParams::default(), every_kernel_busy(), cut_updates(), small_kernel_only(), chains_everywhere()].into_iter().chain(both_syrks()) {
             let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
@@ -943,22 +948,25 @@ mod tests {
         assert!(rel_residual(&dense, sn.dim(), &x, &rhs) < 1e-10);
     }
 
-    /// The kernels' SYRK_BLOCK and TRSM_ROWS are the sizes asked for
-    /// (`defines` brings `plan`'s names into scope, which once shadowed its
-    /// flag).
+    /// The kernels' SYRK_BLOCK, SYRK_TB and TRSM_ROWS are the sizes asked
+    /// for (`defines` brings `plan`'s names into scope, which once shadowed
+    /// its flag).
     #[test]
-    fn the_defines_carry_the_syrk_block_and_trsm_rows() {
-        assert!(defines("float", 1, 32, 32, 64).contains("#define SYRK_BLOCK 32u\n"));
-        assert!(defines("float", 1, 32, 256, 64).contains("#define SYRK_BLOCK 256u\n"));
-        assert!(defines("float", 1, 32, 32, 32).contains("#define TRSM_ROWS 32u\n"));
-        assert!(defines("float", 1, 32, 32, 128).contains("#define TRSM_ROWS 128u\n"));
+    fn the_defines_carry_the_device_sizes() {
+        assert!(defines("float", 1, 32, 32, 64, 64).contains("#define SYRK_BLOCK 32u\n"));
+        assert!(defines("float", 1, 32, 256, 64, 64).contains("#define SYRK_BLOCK 256u\n"));
+        assert!(defines("float", 1, 32, 32, 32, 64).contains("#define SYRK_TB 32u\n"));
+        assert!(defines("float", 1, 32, 32, 64, 64).contains("#define SYRK_TB 64u\n"));
+        assert!(defines("float", 1, 32, 32, 64, 32).contains("#define TRSM_ROWS 32u\n"));
+        assert!(defines("float", 1, 32, 32, 64, 128).contains("#define TRSM_ROWS 128u\n"));
     }
 
     /// Supernodes wider than two blocks of 128 columns, with rows below them
-    /// and widths no multiple of NB: the factor of `k_syrk` in blocks of NB,
-    /// 64, 128 and 256 columns (`plan::syrk_update`) and of `k_trsm` in
-    /// blocks of 32, 64 and 128 rows is the CPU's, in f64, and an f32 factor
-    /// solves to single precision.
+    /// and widths no multiple of NB: the factor of `k_syrk` in tiles of 32
+    /// and 64, each in blocks of NB, 64, 128 and 256 columns
+    /// (`plan::syrk_update`), and of `k_trsm` in blocks of 32, 64 and 128
+    /// rows is the CPU's, in f64, and an f32 factor solves to single
+    /// precision.
     #[test]
     fn wide_supernodes_with_rows_below_factor_as_on_the_cpu() {
         let (a, dense, rhs) = grid_spd(24, &[3, 6], 11);
@@ -971,13 +979,16 @@ mod tests {
         let mut ctx = SupernodalContext::new();
         supernodal_factorize(&sn, &a, &mut cpu, &mut ctx, 1).unwrap();
         let dev = device();
-        let blocks = [NB as u32, 64, 128, 256].map(|b| GpuSupernodalParams { syrk_block: Some(b), ..GpuSupernodalParams::default() });
+        let blocks = [32, 64].into_iter().flat_map(|t| {
+            [NB as u32, 64, 128, 256].map(|b| GpuSupernodalParams { syrk_block: Some(b), syrk_tile: Some(t), ..GpuSupernodalParams::default() })
+        });
         let rows = [32, 64, 128].map(|r| GpuSupernodalParams { trsm_rows: Some(r), ..GpuSupernodalParams::default() });
-        for params in blocks.into_iter().chain(rows).chain(both_syrks()) {
+        for params in blocks.chain(rows).chain(both_syrks()) {
             let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
             g.factorize(a.vals()).unwrap();
             let err = factor_err(&sn, &g.factor_values().unwrap(), &cpu);
-            assert!(err < 1e-12, "factor err/max {err}, syrk blocks of {:?}, trsm rows {:?}", params.syrk_block, params.trsm_rows);
+            let sizes = (params.syrk_block, params.syrk_tile, params.trsm_rows);
+            assert!(err < 1e-12, "factor err/max {err}, syrk block, syrk tile, trsm rows {sizes:?}");
             let mut x = rhs.clone();
             g.solve(&mut x).unwrap();
             let res = rel_residual(&dense, sn.dim(), &x, &rhs);

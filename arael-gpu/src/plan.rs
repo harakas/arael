@@ -156,6 +156,12 @@ pub struct GpuSupernodalParams {
     /// diagonal tile. `None` takes the device's choice
     /// ([`Self::trsm_rows_on`]).
     pub trsm_rows: Option<u32>,
+    /// Rows and columns of the panel steps' `k_syrk` tiles, 32 or 64, a
+    /// block each. The block of a step's first tile also factors the next
+    /// diagonal tile, so smaller tiles shorten each step's critical path
+    /// and spread a step over more blocks. `None` takes the device's
+    /// choice ([`Self::syrk_tile_on`]).
+    pub syrk_tile: Option<u32>,
 }
 
 impl GpuSupernodalParams {
@@ -202,6 +208,21 @@ impl GpuSupernodalParams {
     pub fn gemv_work_on(&self, arch: &crate::Arch) -> usize {
         self.gemv_work.unwrap_or(if arch.integrated { 16384 } else { 2048 })
     }
+
+    /// [`syrk_tile`](Self::syrk_tile) on the device `arch` for a factor of
+    /// `fs`-byte scalars, unset: 32, except 64 for an `f32` factor on an
+    /// integrated GPU or the CPU device. Measured on SLAM and pose graph
+    /// systems: tiles of 32 are faster in both precisions on an NVIDIA
+    /// discrete GPU, and in `f64` on an AMD integrated GPU, where tiles of
+    /// 64 are faster in `f32`. Discrete AMD GPUs are not measured.
+    ///
+    /// ```ignore
+    /// let tile = GpuSupernodalParams::default().syrk_tile_on(dev.arch(), 8);
+    /// ```
+    pub fn syrk_tile_on(&self, arch: &crate::Arch, fs: usize) -> u32 {
+        self.syrk_tile.unwrap_or(if fs == 4 && arch.integrated { 64 } else { 32 })
+    }
+
 }
 
 impl Default for GpuSupernodalParams {
@@ -222,6 +243,7 @@ impl Default for GpuSupernodalParams {
             blocks_per_sm: 4,
             syrk_block: None,
             trsm_rows: None,
+            syrk_tile: None,
         }
     }
 }
@@ -526,12 +548,13 @@ const MIN_PAIR_WORK: f64 = 2048.0;
 /// The least work (multiply-adds) a big item is cut down to.
 const MIN_ITEM_WORK: f64 = (TB * TB * TK * 2) as f64;
 
-/// The level schedule of `p` on the device `arch`: every supernode's work
-/// sorted into its level and cut into blocks, with the sizes of `kn` that
-/// the device chooses (the panel steps' `syrk_block` and `trsm_rows`, the
-/// solve's `gemv_work`).
-pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, arch: &crate::Arch) -> Vec<LevelWork> {
+/// The level schedule of `p` on the device `arch` for a factor of `fs`-byte
+/// scalars: every supernode's work sorted into its level and cut into
+/// blocks, with the sizes of `kn` that the device chooses (the panel steps'
+/// `syrk_block`, `syrk_tile` and `trsm_rows`, the solve's `gemv_work`).
+pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, arch: &crate::Arch, fs: usize) -> Vec<LevelWork> {
     let syrk_block = kn.syrk_block_on(arch) as usize;
+    let syrk_tile = kn.syrk_tile_on(arch, fs);
     let trsm_rows = kn.trsm_rows_on(arch);
     let gemv_work = kn.gemv_work_on(arch);
     let mut lw: Vec<LevelWork> = (0..p.nlevels).map(|_| LevelWork::default()).collect();
@@ -678,7 +701,7 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, arch: &crate::Arc
                 if k0 < q {
                     let (k1, c1) = ((k0 + kn).min(q), cend.min(q));
                     if k1 < c1 {
-                        sg += (h - k1).div_ceil(TB as u32) * (c1 - k1).div_ceil(TB as u32);
+                        sg += (h - k1).div_ceil(syrk_tile) * (c1 - k1).div_ceil(syrk_tile);
                     }
                 }
                 if j < q {
@@ -883,7 +906,7 @@ mod tests {
     /// [`check_coverage`] on a `k x k` grid.
     fn check_coverage_of(k: usize, kn: &GpuSupernodalParams, multiprocessors: u32, both_kernels: bool) {
         let (p, _, _) = analyse(k);
-        let lw = build_levels(&p, kn, &discrete(multiprocessors));
+        let lw = build_levels(&p, kn, &discrete(multiprocessors), 8);
         let dq = |pi: usize| p.dims[2 * p.pairs[pi].d as usize];
         // per element of a pair, the k it is summed over
         let mut hits: Vec<Vec<u32>> = p.pairs.iter().map(|pr| vec![0u32; (pr.m * pr.kw) as usize]).collect();
@@ -1011,6 +1034,7 @@ mod tests {
             blocks_per_sm: 4,
             syrk_block: None,
             trsm_rows: None,
+            syrk_tile: None,
         }
     }
 
@@ -1027,7 +1051,7 @@ mod tests {
         let kn = every_kernel_busy();
         check_coverage_of(40, &kn, 10_000, true);
         let (p, _, _) = analyse(40);
-        let (whole, cut) = (build_levels(&p, &kn, &discrete(1)), build_levels(&p, &kn, &discrete(10_000)));
+        let (whole, cut) = (build_levels(&p, &kn, &discrete(1), 8), build_levels(&p, &kn, &discrete(10_000), 8));
         let items = |lw: &[LevelWork]| lw.iter().map(|w| w.big_items.len() / BIG_ITEM).sum::<usize>();
         assert!(items(&cut) > items(&whole), "{} items against {}", items(&cut), items(&whole));
         let k_ranges = cut.iter().flat_map(|w| w.big_items.chunks(BIG_ITEM)).filter(|it| it[6] != 0).count();
@@ -1057,7 +1081,7 @@ mod tests {
             check_coverage_of(40, &kn, multiprocessors, true);
             let blocks = (multiprocessors * kn.blocks_per_sm) as f64;
             let mut levels = 0;
-            for w in build_levels(&p, &kn, &discrete(multiprocessors)) {
+            for w in build_levels(&p, &kn, &discrete(multiprocessors), 8) {
                 let rect_work = |r: u32| slab_work(dq(w.big_rects[5 * r as usize]));
                 let total: f64 = (0..(w.big_rects.len() / 5) as u32).map(rect_work).sum();
                 let cap = (total / blocks).max(MIN_ITEM_WORK);
@@ -1090,7 +1114,7 @@ mod tests {
         let bound = works[works.len() / 2];
         assert!(works[0] <= bound && bound < works[works.len() - 1], "the grid has narrow supernodes either side of {bound}");
         let kn = GpuSupernodalParams { small_flops: bound, ..GpuSupernodalParams::default() };
-        let lw = build_levels(&p, &kn, &discrete(128));
+        let lw = build_levels(&p, &kn, &discrete(128), 8);
         for w in &lw {
             for &s in &w.small_targets {
                 assert!(work(s as usize) <= bound, "supernode {s} is small at {} multiply-adds", work(s as usize));
@@ -1109,7 +1133,7 @@ mod tests {
     fn small_updates_are_cut_to_fill_the_device() {
         let (p, _, _) = analyse(40);
         let kn = GpuSupernodalParams::default();
-        let (whole, cut) = (build_levels(&p, &kn, &discrete(1)), build_levels(&p, &kn, &discrete(10_000)));
+        let (whole, cut) = (build_levels(&p, &kn, &discrete(1), 8), build_levels(&p, &kn, &discrete(10_000), 8));
         let items = |lw: &[LevelWork]| lw.iter().map(|w| w.pair_items.len() / PAIR_ITEM).sum::<usize>();
         assert!(items(&cut) > items(&whole), "{} pieces against {}", items(&cut), items(&whole));
         check_coverage_of(40, &kn, 1, false);
@@ -1128,7 +1152,7 @@ mod tests {
         let k = widths[widths.len() / 2];
         assert!(widths[0] < k, "the grid has narrower and wider descendants than {k}");
         let kn = GpuSupernodalParams { big_pair_flops: f64::INFINITY, wide_pair_k: k, wide_pair_flops: 0.0, ..GpuSupernodalParams::default() };
-        let lw = build_levels(&p, &kn, &discrete(128));
+        let lw = build_levels(&p, &kn, &discrete(128), 8);
         let (mut big, mut small) = (0, 0);
         for w in &lw {
             for r in w.big_rects.chunks(5) {
@@ -1149,7 +1173,7 @@ mod tests {
     #[test]
     fn chains_take_runs_of_small_levels() {
         let (p, _, _) = analyse(24);
-        let lw = build_levels(&p, &GpuSupernodalParams::default(), &discrete(128));
+        let lw = build_levels(&p, &GpuSupernodalParams::default(), &discrete(128), 8);
         let work = |w: &LevelWork| w.pair_work + w.small_work;
         let items = |w: &LevelWork| (w.pair_items.len() / PAIR_ITEM) as u32;
         let mut works: Vec<f64> = lw.iter().map(work).collect();
@@ -1178,7 +1202,7 @@ mod tests {
     #[test]
     fn solve_chains_take_runs_of_single_supernodes() {
         let (p, _, _) = analyse(24);
-        let lw = build_levels(&p, &GpuSupernodalParams::default(), &discrete(128));
+        let lw = build_levels(&p, &GpuSupernodalParams::default(), &discrete(128), 8);
         let mut works: Vec<f64> = lw.iter().filter(|w| w.level_sn.len() == 1).map(|w| w.solve_work).collect();
         works.sort_by(f64::total_cmp);
         assert!(works.len() > 2, "the grid has levels of one supernode");
@@ -1253,6 +1277,17 @@ mod tests {
         assert_eq!(p.inv_tiles().len(), 2 * next as usize);
     }
 
+    /// Unset, `k_syrk` takes tiles of 32, except 64 for an f32 factor on an
+    /// integrated device; set, what it says on every device.
+    #[test]
+    fn the_syrk_tile_is_the_devices_unless_set() {
+        let unset = GpuSupernodalParams::default();
+        assert_eq!((unset.syrk_tile_on(&arch(2, 32, true), 8), unset.syrk_tile_on(&arch(2, 32, true), 4)), (32, 64));
+        assert_eq!((unset.syrk_tile_on(&discrete(128), 8), unset.syrk_tile_on(&discrete(128), 4)), (32, 32));
+        let set = GpuSupernodalParams { syrk_tile: Some(64), ..unset };
+        assert_eq!((set.syrk_tile_on(&arch(2, 32, true), 8), set.syrk_tile_on(&discrete(128), 4)), (64, 64));
+    }
+
     /// Unset, the solve's GEMV takes blocks of 16384 multiply-adds on an
     /// integrated device and of 2048 on a discrete one; set, what it says
     /// on every device.
@@ -1276,7 +1311,7 @@ mod tests {
         let count = |a: &crate::Arch| {
             let work = kn.gemv_work_on(a);
             let mut items = 0;
-            for w in build_levels(&p, &kn, a) {
+            for w in build_levels(&p, &kn, a, 8) {
                 for it in w.bg_items.chunks(3) {
                     let (s, c0, c1) = (it[0] as usize, it[1], it[2]);
                     let rows = (p.dims[2 * s + 1] - p.dims[2 * s]) as usize;

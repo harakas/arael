@@ -139,6 +139,14 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
   systems blocks of 128 are faster on AMD integrated GPUs, whose memory
   bandwidth bounds the update, and slower on an NVIDIA discrete GPU.
   Discrete AMD GPUs are not measured.
+- `syrk_tile`: the rows and columns of the panel steps' trailing update
+  tiles, 32 or 64, a block each. The block of a step's first tile also
+  factors the next diagonal tile, so smaller tiles shorten each step and
+  spread it over more blocks. Unset, 32, except 64 for an `f32` factor on
+  an integrated GPU (and the CPU device): on SLAM and pose graph systems
+  tiles of 32 are faster in both precisions on an NVIDIA discrete GPU and
+  in `f64` on an AMD integrated GPU, tiles of 64 in `f32` there.
+  Discrete AMD GPUs are not measured.
 - `trsm_rows`: the rows per block of the panel steps' triangular solve,
   at least 32 and a divisor of 1024. Smaller blocks spread a step's rows
   over more blocks, and every block copies the step's 32 x 32 diagonal

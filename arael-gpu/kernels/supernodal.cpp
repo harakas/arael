@@ -6,7 +6,8 @@
 // it solves (wide.h, in front of this) and LU; the tile sizes (NB, TB, TK,
 // PAIR_*, XR_CH) and the plan header's slots (H_*) come from plan.rs
 // as #defines, THREADS (the block size of every kernel but k_trsm, which
-// runs TB) from supernodal.rs. One launch per level unless said.
+// runs TRSM_ROWS, and k_tile_inv) and the device's sizes (SYRK_BLOCK,
+// SYRK_TB, TRSM_ROWS) from supernodal.rs. One launch per level unless said.
 //
 // The solve's kernels take a `gate`: they do nothing unless gate[0] is
 // nonzero, so a refinement can stop on the device and the steps launched
@@ -682,23 +683,29 @@ KERNEL_THREADS(TRSM_ROWS) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npa
 #error "supernodal.cpp: SYRK_BLOCK is a multiple of NB"
 #endif
 
+#if SYRK_TB != 32 && SYRK_TB != 64
+#error "supernodal.cpp: SYRK_TB is 32 or 64"
+#endif
+// A k_syrk thread's accumulator rows (and columns) in its tile, 16 apart.
+#define SYRK_R (SYRK_TB / 16)
+
 // One slab of nk staged columns into a thread's accumulators: rows
-// tx + 16 r of sa against columns ty + 16 c of sb, acc[4 r + c]. On a
+// tx + 16 r of sa against columns ty + 16 c of sb, acc[SYRK_R r + c]. On a
 // diagonal tile (DIAG) the accumulators with r < c lie wholly above the
 // diagonal, which the tile does not write, and are skipped.
-template <bool DIAG> DEVICE_INLINE void syrk_slab(F (&acc)[16], SHARED_PTR const F* sa, SHARED_PTR const F* sb, u32 nk, u32 tx, u32 ty) {
+template <bool DIAG> DEVICE_INLINE void syrk_slab(F (&acc)[SYRK_R * SYRK_R], SHARED_PTR const F* sa, SHARED_PTR const F* sb, u32 nk, u32 tx, u32 ty) {
     for (u32 kk = 0; kk < nk; kk++) {
-        F a[4];
-        F b[4];
+        F a[SYRK_R];
+        F b[SYRK_R];
 #pragma unroll
-        for (u32 r = 0; r < 4; r++) a[r] = sa[kk * TB + tx + 16 * r];
+        for (u32 r = 0; r < SYRK_R; r++) a[r] = sa[kk * SYRK_TB + tx + 16 * r];
 #pragma unroll
-        for (u32 c = 0; c < 4; c++) b[c] = sb[kk * TB + ty + 16 * c];
+        for (u32 c = 0; c < SYRK_R; c++) b[c] = sb[kk * SYRK_TB + ty + 16 * c];
 #pragma unroll
-        for (u32 r = 0; r < 4; r++) {
+        for (u32 r = 0; r < SYRK_R; r++) {
 #pragma unroll
-            for (u32 c = 0; c < 4; c++) {
-                if (!DIAG || r >= c) acc[r * 4 + c] += a[r] * b[c];
+            for (u32 c = 0; c < SYRK_R; c++) {
+                if (!DIAG || r >= c) acc[r * SYRK_R + c] += a[r] * b[c];
             }
         }
     }
@@ -706,21 +713,21 @@ template <bool DIAG> DEVICE_INLINE void syrk_slab(F (&acc)[16], SHARED_PTR const
 
 // Panel step, part three: the update of the trailing lower trapezoid by
 // the solved columns [k0, k1), k1 = min(k0 + kn, q), over rows [k1, h) and
-// columns [k1, c1), c1 = min(cend, q), in TB x TB tiles (plan::syrk_update
-// picks k0, kn and cend per step for blocks of SYRK_BLOCK columns: a step
-// inside a block updates the rest of its block, the block's last step
-// everything past it); tiles above the diagonal are skipped and the
-// straddling tile clipped. The columns stream through shared memory NB at
-// a time into the tile's accumulators, so a tile is read and written once
-// per update; the loop's trip count is constant, so with SYRK_BLOCK = NB
-// it is a single pass. A thread takes the rows tx + 16 r and columns
-// ty + 16 c, so neighbouring threads read and write neighbouring rows. The
-// block index walks the panels' tile counts. The block of a panel's tile
-// (0, 0), which alone writes the next diagonal tile (at k1), then factors
-// it (potf2_warp).
+// columns [k1, c1), c1 = min(cend, q), in SYRK_TB x SYRK_TB tiles
+// (plan::syrk_update picks k0, kn and cend per step for blocks of
+// SYRK_BLOCK columns: a step inside a block updates the rest of its block,
+// the block's last step everything past it); tiles above the diagonal are
+// skipped and the straddling tile clipped. The columns stream through
+// shared memory NB at a time into the tile's accumulators, so a tile is
+// read and written once per update; the loop's trip count is constant, so
+// with SYRK_BLOCK = NB it is a single pass. A thread takes the
+// rows tx + 16 r and columns ty + 16 c, so neighbouring threads read and
+// write neighbouring rows. The block index walks the panels' tile counts.
+// The block of a panel's tile (0, 0), which alone writes the next diagonal
+// tile (at k1, SYRK_TB >= NB), then factors it (potf2_warp).
 KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u32 kn, u32 cend, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
-    SHARED F sa[NB * TB];
-    SHARED F sb[NB * TB];
+    SHARED F sa[NB * SYRK_TB];
+    SHARED F sb[NB * SYRK_TB];
     u32 o_dims = plan[H_DIMS];
     u32 o_val_ptr = plan[H_VAL_PTR];
     u32 idx = block_x();
@@ -746,8 +753,8 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
                 cols = c1 - k1;
             }
         }
-        nct = (cols + TB - 1) / TB;
-        u32 tiles = ((rows + TB - 1) / TB) * nct;
+        nct = (cols + SYRK_TB - 1) / SYRK_TB;
+        u32 tiles = ((rows + SYRK_TB - 1) / SYRK_TB) * nct;
         if (idx < tiles) {
             found = true;
         } else {
@@ -759,27 +766,27 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
     u32 ti = idx / nct;
     u32 tj = idx - ti * nct;
     if (ti < tj) return;
-    u32 row0 = k1 + ti * TB;
-    u32 col0 = k1 + tj * TB;
-    u32 nrows = min(h - row0, TB);
-    u32 ncols = min(c1 - col0, TB);
+    u32 row0 = k1 + ti * SYRK_TB;
+    u32 col0 = k1 + tj * SYRK_TB;
+    u32 nrows = min(h - row0, SYRK_TB);
+    u32 ncols = min(c1 - col0, SYRK_TB);
     u32 panel = plan[o_val_ptr + s];
     u32 t = thread_x();
     const u32 nt = THREADS;
     u32 tx = t % 16;
     u32 ty = t / 16;
-    F acc[16];
+    F acc[SYRK_R * SYRK_R];
 #pragma unroll
-    for (u32 z = 0; z < 16; z++) acc[z] = F(0);
+    for (u32 z = 0; z < SYRK_R * SYRK_R; z++) acc[z] = F(0);
     for (u32 sl = 0; sl < SYRK_BLOCK / NB; sl++) {
         u32 kb = k0 + sl * NB;
         if (kb >= k1) break;
         u32 nk = min(k1 - kb, NB);
         // the previous slab's reads are done
         if (sl > 0) BARRIER();
-        for (u32 e = t; e < NB * TB; e += nt) {
-            u32 k = e / TB;
-            u32 i = e - k * TB;
+        for (u32 e = t; e < NB * SYRK_TB; e += nt) {
+            u32 k = e / SYRK_TB;
+            u32 i = e - k * SYRK_TB;
             F va = F(0);
             F vb = F(0);
             if (k < nk && i < nrows) va = factor[panel + (kb + k) * h + row0 + i];
@@ -796,12 +803,12 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
         }
     }
 #pragma unroll
-    for (u32 r = 0; r < 4; r++) {
+    for (u32 r = 0; r < SYRK_R; r++) {
 #pragma unroll
-        for (u32 c = 0; c < 4; c++) {
+        for (u32 c = 0; c < SYRK_R; c++) {
             u32 i = tx + 16 * r;
             u32 jj = ty + 16 * c;
-            if (i < nrows && jj < ncols && row0 + i >= col0 + jj) factor[panel + (col0 + jj) * h + row0 + i] -= acc[r * 4 + c];
+            if (i < nrows && jj < ncols && row0 + i >= col0 + jj) factor[panel + (col0 + jj) * h + row0 + i] -= acc[r * SYRK_R + c];
         }
     }
     if (ti == 0 && tj == 0) {
