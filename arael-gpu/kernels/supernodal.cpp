@@ -682,6 +682,28 @@ KERNEL_THREADS(TRSM_ROWS) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npa
 #error "supernodal.cpp: SYRK_BLOCK is a multiple of NB"
 #endif
 
+// One slab of nk staged columns into a thread's accumulators: rows
+// tx + 16 r of sa against columns ty + 16 c of sb, acc[4 r + c]. On a
+// diagonal tile (DIAG) the accumulators with r < c lie wholly above the
+// diagonal, which the tile does not write, and are skipped.
+template <bool DIAG> DEVICE_INLINE void syrk_slab(F (&acc)[16], SHARED_PTR const F* sa, SHARED_PTR const F* sb, u32 nk, u32 tx, u32 ty) {
+    for (u32 kk = 0; kk < nk; kk++) {
+        F a[4];
+        F b[4];
+#pragma unroll
+        for (u32 r = 0; r < 4; r++) a[r] = sa[kk * TB + tx + 16 * r];
+#pragma unroll
+        for (u32 c = 0; c < 4; c++) b[c] = sb[kk * TB + ty + 16 * c];
+#pragma unroll
+        for (u32 r = 0; r < 4; r++) {
+#pragma unroll
+            for (u32 c = 0; c < 4; c++) {
+                if (!DIAG || r >= c) acc[r * 4 + c] += a[r] * b[c];
+            }
+        }
+    }
+}
+
 // Panel step, part three: the update of the trailing lower trapezoid by
 // the solved columns [k0, k1), k1 = min(k0 + kn, q), over rows [k1, h) and
 // columns [k1, c1), c1 = min(cend, q), in TB x TB tiles (plan::syrk_update
@@ -766,31 +788,11 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
             sb[e] = vb;
         }
         BARRIER();
-        for (u32 kk = 0; kk < nk; kk++) {
-            F a0 = sa[kk * TB + tx];
-            F a1 = sa[kk * TB + tx + 16];
-            F a2 = sa[kk * TB + tx + 32];
-            F a3 = sa[kk * TB + tx + 48];
-            F b0 = sb[kk * TB + ty];
-            F b1 = sb[kk * TB + ty + 16];
-            F b2 = sb[kk * TB + ty + 32];
-            F b3 = sb[kk * TB + ty + 48];
-            acc[0] += a0 * b0;
-            acc[1] += a0 * b1;
-            acc[2] += a0 * b2;
-            acc[3] += a0 * b3;
-            acc[4] += a1 * b0;
-            acc[5] += a1 * b1;
-            acc[6] += a1 * b2;
-            acc[7] += a1 * b3;
-            acc[8] += a2 * b0;
-            acc[9] += a2 * b1;
-            acc[10] += a2 * b2;
-            acc[11] += a2 * b3;
-            acc[12] += a3 * b0;
-            acc[13] += a3 * b1;
-            acc[14] += a3 * b2;
-            acc[15] += a3 * b3;
+        // the branch is uniform: a block's tile is diagonal or not
+        if (ti == tj) {
+            syrk_slab<true>(acc, sa, sb, nk, tx, ty);
+        } else {
+            syrk_slab<false>(acc, sa, sb, nk, tx, ty);
         }
     }
 #pragma unroll
