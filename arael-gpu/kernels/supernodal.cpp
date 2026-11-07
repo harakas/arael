@@ -597,8 +597,8 @@ KERNEL_THREADS_REGS(NB) void k_potf2(GLOBAL const u32* RESTRICT panels, GLOBAL c
     potf2_warp(factor, plan[o_val_ptr + s], h, min(q, NB), thread_x(), fail, s);
 }
 
-#if NB * NB % TRSM_ROWS != 0
-#error "supernodal.cpp: TRSM_ROWS divides NB * NB"
+#if NB * NB % TRSM_ROWS != 0 || TRSM_ROWS < NB
+#error "supernodal.cpp: TRSM_ROWS divides NB * NB and is at least NB"
 #endif
 
 // Panel step, part two: the rows below the step's diagonal tile,

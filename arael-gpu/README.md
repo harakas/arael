@@ -133,3 +133,11 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
   systems blocks of 128 are faster on AMD integrated GPUs, whose memory
   bandwidth bounds the update, and slower on an NVIDIA discrete GPU.
   Discrete AMD GPUs are not measured.
+- `trsm_rows`: the rows per block of the panel steps' triangular solve,
+  at least 32 and a divisor of 1024. Smaller blocks spread a step's rows
+  over more blocks, and every block copies the step's 32 x 32 diagonal
+  tile. Unset, 64 on an integrated GPU (and the CPU device) and a warp on
+  a discrete one: on bundle adjustment and SLAM reduced systems a warp
+  per block is faster on an NVIDIA discrete GPU, whose solve launches
+  mostly have fewer blocks than multiprocessors, and 64 rows on an AMD
+  integrated GPU, which they fill. Discrete AMD GPUs are not measured.
