@@ -29,6 +29,9 @@ pub const TB: usize = 64;
 pub const TK: usize = 16;
 /// The panel step: columns factored per round of the three panel kernels.
 pub const NB: usize = 32;
+/// Rows per block of the panel step's `k_trsm`, a warp: the rows below a
+/// step's diagonal tile spread over as many blocks as possible.
+pub const TRSM_ROWS: usize = 32;
 
 /// The trailing update (`k_syrk`) of panel step `step` in blocks of
 /// `block` columns, a multiple of [`NB`]: the solved columns from `k0`,
@@ -610,7 +613,7 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
                 }
                 if j < q {
                     let nb = (NB as u32).min(q - j);
-                    tg += (h - j - nb).div_ceil(TB as u32);
+                    tg += (h - j - nb).div_ceil(TRSM_ROWS as u32);
                 }
             }
             w.trsm_grid.push(tg);

@@ -597,12 +597,20 @@ KERNEL_THREADS_REGS(NB) void k_potf2(GLOBAL const u32* RESTRICT panels, GLOBAL c
     potf2_warp(factor, plan[o_val_ptr + s], h, min(q, NB), thread_x(), fail, s);
 }
 
+#if NB * NB % TRSM_ROWS != 0
+#error "supernodal.cpp: TRSM_ROWS divides NB * NB"
+#endif
+
 // Panel step, part two: the rows below the step's diagonal tile,
-// right-solved against it (L21 = A21 L11^-T); TB rows per block of TB
-// threads, the block index walking the level's panels through their
-// row-chunk counts.
-KERNEL_THREADS(TB) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 j, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor) {
-    SHARED F l[NB * NB];
+// right-solved against it (L21 = A21 L11^-T); TRSM_ROWS rows per block of
+// TRSM_ROWS threads, the block index walking the level's panels through
+// their row-chunk counts. Right-looking: column k is finished, then taken
+// off the columns after it, so a value gets the same multiply-adds in the
+// same order as in a left-looking solve, but the dependent chain is two
+// operations per column instead of one per column before it.
+KERNEL_THREADS(TRSM_ROWS) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 j, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor) {
+    // the diagonal tile's lower part, column-major: column k at lc[k NB]
+    SHARED F lc[NB * NB];
     // the diagonal's reciprocals: one division per column, not per row
     SHARED F dinv[NB];
     u32 o_dims = plan[H_DIMS];
@@ -619,7 +627,7 @@ KERNEL_THREADS(TB) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u
         h = plan[o_dims + 2 * s + 1];
         u32 rows = 0;
         if (j < q) rows = h - j - min(q - j, NB);
-        u32 chunks = (rows + TB - 1) / TB;
+        u32 chunks = (rows + TRSM_ROWS - 1) / TRSM_ROWS;
         if (idx < chunks) {
             found = true;
         } else {
@@ -631,18 +639,21 @@ KERNEL_THREADS(TB) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u
     u32 nb = min(q - j, NB);
     u32 panel = plan[o_val_ptr + s];
     u32 t = thread_x();
-    const u32 nt = TB;
-    for (u32 e = t; e < NB * NB; e += nt) {
-        u32 r = e / NB;
-        u32 c = e - r * NB;
+    // consecutive threads read consecutive rows of a column; the passes are
+    // independent loads, all in flight at once
+#pragma unroll
+    for (u32 pass = 0; pass < NB * NB / TRSM_ROWS; pass++) {
+        u32 e = pass * TRSM_ROWS + t;
+        u32 c = e / NB;
+        u32 r = e - c * NB;
         F v = F(0);
         if (r < nb && c <= r) v = factor[panel + (j + c) * h + j + r];
-        l[e] = v;
+        lc[e] = v;
     }
     BARRIER();
-    if (t < nb) dinv[t] = F(1) / l[t * NB + t];
+    if (t < nb) dinv[t] = F(1) / lc[t * NB + t];
     BARRIER();
-    u32 i = j + nb + idx * TB + t;
+    u32 i = j + nb + idx * TRSM_ROWS + t;
     if (i < h) {
         // The loops run to the constant NB and skip the columns past nb, so
         // they unroll fully, every index into v is a constant and the row
@@ -652,12 +663,12 @@ KERNEL_THREADS(TB) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u
 #pragma unroll
         for (u32 c = 0; c < NB; c++) v[c] = c < nb ? factor[panel + (j + c) * h + i] : F(0);
 #pragma unroll
-        for (u32 c = 0; c < NB; c++) {
-            if (c < nb) {
-                F x = v[c];
+        for (u32 k = 0; k < NB; k++) {
+            if (k < nb) {
+                v[k] *= dinv[k];
+                // the columns past nb hold zeros and stay zero
 #pragma unroll
-                for (u32 k = 0; k < c; k++) x -= v[k] * l[c * NB + k];
-                v[c] = x * dinv[c];
+                for (u32 c = k + 1; c < NB; c++) v[c] -= v[k] * lc[k * NB + c];
             }
         }
 #pragma unroll

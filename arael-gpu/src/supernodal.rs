@@ -11,7 +11,7 @@ use arael_faer::bsc::SymbolicSparseBlockColMat;
 use arael_faer::schur::SchurReal;
 use arael_faer::supernodal::SupernodalSymbolic;
 
-use crate::plan::{self, GpuSupernodalParams, NB, Plan, SparseIndex, TB, build_levels};
+use crate::plan::{self, GpuSupernodalParams, NB, Plan, SparseIndex, build_levels};
 use crate::{Arg, Device, GpuError, Launch, Scalar, WIDE, Wide, is_f64, scalar_bytes};
 
 /// Arrays packed into one block, each starting on a 256-byte boundary.
@@ -38,7 +38,7 @@ impl Packer {
 /// The kernels, compiled per scalar and lane unroll.
 const SOURCE: &str = include_str!("../kernels/supernodal.cpp");
 
-/// Threads per block of every kernel but `k_trsm`, which runs TB.
+/// Threads per block of every kernel but `k_trsm`, which runs TRSM_ROWS.
 const THREADS: u32 = 256;
 const _: () = assert!(plan::GATHER_ITEM_ROWS == THREADS, "a gather item is a row a thread");
 
@@ -459,7 +459,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 let j = Arg::U32((step * NB) as u32);
                 let args = [list(l.big), Arg::U32(l.n_big), j, plan, factor];
                 if tg > 0 {
-                    self.run(&self.k.trsm, tg, TB as u32, 0, &args)?;
+                    self.run(&self.k.trsm, tg, plan::TRSM_ROWS as u32, 0, &args)?;
                 }
                 if sg > 0 {
                     let (k0, kn, cend) = plan::syrk_update(step, self.syrk_block as usize);
@@ -686,6 +686,7 @@ fn defines(scalar: &str, lu: usize, seed_lanes: u32, syrk_block: u32) -> String 
         ("NB", NB),
         ("TB", TB),
         ("TK", TK),
+        ("TRSM_ROWS", plan::TRSM_ROWS),
         ("BIG_ITEM", plan::BIG_ITEM),
         ("PAIR_ITEM", plan::PAIR_ITEM),
         ("PAIR_NI", PAIR_NI),
