@@ -162,6 +162,12 @@ pub struct GpuSupernodalParams {
     /// and spread a step over more blocks. `None` takes the device's
     /// choice ([`Self::syrk_tile_on`]).
     pub syrk_tile: Option<u32>,
+    /// Whether the panel steps factor a diagonal tile of [`NB`] columns
+    /// with its pivots unrolled and each column broadcast through shared
+    /// memory (`potf2_full`) instead of the loop with shuffles; both
+    /// compute the same factor. `None` takes the device's choice
+    /// ([`Self::potf2_unroll_on`]).
+    pub potf2_unroll: Option<bool>,
 }
 
 impl GpuSupernodalParams {
@@ -223,6 +229,19 @@ impl GpuSupernodalParams {
         self.syrk_tile.unwrap_or(if fs == 4 && arch.integrated { 64 } else { 32 })
     }
 
+    /// [`potf2_unroll`](Self::potf2_unroll) on the device `arch`, unset:
+    /// on a discrete GPU, not on an integrated GPU or the CPU device.
+    /// Measured on bundle adjustment and SLAM reduced systems: unrolled is
+    /// faster on an NVIDIA discrete GPU (the slam factor 10 to 20%), slower
+    /// on an AMD integrated GPU (its registers lower the occupancy of every
+    /// `k_syrk` block). Discrete AMD GPUs are not measured.
+    ///
+    /// ```ignore
+    /// let unroll = GpuSupernodalParams::default().potf2_unroll_on(dev.arch());
+    /// ```
+    pub fn potf2_unroll_on(&self, arch: &crate::Arch) -> bool {
+        self.potf2_unroll.unwrap_or(!arch.integrated)
+    }
 }
 
 impl Default for GpuSupernodalParams {
@@ -244,6 +263,7 @@ impl Default for GpuSupernodalParams {
             syrk_block: None,
             trsm_rows: None,
             syrk_tile: None,
+            potf2_unroll: None,
         }
     }
 }
@@ -1035,6 +1055,7 @@ mod tests {
             syrk_block: None,
             trsm_rows: None,
             syrk_tile: None,
+            potf2_unroll: None,
         }
     }
 
@@ -1275,6 +1296,17 @@ mod tests {
         }
         assert!(wide > 1, "supernodes wider than NB: {wide}");
         assert_eq!(p.inv_tiles().len(), 2 * next as usize);
+    }
+
+    /// Unset, the panel steps unroll a full diagonal tile's pivots on a
+    /// discrete device, not on an integrated one; set, what it says on
+    /// every device.
+    #[test]
+    fn the_potf2_unroll_is_the_devices_unless_set() {
+        let unset = GpuSupernodalParams::default();
+        assert_eq!((unset.potf2_unroll_on(&arch(2, 32, true)), unset.potf2_unroll_on(&discrete(128))), (false, true));
+        let set = GpuSupernodalParams { potf2_unroll: Some(true), ..unset };
+        assert_eq!((set.potf2_unroll_on(&arch(2, 32, true)), set.potf2_unroll_on(&discrete(128))), (true, true));
     }
 
     /// Unset, `k_syrk` takes tiles of 32, except 64 for an f32 factor on an

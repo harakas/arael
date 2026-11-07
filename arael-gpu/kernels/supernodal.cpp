@@ -6,8 +6,9 @@
 // it solves (wide.h, in front of this) and LU; the tile sizes (NB, TB, TK,
 // PAIR_*, XR_CH) and the plan header's slots (H_*) come from plan.rs
 // as #defines, THREADS (the block size of every kernel but k_trsm, which
-// runs TRSM_ROWS, and k_tile_inv) and the device's sizes (SYRK_BLOCK,
-// SYRK_TB, TRSM_ROWS) from supernodal.rs. One launch per level unless said.
+// runs TRSM_ROWS, and k_tile_inv), SCALAR_BYTES and the device's sizes
+// (SYRK_BLOCK, SYRK_TB, TRSM_ROWS, POTF2_UNROLL) from supernodal.rs. One
+// launch per level unless said.
 //
 // The solve's kernels take a `gate`: they do nothing unless gate[0] is
 // nonzero, so a refinement can stop on the device and the steps launched
@@ -328,16 +329,55 @@ DEVICE_INLINE void potf2_steps(F (&a)[NB], u32 lane, u32 nb, u32& k, F& dr, bool
     }
 }
 
+// potf2_regs on a full tile (nb == NB): the 32 pivots unrolled, so every
+// index is a constant and row r keeps column c in a[c], without shifts;
+// column k reaches the lanes through `col` (2 NB values of shared memory,
+// its halves taken by turns, so one warp barrier a step) instead of a
+// shuffle per column. The multiply-adds are potf2_steps', in its order.
+template <typename Out>
+DEVICE_INLINE bool potf2_full(F (&a)[NB], u32 lane, F& dr, Out& out, SHARED_PTR F* col) {
+    bool bad = false;
+#pragma unroll
+    for (u32 k = 0; k < NB; k++) {
+        F d = shfl(a[k], k);
+        if (!(d > F(0))) {
+            bad = true;
+            d = F(1);
+        }
+        F rk = rsqrt(d);
+        F lkk = d * rk;
+        if (lane == k) {
+            a[k] = lkk;
+            dr = rk;
+        } else if (lane > k) {
+            a[k] = a[k] * rk;
+        }
+        out.put(k, a[k]);
+        SHARED_PTR F* ck = col + (k % 2) * NB;
+        ck[lane] = a[k];
+        WARP_BARRIER();
+#pragma unroll
+        for (u32 c = k + 1; c < NB; c++) {
+            if (lane >= c) a[c] -= a[k] * ck[c];
+        }
+    }
+    return bad;
+}
+
 // A warp's 32 rows of an nb-column panel factored in place in registers:
 // lane r holds row r from the current column on (a[0]), reading the other
-// rows' entries by shuffles, so no barrier and no shared memory. The top
-// nb x nb block becomes its Cholesky factor, the rows below it are solved
-// against it (L21 = A21 L11^-T), right-looking. Column k of L is handed
-// over as out.put(k, value) on every lane (lane r: L[r][k], meaningful for
-// r >= k); `dr` gets 1 / L[r][r] on the lanes below nb. Returns whether a
-// pivot was not positive; it continues with 1.
+// rows' entries by shuffles. The top nb x nb block becomes its Cholesky
+// factor, the rows below it are solved against it (L21 = A21 L11^-T),
+// right-looking. Column k of L is handed over as out.put(k, value) on
+// every lane (lane r: L[r][k], meaningful for r >= k); `dr` gets
+// 1 / L[r][r] on the lanes below nb. A full tile takes potf2_full when
+// given `col` (2 NB values of shared memory); without (null) the loop, as
+// in k_small_factor, where potf2_full measured slower in f32. Returns
+// whether a pivot was not positive; it continues with 1. `a` is undefined
+// after.
 template <typename Out>
-DEVICE_INLINE bool potf2_regs(F (&a)[NB], u32 lane, u32 nb, F& dr, Out& out) {
+DEVICE_INLINE bool potf2_regs(F (&a)[NB], u32 lane, u32 nb, F& dr, Out& out, SHARED_PTR F* col) {
+    if (nb == NB && col != nullptr) return potf2_full(a, lane, dr, out, col);
     bool bad = false;
     u32 k = 0;
     potf2_steps<32>(a, lane, nb, k, dr, bad, out);
@@ -364,15 +404,17 @@ struct ColsOut {
 };
 
 // The nb x nb lower diagonal tile at `tile` (column stride h) of
-// supernode s factored in place by one warp (potf2_regs). A pivot that is
-// not positive sets fail[0] to s plus one and continues with 1.
-DEVICE_INLINE void potf2_warp(GLOBAL F* factor, u32 tile, u32 h, u32 nb, u32 lane, GLOBAL u32* fail, u32 s) {
+// supernode s factored in place by one warp (potf2_regs; with
+// POTF2_UNROLL, a full tile by potf2_full, `col` its shared memory). A
+// pivot that is not positive sets fail[0] to s plus one and continues
+// with 1.
+DEVICE_INLINE void potf2_warp(GLOBAL F* factor, u32 tile, u32 h, u32 nb, u32 lane, GLOBAL u32* fail, u32 s, SHARED_PTR F* col) {
     F a[NB];
 #pragma unroll
     for (u32 c = 0; c < NB; c++) a[c] = (lane < nb && c <= lane) ? factor[tile + c * h + lane] : F(0);
     F dr = F(1);
     ColsOut out = {factor, tile, h, lane, nb, nb};
-    bool bad = potf2_regs(a, lane, nb, dr, out);
+    bool bad = potf2_regs(a, lane, nb, dr, out, POTF2_UNROLL ? col : (SHARED_PTR F*)nullptr);
     if (bad && lane == 0) fail[0] = s + 1;
 }
 
@@ -497,7 +539,7 @@ DEVICE_INLINE void small_factor(u32 s, GLOBAL const u32* plan, GLOBAL F* factor,
             // the warp, the rows below them
             F dr = F(1);
             SmallOut out = {{factor, panel + j * h + j, h, lane, nb, h - j}, l, l11, q, j, t};
-            bad = potf2_regs(v, lane, nb, dr, out) || bad;
+            bad = potf2_regs(v, lane, nb, dr, out, (SHARED_PTR F*)nullptr) || bad;
             if (lane < nb) d11[lane] = dr;
         }
         BARRIER();
@@ -590,12 +632,13 @@ KERNEL_THREADS_REGS(THREADS) void k_chain(GLOBAL const u32* RESTRICT levels, u32
 // later steps' diagonal tiles are factored by the step before them, at the
 // end of k_syrk.
 KERNEL_THREADS_REGS(NB) void k_potf2(GLOBAL const u32* RESTRICT panels, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+    SHARED F col[2 * NB];
     u32 o_dims = plan[H_DIMS];
     u32 o_val_ptr = plan[H_VAL_PTR];
     u32 s = panels[block_x()];
     u32 q = plan[o_dims + 2 * s];
     u32 h = plan[o_dims + 2 * s + 1];
-    potf2_warp(factor, plan[o_val_ptr + s], h, min(q, NB), thread_x(), fail, s);
+    potf2_warp(factor, plan[o_val_ptr + s], h, min(q, NB), thread_x(), fail, s, col);
 }
 
 #if NB * NB % TRSM_ROWS != 0 || TRSM_ROWS < NB
@@ -724,8 +767,17 @@ template <bool DIAG> DEVICE_INLINE void syrk_slab(F (&acc)[SYRK_R * SYRK_R], SHA
 // rows tx + 16 r and columns ty + 16 c, so neighbouring threads read and
 // write neighbouring rows. The block index walks the panels' tile counts.
 // The block of a panel's tile (0, 0), which alone writes the next diagonal
-// tile (at k1, SYRK_TB >= NB), then factors it (potf2_warp).
-KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u32 kn, u32 cend, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+// tile (at k1, SYRK_TB >= NB), then factors it (potf2_warp). In f64 with
+// POTF2_UNROLL the kernel is held to two blocks a multiprocessor:
+// potf2_full would take it to 168 registers, one block; held, it spills a
+// little in the tail, which measured faster on bundle adjustment's wide
+// steps and 1.5% slower on SLAM's narrow ones.
+#if SCALAR_BYTES == 8 && POTF2_UNROLL
+#define SYRK_ENTRY KERNEL_THREADS_BLOCKS(THREADS, 2)
+#else
+#define SYRK_ENTRY KERNEL_THREADS(THREADS)
+#endif
+SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u32 kn, u32 cend, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
     SHARED F sa[NB * SYRK_TB];
     SHARED F sb[NB * SYRK_TB];
     u32 o_dims = plan[H_DIMS];
@@ -812,9 +864,10 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
         }
     }
     if (ti == 0 && tj == 0) {
-        // the block's writes seen by its first warp
+        // the block's writes seen by its first warp, and its reads of `sa`
+        // done (potf2_warp's column)
         BARRIER();
-        if (t < NB) potf2_warp(factor, panel + k1 * h + k1, h, min(q - k1, NB), t, fail, s);
+        if (t < NB) potf2_warp(factor, panel + k1 * h + k1, h, min(q - k1, NB), t, fail, s, sa);
     }
 }
 

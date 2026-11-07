@@ -39,15 +39,20 @@ typedef unsigned long long u64;
 // KERNEL_THREADS(n): an entry point launched with at most n threads per block.
 // KERNEL_THREADS_REGS(n): the same, its registers not capped to fit several
 // blocks on a multiprocessor (one block must fit), for a kernel whose
-// per-thread arrays would otherwise spill to local memory. (HIP's second
-// launch bound is a minimum of waves per unit, and its default leaves the
-// registers uncapped.)
+// per-thread arrays would otherwise spill to local memory.
+// KERNEL_THREADS_BLOCKS(n, b): the same, its registers capped so that b
+// blocks fit a multiprocessor, for a kernel whose occupancy measures worth
+// more than a spill (CUDA; on HIP as KERNEL_THREADS).
+// (HIP's second launch bound is a minimum of waves per unit, and its
+// default leaves the registers uncapped.)
 #define KERNEL extern "C" __global__
 #define KERNEL_THREADS(n) extern "C" __global__ __launch_bounds__(n)
 #if ARAEL_CUDA
 #define KERNEL_THREADS_REGS(n) extern "C" __global__ __launch_bounds__(n, 1)
+#define KERNEL_THREADS_BLOCKS(n, b) extern "C" __global__ __launch_bounds__(n, b)
 #else
 #define KERNEL_THREADS_REGS(n) extern "C" __global__ __launch_bounds__(n)
+#define KERNEL_THREADS_BLOCKS(n, b) extern "C" __global__ __launch_bounds__(n)
 #endif
 #define DEVICE __device__ inline
 // DEVICE_INLINE: a device function always inlined, for one whose array
@@ -165,6 +170,7 @@ ARAEL_UNFUSED(double, mul_rn, *)
 #define KERNEL extern "C"
 #define KERNEL_THREADS(n) extern "C"
 #define KERNEL_THREADS_REGS(n) extern "C"
+#define KERNEL_THREADS_BLOCKS(n, b) extern "C"
 #define DEVICE inline
 #define DEVICE_INLINE inline
 #define RESTRICT __restrict__

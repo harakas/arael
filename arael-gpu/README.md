@@ -155,3 +155,10 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
   per block is faster on an NVIDIA discrete GPU, whose solve launches
   mostly have fewer blocks than multiprocessors, and 64 rows on an AMD
   integrated GPU, which they fill. Discrete AMD GPUs are not measured.
+- `potf2_unroll`: whether the panel steps factor a 32-column diagonal tile
+  with its 32 pivots unrolled and each column broadcast through shared
+  memory, instead of a loop with shuffles; the factor is the same. Unset,
+  on a discrete GPU and not on an integrated one (or the CPU device):
+  unrolled is faster on an NVIDIA discrete GPU and slower on an AMD
+  integrated GPU, where its registers lower the occupancy of the whole
+  trailing update. Discrete AMD GPUs are not measured.

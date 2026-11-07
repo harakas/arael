@@ -261,6 +261,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         assert!(trsm_rows as usize >= NB && (NB * NB).is_multiple_of(trsm_rows as usize), "trsm_rows {trsm_rows} is at least {NB} and divides {NB} * {NB}");
         let syrk_tile = params.syrk_tile_on(dev.arch(), fs);
         assert!(syrk_tile == 32 || syrk_tile == 64, "syrk_tile {syrk_tile} is 32 or 64");
+        let sizes = DeviceSizes { syrk_block, syrk_tile, trsm_rows, potf2_unroll: params.potf2_unroll_on(dev.arch()) };
         let plan = Plan::new(sn, asym);
         let lw = build_levels(&plan, params, dev.arch(), fs);
         let lu = params.lane_unroll.unwrap_or(if fs == 4 { 4 } else { 8 });
@@ -364,7 +365,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let work = dev.alloc(sec.bytes)?;
         // the seed's threads per stored tile: the device's lockstep width
         let seed_lanes = dev.arch().warp;
-        let defines = format!("{}{}", wide.defines(), defines(F::CPP, lu, seed_lanes, syrk_block, syrk_tile, trsm_rows));
+        let defines = format!("{}{}", wide.defines(), defines(F::CPP, fs, lu, seed_lanes, sizes));
         let source = format!("{WIDE}\n{SOURCE}");
         let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_f64", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out", "k_tile_inv"];
         let [zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv]: [D::Kernel; 21] =
@@ -706,12 +707,26 @@ impl<D: Device> GpuFactor<D> {
     }
 }
 
+/// The kernel sizes the device chooses ([`GpuSupernodalParams`]'s
+/// `*_on`), compiled into `supernodal.cpp`.
+#[derive(Clone, Copy)]
+struct DeviceSizes {
+    syrk_block: u32,
+    syrk_tile: u32,
+    trsm_rows: u32,
+    potf2_unroll: bool,
+}
+
 /// The `#define`s of `supernodal.cpp`: the scalar, the lane unroll, the
-/// block sizes, and the tile sizes and plan header slots of [`crate::plan`].
-fn defines(scalar: &str, lu: usize, seed_lanes: u32, syrk_block: u32, syrk_tile: u32, trsm_rows: u32) -> String {
+/// block sizes, the device's sizes, and the tile sizes and plan header
+/// slots of [`crate::plan`].
+fn defines(scalar: &str, scalar_bytes: usize, lu: usize, seed_lanes: u32, sizes: DeviceSizes) -> String {
     use plan::*;
+    let DeviceSizes { syrk_block, syrk_tile, trsm_rows, potf2_unroll } = sizes;
     let mut s = format!(
-        "#define SCALAR {scalar}\n#define LU {lu}u\n#define THREADS {THREADS}u\n#define SEED_LANES {seed_lanes}u\n#define SYRK_BLOCK {syrk_block}u\n#define SYRK_TB {syrk_tile}u\n#define TRSM_ROWS {trsm_rows}u\n"
+        "#define SCALAR {scalar}\n#define SCALAR_BYTES {scalar_bytes}u\n#define LU {lu}u\n#define THREADS {THREADS}u\n#define SEED_LANES {seed_lanes}u\n\
+         #define SYRK_BLOCK {syrk_block}u\n#define SYRK_TB {syrk_tile}u\n#define TRSM_ROWS {trsm_rows}u\n#define POTF2_UNROLL {}\n",
+        potf2_unroll as u32
     );
     let consts = [
         ("NB", NB),
@@ -792,6 +807,7 @@ mod tests {
             syrk_block: None,
             trsm_rows: None,
             syrk_tile: None,
+            potf2_unroll: None,
         }
     }
 
@@ -948,17 +964,21 @@ mod tests {
         assert!(rel_residual(&dense, sn.dim(), &x, &rhs) < 1e-10);
     }
 
-    /// The kernels' SYRK_BLOCK, SYRK_TB and TRSM_ROWS are the sizes asked
-    /// for (`defines` brings `plan`'s names into scope, which once shadowed
-    /// its flag).
+    /// The kernels' SYRK_BLOCK, SYRK_TB, TRSM_ROWS and POTF2_UNROLL are the
+    /// sizes asked for (`defines` brings `plan`'s names into scope, which
+    /// once shadowed its flag).
     #[test]
     fn the_defines_carry_the_device_sizes() {
-        assert!(defines("float", 1, 32, 32, 64, 64).contains("#define SYRK_BLOCK 32u\n"));
-        assert!(defines("float", 1, 32, 256, 64, 64).contains("#define SYRK_BLOCK 256u\n"));
-        assert!(defines("float", 1, 32, 32, 32, 64).contains("#define SYRK_TB 32u\n"));
-        assert!(defines("float", 1, 32, 32, 64, 64).contains("#define SYRK_TB 64u\n"));
-        assert!(defines("float", 1, 32, 32, 64, 32).contains("#define TRSM_ROWS 32u\n"));
-        assert!(defines("float", 1, 32, 32, 64, 128).contains("#define TRSM_ROWS 128u\n"));
+        let base = DeviceSizes { syrk_block: 32, syrk_tile: 64, trsm_rows: 64, potf2_unroll: false };
+        let d = |sizes| defines("float", 4, 1, 32, sizes);
+        assert!(d(base).contains("#define SYRK_BLOCK 32u\n"));
+        assert!(d(DeviceSizes { syrk_block: 256, ..base }).contains("#define SYRK_BLOCK 256u\n"));
+        assert!(d(DeviceSizes { syrk_tile: 32, ..base }).contains("#define SYRK_TB 32u\n"));
+        assert!(d(base).contains("#define SYRK_TB 64u\n"));
+        assert!(d(DeviceSizes { trsm_rows: 32, ..base }).contains("#define TRSM_ROWS 32u\n"));
+        assert!(d(DeviceSizes { trsm_rows: 128, ..base }).contains("#define TRSM_ROWS 128u\n"));
+        assert!(d(base).contains("#define POTF2_UNROLL 0\n"));
+        assert!(d(DeviceSizes { potf2_unroll: true, ..base }).contains("#define POTF2_UNROLL 1\n"));
     }
 
     /// Supernodes wider than two blocks of 128 columns, with rows below them
@@ -983,12 +1003,13 @@ mod tests {
             [NB as u32, 64, 128, 256].map(|b| GpuSupernodalParams { syrk_block: Some(b), syrk_tile: Some(t), ..GpuSupernodalParams::default() })
         });
         let rows = [32, 64, 128].map(|r| GpuSupernodalParams { trsm_rows: Some(r), ..GpuSupernodalParams::default() });
-        for params in blocks.chain(rows).chain(both_syrks()) {
+        let unrolls = [false, true].map(|u| GpuSupernodalParams { potf2_unroll: Some(u), ..GpuSupernodalParams::default() });
+        for params in blocks.chain(rows).chain(unrolls).chain(both_syrks()) {
             let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
             g.factorize(a.vals()).unwrap();
             let err = factor_err(&sn, &g.factor_values().unwrap(), &cpu);
-            let sizes = (params.syrk_block, params.syrk_tile, params.trsm_rows);
-            assert!(err < 1e-12, "factor err/max {err}, syrk block, syrk tile, trsm rows {sizes:?}");
+            let sizes = (params.syrk_block, params.syrk_tile, params.trsm_rows, params.potf2_unroll);
+            assert!(err < 1e-12, "factor err/max {err}, syrk block, syrk tile, trsm rows, potf2 unroll {sizes:?}");
             let mut x = rhs.clone();
             g.solve(&mut x).unwrap();
             let res = rel_residual(&dense, sn.dim(), &x, &rhs);
@@ -1077,7 +1098,9 @@ mod tests {
     }
 
     /// The kernels holding a row per thread keep it in registers: none uses
-    /// local memory, in f64 or f32 (a GPU's).
+    /// local memory, in f64 or f32 (a GPU's), but k_syrk in f64 on CUDA,
+    /// held to two blocks a multiprocessor, spills a little in its potf2
+    /// tail (measured worth the occupancy), within a bound.
     #[test]
     #[cfg(any(feature = "cuda", feature = "hip"))]
     fn the_row_kernels_keep_their_rows_in_registers() {
@@ -1100,7 +1123,9 @@ mod tests {
                 ("tile_inv", &k.tile_inv),
             ];
             for (name, kernel) in kernels {
-                assert_eq!(kernel.local_bytes().unwrap(), 0, "k_{name} in {}: {} registers", F::CPP, kernel.registers().unwrap());
+                let local = kernel.local_bytes().unwrap();
+                let allowed = if name == "syrk" && F::CPP == "double" && cfg!(feature = "cuda") { 256 } else { 0 };
+                assert!(local <= allowed, "k_{name} in {}: {} registers, {local} bytes of local memory", F::CPP, kernel.registers().unwrap());
             }
         }
         check::<f64>(&dev, &sn, &a);
