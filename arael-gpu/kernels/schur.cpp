@@ -5,8 +5,9 @@
 // In W, the route's wide scalar (wide.h). Compiled per EW (the widest
 // eliminated block, rounded up to 4, 8, 16, 32 or 64), KW (the widest kept
 // block, rounded likewise), TILE_LANES (k_schur_tiles' threads per tile:
-// the device's lockstep width, 32 or 64) and ACC (KW * KW / TILE_LANES
-// rounded up, the entries of a tile of S per lane); the plan header's
+// the device's lockstep width, 32 or 64) and ACC (the widest kept block's
+// square over TILE_LANES, rounded up: the entries of a tile of S per lane);
+// the plan header's
 // slots (SE_*, SO_*, ST_*, SP_*, SK_*), the refinement state's words (R_*)
 // and flags (F_*) come from schur.rs as #defines. Kernels launched with
 // THREADS threads per block, or PLANE where said.
@@ -156,10 +157,10 @@ KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL c
 // Stage 3, one block of TILE_LANES threads per tile of S (a lockstep unit):
 // the kept-kept tile of H (or nothing) minus W_oa C_ob^T over the tile's
 // pairs, thread `lane` owning the entries lane, lane + TILE_LANES, ... (ACC
-// of them at most); a diagonal tile upper-only. A pair's W_oa (wr x we,
-// row-major) and C_ob (wc x we, row j at j EW) are read once into shared
-// memory. The tile is the block's, so its plan words are the same in every
-// lane (scalar loads on AMD).
+// of them at most); a diagonal tile upper-only. A pair's W_oa and C_ob are
+// copied once into shared memory as they lie in memory; in f64 the products
+// go straight into the accumulators. The tile is the block's, so its plan
+// words are the same in every lane (scalar loads on AMD).
 KERNEL_THREADS(TILE_LANES) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const W* RESTRICT w, GLOBAL W* RESTRICT s) {
     SHARED W ws[KW * EW];
     SHARED W cs[KW * EW];
@@ -182,8 +183,16 @@ KERNEL_THREADS(TILE_LANES) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, G
     u32 p0 = plan[plan[ST_PAIR_PTR] + t];
     u32 p1 = plan[plan[ST_PAIR_PTR] + t + 1];
     W acc[ACC];
+    // each accumulator's entry of the tile, i | j << 16, found once
+    u32 ij[ACC];
 #pragma unroll
-    for (u32 m = 0; m < ACC; m++) acc[m] = 0.0f;
+    for (u32 m = 0; m < ACC; m++) {
+        acc[m] = 0.0f;
+        u32 ent = lane + TILE_LANES * m;
+        u32 j = ent / wr;
+        ij[m] = (ent - j * wr) | (j << 16);
+    }
+    u32 n = wr * wc;
     for (u32 p = p0; p < p1; p++) {
         u32 oa = plan[o_oa + p];
         u32 ob = plan[o_ob + p];
@@ -195,31 +204,40 @@ KERNEL_THREADS(TILE_LANES) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, G
         u32 wb = plan[o_ow + ob];
         // the previous pair's reads are done
         BARRIER();
+        // W_oa (row-major wr x we) and C_ob as H holds it (coupling(): row j
+        // at j we when transposed, else column k at k wb), both contiguous:
+        // one pass of coalesced loads, no index division
         for (u32 x = lane; x < wr * we; x += TILE_LANES) ws[x] = w[woff + x];
-        for (u32 x = lane; x < wc * we; x += TILE_LANES) {
-            u32 j = x / we;
-            u32 k = x - j * we;
-            cs[j * EW + k] = coupling(h, cb, tb, wb, we, j, k);
-        }
+        for (u32 x = lane; x < wc * we; x += TILE_LANES) cs[x] = h[cb + x];
         BARRIER();
+        // entry (j, k) of C_ob at cs[j cj + k ck]
+        u32 cj = tb != 0 ? we : 1u;
+        u32 ck = tb != 0 ? 1u : wb;
 #pragma unroll
         for (u32 m = 0; m < ACC; m++) {
-            u32 ent = lane + TILE_LANES * m;
-            if (ent < wr * wc) {
-                u32 j = ent / wr;
-                u32 i = ent - j * wr;
+            if (lane + TILE_LANES * m < n) {
+                u32 wi = (ij[m] & 0xffffu) * we;
+                u32 cjo = (ij[m] >> 16) * cj;
+#if ARAEL_WIDE_DF32
+                // df32: the pair's sum first, then one accurate subtraction
                 W v = 0.0f;
-                for (u32 k = 0; k < we; k++) v = wide_fma(v, ws[i * we + k], cs[j * EW + k]);
+#pragma unroll
+                for (u32 k = 0; k < EW; k++)
+                    if (k < we) v = wide_fma(v, ws[wi + k], cs[cjo + k * ck]);
                 acc[m] -= v;
+#else
+#pragma unroll
+                for (u32 k = 0; k < EW; k++)
+                    if (k < we) acc[m] = wide_fma(acc[m], -ws[wi + k], cs[cjo + k * ck]);
+#endif
             }
         }
     }
 #pragma unroll
     for (u32 m = 0; m < ACC; m++) {
-        u32 ent = lane + TILE_LANES * m;
-        if (ent < wr * wc) {
-            u32 j = ent / wr;
-            u32 i = ent - j * wr;
+        if (lane + TILE_LANES * m < n) {
+            u32 i = ij[m] & 0xffffu;
+            u32 j = ij[m] >> 16;
             W v = acc[m];
             if (copy != NONE) v += h[copy + i + j * wr];
             if (a == b && i > j) v = 0.0f;

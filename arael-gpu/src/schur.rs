@@ -166,6 +166,8 @@ pub(crate) struct SchurPlan {
     /// The widest eliminated and kept blocks, rounded up as the kernels take them.
     pub ew_cap: usize,
     pub kw_cap: usize,
+    /// The widest kept block: a tile of S has at most kw_max^2 entries.
+    pub kw_max: usize,
     /// Per eliminated slot, its block id (for the error).
     pub elim_blk: Vec<u32>,
 }
@@ -410,6 +412,7 @@ impl SchurPlan {
             w_len: w_len as usize,
             ew_cap,
             kw_cap,
+            kw_max,
             elim_blk,
         }
     }
@@ -953,8 +956,8 @@ fn defines(p: &SchurPlan, lanes: u32) -> String {
             ("TILE_LANES", lanes as usize),
             ("EW", p.ew_cap),
             ("KW", p.kw_cap),
-            // the entries of a tile of S per lane
-            ("ACC", (p.kw_cap * p.kw_cap).div_ceil(lanes as usize)),
+            // the entries of a tile of S per lane, at most
+            ("ACC", (p.kw_max * p.kw_max).div_ceil(lanes as usize)),
             ("SE_DIAG_OFF", SE_DIAG_OFF),
             ("SE_W", SE_W),
             ("SE_ORIG_OFF", SE_ORIG_OFF),
