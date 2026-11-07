@@ -701,22 +701,23 @@ fn pair_pieces(w: &mut LevelWork, p: &Plan, pairs: &[usize], blocks: usize) {
     }
 }
 
-/// The level's big updates cut to fill `blocks` blocks: when its tiles
-/// make fewer, an item over the level's share of the work is cut by
-/// rectangles, and a rectangle over it by k ranges (multiples of TK); the
-/// items of a tile cut so are marked shared.
+/// The level's big updates cut to fill `blocks` blocks and ordered longest
+/// first: an item over the level's share of the work is cut by rectangles,
+/// and a rectangle over it by k ranges (multiples of TK); the items of a
+/// tile cut so are marked shared. The work is what `k_big_update` executes,
+/// a whole TB x TB tile per k slab of TK, whatever the rectangle's own
+/// rows and columns. Blocks are dispatched in item order, so the longest
+/// items start first and the short ones fill the gaps.
 fn split_big(w: &mut LevelWork, p: &Plan, blocks: usize) {
     let n_items = w.big_items.len() / BIG_ITEM;
-    if n_items == 0 || n_items >= blocks {
+    if n_items == 0 {
         return;
     }
     let rects = &w.big_rects;
-    // a rectangle's multiply-adds and its k extent
+    // a rectangle's executed multiply-adds and its k extent
     let work = |r: u32| -> (f64, u32) {
-        let r = r as usize;
-        let (pi, da, db, ca, cb) = (rects[5 * r] as usize, rects[5 * r + 1], rects[5 * r + 2], rects[5 * r + 3], rects[5 * r + 4]);
-        let dq = p.dims[2 * p.pairs[pi].d as usize];
-        ((db - da) as f64 * (cb - ca) as f64 * dq as f64, dq)
+        let dq = p.dims[2 * p.pairs[rects[5 * r as usize] as usize].d as usize];
+        (slab_work(dq), dq)
     };
     let total: f64 = (0..(rects.len() / 5) as u32).map(|r| work(r).0).sum();
     let cap = (total / blocks as f64).max(MIN_ITEM_WORK);
@@ -755,6 +756,20 @@ fn split_big(w: &mut LevelWork, p: &Plan, blocks: usize) {
             }
         }
     }
+    // longest first: an item's executed work over its rectangles and k range
+    let item_work = |it: &[u32]| -> f64 {
+        let (r0, r1, k0, k1) = (it[3], it[4], it[5], it[6]);
+        (r0..r1).map(|r| if k1 > k0 { slab_work(k1 - k0) } else { work(r).0 }).sum()
+    };
+    let mut items: Vec<&[u32]> = w.big_items.chunks(BIG_ITEM).collect();
+    items.sort_by(|a, b| item_work(b).total_cmp(&item_work(a)));
+    w.big_items = items.concat();
+}
+
+/// The multiply-adds `k_big_update` executes for `k` columns of a
+/// rectangle: a whole TB x TB tile per k slab of TK.
+fn slab_work(k: u32) -> f64 {
+    (TB * TB) as f64 * k.next_multiple_of(TK as u32) as f64
 }
 
 #[cfg(test)]
@@ -935,6 +950,37 @@ mod tests {
                 let want = (shared.len() > 1) as u32;
                 assert!(shared.iter().all(|&f| f == want), "tile {tile:?}: {} items, shared flags {shared:?}", shared.len());
             }
+        }
+    }
+
+    /// A level's big items, on a device they fill and on one they do not,
+    /// are each within the level's share of the executed work (whole TB x
+    /// TB tiles per k slab) but for one slab, and come longest first; every
+    /// element is still summed over its k once.
+    #[test]
+    fn big_items_share_the_executed_work_longest_first() {
+        let kn = every_kernel_busy();
+        let (p, _, _) = analyse(40);
+        let dq = |pi: u32| p.dims[2 * p.pairs[pi as usize].d as usize];
+        for multiprocessors in [1, 4, 10_000] {
+            check_coverage_of(40, &kn, multiprocessors, true);
+            let blocks = (multiprocessors * kn.blocks_per_sm) as f64;
+            let mut levels = 0;
+            for w in build_levels(&p, &kn, multiprocessors, NB) {
+                let rect_work = |r: u32| slab_work(dq(w.big_rects[5 * r as usize]));
+                let total: f64 = (0..(w.big_rects.len() / 5) as u32).map(rect_work).sum();
+                let cap = (total / blocks).max(MIN_ITEM_WORK);
+                let works: Vec<f64> = w
+                    .big_items
+                    .chunks(BIG_ITEM)
+                    .map(|it| (it[3]..it[4]).map(|r| if it[6] > it[5] { slab_work(it[6] - it[5]) } else { rect_work(r) }).sum())
+                    .collect();
+                assert!(works.windows(2).all(|x| x[0] >= x[1]), "{multiprocessors} SMs: items not longest first: {works:?}");
+                let slab = (TB * TB * TK) as f64;
+                assert!(works.iter().all(|&x| x <= cap + slab), "{multiprocessors} SMs: an item over the share {cap}: {works:?}");
+                levels += !works.is_empty() as usize;
+            }
+            assert!(levels > 0, "{multiprocessors} SMs: levels with big items");
         }
     }
 
