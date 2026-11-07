@@ -886,25 +886,70 @@ DEVICE_INLINE F lane_dot(GLOBAL const F* a, u32 a0, SHARED_PTR const F* b, u32 b
     return p0 + p1;
 }
 
-// The 32 x 32 lower tile at (j0, j0) into row-major `ls` (coalesced along
-// the column), and the reciprocal of its diagonal for this thread's lane.
-// 1024 / THREADS elements per thread.
-DEVICE_INLINE F load_tile32(GLOBAL const F* factor, u32 panel, u32 h, u32 j0, u32 nb, SHARED_PTR F* ls) {
-    u32 t = thread_x();
+#if INV_TILE != 2 * 32 * 32
+#error "supernodal.cpp: an inverted tile is two 32 x 32 copies"
+#endif
+
+// The inverse X of every 32 x 32 diagonal tile L of the supernodes wider
+// than NB (the plan's list at H_INV_TILES: the supernode and the tile's
+// first column), a warp per tile, into its INV_TILE values at `inv`: X
+// column-major (the forward solve's), then row-major (the backward
+// solve's), so a lane of either solve reads its row of X, or of X^T,
+// coalesced. Lane c solves L x = e_c by forward substitution; past the
+// tile's nb columns X is zero.
+KERNEL_THREADS(32) void k_tile_inv(GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT inv) {
+    // L's lower part, column k at ls[33 k]; then X, column c at ls[33 c]
+    SHARED F ls[32 * 33];
+    u32 tile = block_x();
+    GLOBAL const u32* it = plan + plan[H_INV_TILES] + 2 * tile;
+    u32 s = it[0];
+    u32 j0 = it[1];
+    GLOBAL const u32* head = plan + plan[H_SOLVE_HEAD] + SOLVE_HEAD * s;
+    u32 q = head[0];
+    u32 h = head[1];
+    u32 panel = head[3];
+    u32 nb = min(q - j0, 32u);
+    u32 lane = thread_x();
+    for (u32 k = 0; k < 32; k++) ls[k * 33 + lane] = (k < nb && lane < nb && lane >= k) ? factor[panel + (j0 + k) * h + j0 + lane] : F(0);
+    WARP_BARRIER();
+    F b[32];
 #pragma unroll
-    for (u32 i = 0; i < 1024 / THREADS; i++) {
-        u32 e = t + i * THREADS;
-        u32 c = e / 32;
-        u32 r = e - c * 32;
-        F v = F(0);
-        if (r < nb && c <= r) v = factor[panel + (j0 + c) * h + j0 + r];
-        ls[r * 32 + c] = v;
+    for (u32 r = 0; r < 32; r++) b[r] = (r == lane && lane < nb) ? F(1) : F(0);
+#pragma unroll
+    for (u32 k = 0; k < 32; k++) {
+        if (k < nb) {
+            b[k] = b[k] / ls[k * 33 + k];
+#pragma unroll
+            for (u32 r = k + 1; r < 32; r++) b[r] -= ls[k * 33 + r] * b[k];
+        }
     }
-    BARRIER();
-    u32 lane = t % 32;
-    F rd = F(0);
-    if (lane < nb) rd = F(1) / ls[lane * 32 + lane];
-    return rd;
+    // every lane's reads of L done
+    WARP_BARRIER();
+#pragma unroll
+    for (u32 r = 0; r < 32; r++) ls[lane * 33 + r] = b[r];
+    WARP_BARRIER();
+    GLOBAL F* out = inv + tile * INV_TILE;
+    // X[r][c] at ls[33 c + r]: column-major at c 32 + r, row-major at 1024 + r 32 + c
+    for (u32 c = 0; c < 32; c++) out[c * 32 + lane] = ls[c * 33 + lane];
+    for (u32 r = 0; r < 32; r++) out[1024 + r * 32 + lane] = ls[lane * 33 + r];
+}
+
+// A diagonal tile's solve as a product with its inverse, by one warp:
+// lane r's y_r = sum over c < nb of M[r][c] t_c, M at `xi` with M[r][c] at
+// c 32 + r (the forward copy of k_tile_inv for M = L^-1, the backward copy
+// for M = L^-T); t and then y at `xs`.
+DEVICE_INLINE void tile_inv_apply(GLOBAL const F* xi, SHARED_PTR F* xs, u32 nb, u32 lane) {
+    F v[32];
+#pragma unroll
+    for (u32 c = 0; c < 32; c++) v[c] = xi[c * 32 + lane];
+    F y = F(0);
+#pragma unroll
+    for (u32 c = 0; c < 32; c++) {
+        if (c < nb) y += v[c] * xs[c];
+    }
+    // every lane's reads of t done
+    WARP_BARRIER();
+    if (lane < nb) xs[lane] = y;
 }
 
 // The forward steps k of trsv_fwd_warp while the columns left (q - k) fit
@@ -969,18 +1014,17 @@ DEVICE_INLINE F trsv_bwd_warp(GLOBAL const F* factor, u32 panel, u32 h, u32 q, F
 // Forward solve, part two: the trsv of supernode s by the block of THREADS
 // threads; a supernode of at most 32 columns by the first warp in
 // registers (trsv_fwd_warp). Wider, in 32-column blocks: the diagonal
-// tile's 32 sequential steps by the first warp on shared data, the rows
-// below updated by all threads with the full block's 32 loads issued
-// before its FMAs. `smem`: 1024 + q values (dynamic shared memory for the
-// widest supernode q of the launch).
-DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* smem) {
-    SHARED_PTR F* ls = smem;
-    SHARED_PTR F* xs = smem + 1024;
+// tile's solve by the first warp as a product with its inverse (`inv`,
+// k_tile_inv), the rows below updated by all threads with the full block's
+// 32 loads issued before its FMAs. `xs`: q values (dynamic shared memory
+// for the widest supernode q of the launch).
+DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL const F* inv, GLOBAL F* x, SHARED_PTR F* xs) {
     GLOBAL const u32* head = plan + plan[H_SOLVE_HEAD] + SOLVE_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
     u32 col0 = head[2];
     u32 panel = head[3];
+    u32 tile0 = head[5];
     u32 t = thread_x();
     const u32 nt = THREADS;
     u32 lane = t % 32;
@@ -995,17 +1039,9 @@ DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* f
     for (u32 c0 = t; c0 < q; c0 += nt) xs[c0] = x[col0 + c0];
     for (u32 j0 = 0; j0 < q; j0 += 32) {
         u32 nb = min(q - j0, 32u);
+        // the block's x in: copied, or updated by the blocks before it
         BARRIER();
-        F rd = load_tile32(factor, panel, h, j0, nb, ls);
-        if (t < 32) {
-            for (u32 c = 0; c < nb; c++) {
-                if (lane == c) xs[j0 + c] *= rd;
-                WARP_BARRIER();
-                F v = xs[j0 + c];
-                if (lane > c && lane < nb) xs[j0 + lane] -= ls[lane * 32 + c] * v;
-                WARP_BARRIER();
-            }
-        }
+        if (t < 32) tile_inv_apply(inv + (tile0 + j0 / 32) * INV_TILE, xs + j0, nb, lane);
         BARRIER();
         for (u32 i = j0 + nb + t; i < q; i += nt) {
             F acc = F(0);
@@ -1026,10 +1062,10 @@ DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* f
 }
 
 // The forward trsv, one block per supernode of `list` (fwd_trsv_one).
-KERNEL_THREADS(THREADS) void k_fwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT x) {
+KERNEL_THREADS(THREADS) void k_fwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
     if (gate[0] == 0) return;
     DYNAMIC_SHARED(F, smem);
-    fwd_trsv_one(list[block_x()], plan, factor, x, smem);
+    fwd_trsv_one(list[block_x()], plan, factor, inv, x, smem);
 }
 
 // Backward solve, part one: x_s -= L_below^T x for the columns [c0, c1) of
@@ -1078,16 +1114,15 @@ KERNEL_THREADS(THREADS) void k_bwd_gemv(GLOBAL const u32* RESTRICT gate, GLOBAL 
 // of THREADS threads; a supernode of at most 32 columns by the first warp
 // in registers (trsv_bwd_warp). Wider, 32-column blocks from the last, the
 // block's columns against the rows below it (a warp per column), then the
-// diagonal tile's steps by the first warp on shared data. `smem` as
-// fwd_trsv_one's.
-DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* smem) {
-    SHARED_PTR F* ls = smem;
-    SHARED_PTR F* xs = smem + 1024;
+// diagonal tile's solve by the first warp as a product with its inverse
+// transposed (`inv`, k_tile_inv). `xs` as fwd_trsv_one's.
+DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL const F* inv, GLOBAL F* x, SHARED_PTR F* xs) {
     GLOBAL const u32* head = plan + plan[H_SOLVE_HEAD] + SOLVE_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
     u32 col0 = head[2];
     u32 panel = head[3];
+    u32 tile0 = head[5];
     u32 t = thread_x();
     const u32 nt = THREADS;
     u32 lane = t % 32;
@@ -1115,28 +1150,18 @@ DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* f
             if (lane == 0) xs[j0 + c] -= part;
         }
         BARRIER();
-        F rd = load_tile32(factor, panel, h, j0, nb, ls);
-        if (t < 32) {
-            u32 c2 = nb;
-            while (c2 > 0) {
-                c2 -= 1;
-                if (lane == c2) xs[j0 + c2] *= rd;
-                WARP_BARRIER();
-                F v = xs[j0 + c2];
-                if (lane < c2) xs[j0 + lane] -= ls[c2 * 32 + lane] * v;
-                WARP_BARRIER();
-            }
-        }
+        if (t < 32) tile_inv_apply(inv + (tile0 + bi) * INV_TILE + 1024, xs + j0, nb, lane);
         BARRIER();
     }
     for (u32 c1 = t; c1 < q; c1 += nt) x[col0 + c1] = xs[c1];
 }
 
-// The backward trsv, one block per supernode of `list` (bwd_trsv_one).
-KERNEL_THREADS(THREADS) void k_bwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT x) {
+// The backward trsv, one block per supernode of `list` (bwd_trsv_one); its
+// registers uncapped, or trsv_bwd_warp's row spills in f64.
+KERNEL_THREADS_REGS(THREADS) void k_bwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
     if (gate[0] == 0) return;
     DYNAMIC_SHARED(F, smem);
-    bwd_trsv_one(list[block_x()], plan, factor, x, smem);
+    bwd_trsv_one(list[block_x()], plan, factor, inv, x, smem);
 }
 
 // A chain of the solve's levels, one supernode each, by one block in one
@@ -1145,8 +1170,9 @@ KERNEL_THREADS(THREADS) void k_bwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL 
 // items and their count), forward its gather rows and its trsv, level
 // after level. The levels read what the levels before them wrote, so `x` is
 // one plain pointer (not the read-only path); `smem` is the trsvs' dynamic
-// shared memory, for the chain's widest supernode.
-KERNEL_THREADS_REGS(THREADS) void k_fwd_chain(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* x) {
+// shared memory, for the chain's widest supernode; `inv` their inverted
+// diagonal tiles.
+KERNEL_THREADS_REGS(THREADS) void k_fwd_chain(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* x) {
     if (gate[0] == 0) return;
     DYNAMIC_SHARED(F, smem);
     u32 t = thread_x();
@@ -1155,7 +1181,7 @@ KERNEL_THREADS_REGS(THREADS) void k_fwd_chain(GLOBAL const u32* RESTRICT gate, G
         fwd_gather_rows(plan, plan + rec[0], rec[1], rec[1], factor, x, x, t, THREADS);
         // the gathers in; the previous trsv's reads of `smem` done
         BARRIER();
-        fwd_trsv_one(rec[2], plan, factor, x, smem);
+        fwd_trsv_one(rec[2], plan, factor, inv, x, smem);
         // its x, read by the next level's gathers
         BARRIER();
     }
@@ -1163,7 +1189,7 @@ KERNEL_THREADS_REGS(THREADS) void k_fwd_chain(GLOBAL const u32* RESTRICT gate, G
 
 // The backward half of k_fwd_chain's chain: its levels from the last, each
 // its GEMV items and its transposed trsv.
-KERNEL_THREADS_REGS(THREADS) void k_bwd_chain(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* x) {
+KERNEL_THREADS_REGS(THREADS) void k_bwd_chain(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* x) {
     if (gate[0] == 0) return;
     SHARED F xr[XR_CH];
     DYNAMIC_SHARED(F, smem);
@@ -1180,7 +1206,7 @@ KERNEL_THREADS_REGS(THREADS) void k_bwd_chain(GLOBAL const u32* RESTRICT gate, G
         }
         // the GEMVs' x in; the previous trsv's reads of `smem` done
         BARRIER();
-        bwd_trsv_one(rec[2], plan, factor, x, smem);
+        bwd_trsv_one(rec[2], plan, factor, inv, x, smem);
         // its x, read by the next (lower) level's GEMVs
         BARRIER();
     }

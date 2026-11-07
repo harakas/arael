@@ -97,6 +97,7 @@ struct Kernels<K> {
     bwd_chain: K,
     perm_in: K,
     perm_out: K,
+    tile_inv: K,
 }
 
 /// What the factorization launches, in order: one level's kernels, or a
@@ -130,7 +131,7 @@ struct Level {
     syrk_grid: Vec<u32>,
     all: usize,
     n_all: u32,
-    /// Dynamic shared memory of the trsv kernels: 1024 + q values for the widest supernode.
+    /// Dynamic shared memory of the trsv kernels: q values for the widest supernode.
     trsv_shared: u32,
     /// The level's gather rows: their word offset in the structure block and count.
     g_rows: (u32, u32),
@@ -151,19 +152,22 @@ struct Sections {
     vals: usize,
     /// The right-hand side and solution of [`GpuSupernodal::solve`], `f64`.
     rhs: usize,
+    /// The inverted diagonal tiles of the factor (`k_tile_inv`,
+    /// [`plan::INV_TILE`] values each), in the factor's scalar.
+    inv: usize,
     bytes: usize,
 }
 
 impl Sections {
-    fn new(factor: usize, xb: usize, vals: usize, rhs: usize) -> Self {
+    fn new(factor: usize, xb: usize, vals: usize, rhs: usize, inv: usize) -> Self {
         let mut at = 0;
         let mut take = |bytes: usize| {
             let start = at;
             at = (at + bytes.max(1)).next_multiple_of(256);
             start
         };
-        let (factor, xb, fail, vals, rhs) = (take(factor), take(xb), take(4), take(vals), take(rhs));
-        Sections { factor, xb, fail, vals, rhs, bytes: at }
+        let (factor, xb, fail, vals, rhs, inv) = (take(factor), take(xb), take(4), take(vals), take(rhs), take(inv));
+        Sections { factor, xb, fail, vals, rhs, inv, bytes: at }
     }
 }
 
@@ -201,6 +205,8 @@ pub struct GpuSupernodal<F: Scalar, D: Device> {
     syrk_block: u32,
     /// Rows per block of `k_trsm` ([`GpuSupernodalParams::trsm_rows`]).
     trsm_rows: u32,
+    /// The inverted diagonal tiles, a `k_tile_inv` block each.
+    n_inv: u32,
     levels: Vec<Level>,
     steps: Vec<Step>,
     /// The solve's steps: a level's kernels, or a chain of levels (forward
@@ -282,7 +288,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             let small_q = w.small_targets.iter().map(q).max().unwrap_or(0);
             let small_h = w.small_targets.iter().map(|&s| plan.dims[2 * s as usize + 1]).max().unwrap_or(0);
             let max_q = w.level_sn.iter().map(q).max().unwrap_or(0);
-            let (small_shared, trsv_shared) = (small_shared_bytes(small_q, fs), (1024 + max_q) * fs);
+            let (small_shared, trsv_shared) = (small_shared_bytes(small_q, fs), max_q * fs);
             assert!(small_shared <= limit, "small_q is capped to the shared memory: {small_shared} bytes for {small_q} columns, {limit} given");
             if trsv_shared > limit {
                 return Err(GpuError::Limit(format!(
@@ -351,16 +357,17 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let mut ints = dev.alloc(pk.words.len() * 4)?;
         dev.write(&mut ints, 0, bytemuck::cast_slice(&pk.words))?;
         let nvals = asym.val_count();
-        let sec = Sections::new(plan.factor_vals * fs, plan.n * fs, nvals * 8, plan.n * 8);
+        let n_inv = plan.inv_tiles().len() / 2;
+        let sec = Sections::new(plan.factor_vals * fs, plan.n * fs, nvals * 8, plan.n * 8, n_inv * plan::INV_TILE * fs);
         let work = dev.alloc(sec.bytes)?;
         // the seed's threads per stored tile: the device's lockstep width
         let seed_lanes = dev.arch().warp;
         let defines = format!("{}{}", wide.defines(), defines(F::CPP, lu, seed_lanes, syrk_block, trsm_rows));
         let source = format!("{WIDE}\n{SOURCE}");
-        let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_f64", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out"];
-        let [zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out]: [D::Kernel; 20] =
+        let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_f64", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out", "k_tile_inv"];
+        let [zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv]: [D::Kernel; 21] =
             dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
-        let k = Kernels { zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out };
+        let k = Kernels { zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv };
         Ok(GpuSupernodal {
             dev: dev.clone(),
             k,
@@ -371,6 +378,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             seed_lanes,
             syrk_block,
             trsm_rows,
+            n_inv: n_inv as u32,
             levels,
             steps,
             solve_steps,
@@ -474,6 +482,10 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 }
             }
         }
+        // the solve's inverted diagonal tiles
+        if self.n_inv > 0 {
+            self.run(&self.k.tile_inv, self.n_inv, 32, 0, &[plan, factor, Arg::Block(&self.work, self.sec.inv)])?;
+        }
         Ok(())
     }
 
@@ -516,6 +528,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let plan = Arg::Block(&self.ints, 0);
         let list = |at: usize| Arg::Block(&self.ints, at);
         let factor = Arg::Block(&self.work, self.sec.factor);
+        let inv = Arg::Block(&self.work, self.sec.inv);
         let xb = Arg::Block(&self.work, self.sec.xb);
         let x = Arg::Block(x.0, x.1);
         let blocks = self.nb.div_ceil(THREADS).max(1);
@@ -523,7 +536,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         for step in &self.solve_steps {
             let l = match *step {
                 Step::Chain { records, n, shared } => {
-                    self.run(&self.k.fwd_chain, 1, THREADS, shared, &[gate, list(records), Arg::U32(n), plan, factor, xb])?;
+                    self.run(&self.k.fwd_chain, 1, THREADS, shared, &[gate, list(records), Arg::U32(n), plan, factor, inv, xb])?;
                     continue;
                 }
                 Step::Level(i) => &self.levels[i],
@@ -531,12 +544,12 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             if l.n_g > 0 {
                 self.run(&self.k.fwd_gather, l.n_g, THREADS, 0, &[gate, list(l.g_items), plan, factor, xb, xb])?;
             }
-            self.run(&self.k.fwd_trsv, l.n_all, THREADS, l.trsv_shared, &[gate, list(l.all), plan, factor, xb])?;
+            self.run(&self.k.fwd_trsv, l.n_all, THREADS, l.trsv_shared, &[gate, list(l.all), plan, factor, inv, xb])?;
         }
         for step in self.solve_steps.iter().rev() {
             let l = match *step {
                 Step::Chain { records, n, shared } => {
-                    self.run(&self.k.bwd_chain, 1, THREADS, shared, &[gate, list(records), Arg::U32(n), plan, factor, xb])?;
+                    self.run(&self.k.bwd_chain, 1, THREADS, shared, &[gate, list(records), Arg::U32(n), plan, factor, inv, xb])?;
                     continue;
                 }
                 Step::Level(i) => &self.levels[i],
@@ -544,7 +557,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             if l.n_bg > 0 {
                 self.run(&self.k.bwd_gemv, l.n_bg, THREADS, 0, &[gate, list(l.bg_items), plan, factor, xb])?;
             }
-            self.run(&self.k.bwd_trsv, l.n_all, THREADS, l.trsv_shared, &[gate, list(l.all), plan, factor, xb])?;
+            self.run(&self.k.bwd_trsv, l.n_all, THREADS, l.trsv_shared, &[gate, list(l.all), plan, factor, inv, xb])?;
         }
         self.run(&self.k.perm_out, blocks, THREADS, 0, &[gate, plan, xb, x, Arg::U32(self.nb)])
     }
@@ -554,6 +567,14 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     pub fn factor_values(&self) -> Result<Vec<F>, GpuError> {
         let mut v = vec![F::zeroed(); self.factor_vals];
         self.dev.read(&self.work, self.sec.factor, bytemuck::cast_slice_mut(&mut v))?;
+        Ok(v)
+    }
+
+    /// The inverted diagonal tiles as `k_tile_inv` wrote them.
+    #[cfg(test)]
+    fn inv_values(&self) -> Result<Vec<F>, GpuError> {
+        let mut v = vec![F::zeroed(); self.n_inv as usize * plan::INV_TILE];
+        self.dev.read(&self.work, self.sec.inv, bytemuck::cast_slice_mut(&mut v))?;
         Ok(v)
     }
 
@@ -716,6 +737,8 @@ fn defines(scalar: &str, lu: usize, seed_lanes: u32, syrk_block: u32, trsm_rows:
         ("H_BLK_WIDTH", H_BLK_WIDTH),
         ("H_PART", H_PART),
         ("H_SOLVE_HEAD", H_SOLVE_HEAD),
+        ("H_INV_TILES", H_INV_TILES),
+        ("INV_TILE", INV_TILE),
         ("SOLVE_HEAD", plan::SOLVE_HEAD),
         ("GATHER_ROW", plan::GATHER_ROW),
     ];
@@ -968,6 +991,51 @@ mod tests {
         }
     }
 
+    /// `k_tile_inv` writes the inverse X of every 32 x 32 diagonal tile L
+    /// of the supernodes wider than NB twice, column-major and row-major:
+    /// L X = I to rounding, and X is zero past a partial tile's columns, in
+    /// f64 and f32.
+    #[test]
+    fn the_inverted_tiles_invert_the_diagonal_tiles() {
+        let (a, _, _) = grid_spd(24, &[3, 6], 11);
+        let order = nd_block_order(a.symbolic());
+        let sp = SupernodalParams { relax: Some(vec![(320, 1.0)]), ..SupernodalParams::default() };
+        let sn = SupernodalSymbolic::new(a.symbolic(), Some(&order), &sp).unwrap();
+        let plan = Plan::new(&sn, a.symbolic());
+        let tiles = plan.inv_tiles();
+        let dev = device();
+        fn check<F: Scalar>(dev: &Arc<TestDevice>, sn: &SupernodalSymbolic, a: &Matrix, plan: &Plan, tiles: &[u32], tol: f64) {
+            let mut g = GpuSupernodal::<F, _>::new(dev, sn, a.symbolic(), &GpuSupernodalParams::default(), Wide::F64).unwrap();
+            g.factorize(a.vals()).unwrap();
+            let (l, inv) = (widen(&g.factor_values().unwrap()), widen(&g.inv_values().unwrap()));
+            let mut partial = 0;
+            for (t, st) in tiles.chunks(2).enumerate() {
+                let (s, j0) = (st[0] as usize, st[1] as usize);
+                let (q, h, panel) = (plan.dims[2 * s] as usize, plan.dims[2 * s + 1] as usize, plan.val_ptr[s] as usize);
+                let nb = (q - j0).min(32);
+                partial += (nb < 32) as usize;
+                let x = &inv[t * plan::INV_TILE..(t + 1) * plan::INV_TILE];
+                for r in 0..32 {
+                    for c in 0..32 {
+                        let xrc = x[c * 32 + r];
+                        assert_eq!(xrc, x[1024 + r * 32 + c], "tile {t}: the two copies at ({r}, {c})");
+                        if r >= nb || c >= nb {
+                            assert_eq!(xrc, 0.0, "tile {t} of {nb} columns at ({r}, {c})");
+                            continue;
+                        }
+                        let lx: f64 = (0..=r).map(|k| l[panel + (j0 + k) * h + j0 + r] * x[c * 32 + k]).sum();
+                        let err = (lx - if r == c { 1.0 } else { 0.0 }).abs();
+                        assert!(err < tol, "{}: tile {t}, (L X)[{r}][{c}] off by {err}", F::CPP);
+                    }
+                }
+            }
+            assert!(partial > 0, "a tile narrower than 32 columns");
+        }
+        assert!(tiles.len() > 20, "inverted tiles: {}", tiles.len() / 2);
+        check::<f64>(&dev, &sn, &a, &plan, &tiles, 1e-12);
+        check::<f32>(&dev, &sn, &a, &plan, &tiles, 1e-4);
+    }
+
     /// The small kernel alone, on supernodes of three steps (the last
     /// narrower than a warp) and of rows past its block's first pass,
     /// matches the CPU's factor in f64 and f32.
@@ -1018,6 +1086,7 @@ mod tests {
                 ("bwd_trsv", &k.bwd_trsv),
                 ("fwd_chain", &k.fwd_chain),
                 ("bwd_chain", &k.bwd_chain),
+                ("tile_inv", &k.tile_inv),
             ];
             for (name, kernel) in kernels {
                 assert_eq!(kernel.local_bytes().unwrap(), 0, "k_{name} in {}: {} registers", F::CPP, kernel.registers().unwrap());

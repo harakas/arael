@@ -78,10 +78,18 @@ pub const H_ORDER: usize = 13;
 pub const H_BLK_WIDTH: usize = 14;
 pub const H_PART: usize = 15;
 /// The solve's header of every supernode, [`SOLVE_HEAD`] words: its
-/// columns q, its rows h, its first scalar column, its panel's offset, and
-/// the offset of its rows below in the row map (`H_ROW_SC`).
+/// columns q, its rows h, its first scalar column, its panel's offset, the
+/// offset of its rows below in the row map (`H_ROW_SC`), and its first
+/// inverted diagonal tile ([`H_INV_TILES`]; 0 for a supernode of at most
+/// [`NB`] columns, which has none).
 pub const H_SOLVE_HEAD: usize = 16;
-pub const SOLVE_HEAD: usize = 5;
+pub const SOLVE_HEAD: usize = 6;
+/// The inverted 32 x 32 diagonal tiles of the supernodes wider than
+/// [`NB`], 2 words each: the supernode and the tile's first column.
+pub const H_INV_TILES: usize = 17;
+/// Values per inverted diagonal tile: the inverse column-major (for the
+/// forward solve), then row-major (for the backward solve).
+pub const INV_TILE: usize = 2 * 32 * 32;
 /// Words of the header.
 pub const HEADER: usize = 32;
 
@@ -397,13 +405,20 @@ impl Plan {
         let mut buf: Vec<u32> = vec![0; HEADER];
         let pr_d: Vec<u32> = self.pairs.iter().map(|x| x.d).collect();
         let pr_r0: Vec<u32> = self.pairs.iter().map(|x| x.r0).collect();
+        let inv = self.inv_tiles();
+        let mut tile = 0;
         let head: Vec<u32> = (0..self.ns)
             .flat_map(|s| {
                 let col0 = self.sc_start[self.sup_begin[s] as usize];
-                [self.dims[2 * s], self.dims[2 * s + 1], col0, self.val_ptr[s], self.row_sc_off[s]]
+                let q = self.dims[2 * s];
+                let first = if q as usize > NB { tile } else { 0 };
+                if q as usize > NB {
+                    tile += q.div_ceil(32);
+                }
+                [q, self.dims[2 * s + 1], col0, self.val_ptr[s], self.row_sc_off[s], first]
             })
             .collect();
-        let arrays: [(usize, &[u32]); 17] = [
+        let arrays: [(usize, &[u32]); 18] = [
             (H_ORDER, &self.order),
             (H_BLK_WIDTH, &self.blk_width),
             (H_PART, &self.part),
@@ -421,12 +436,23 @@ impl Plan {
             (H_ROW_SC, &self.row_sc),
             (H_ROW_SC_OFF, &self.row_sc_off),
             (H_SOLVE_HEAD, &head),
+            (H_INV_TILES, &inv),
         ];
         for (slot, v) in arrays {
             buf[slot] = buf.len() as u32;
             buf.extend_from_slice(v);
         }
         buf
+    }
+
+    /// The inverted diagonal tiles ([`H_INV_TILES`]): a tile per 32
+    /// columns of every supernode wider than [`NB`], as (supernode, first
+    /// column), supernode by supernode.
+    pub fn inv_tiles(&self) -> Vec<u32> {
+        (0..self.ns)
+            .filter(|&s| self.dims[2 * s] as usize > NB)
+            .flat_map(|s| (0..self.dims[2 * s]).step_by(32).flat_map(move |j0| [s as u32, j0]))
+            .collect()
     }
 }
 
@@ -1196,6 +1222,35 @@ mod tests {
         assert_eq!(unset.trsm_rows_on(&arch(false, 16)), NB as u32);
         let set = GpuSupernodalParams { trsm_rows: Some(128), ..unset };
         assert_eq!((set.trsm_rows_on(&arch(true, 32)), set.trsm_rows_on(&arch(false, 32))), (128, 128));
+    }
+
+    /// Every supernode wider than NB has a tile per 32 columns in the
+    /// inverted tile list, in column order from its solve header's first
+    /// tile; a narrower one has none (first tile 0).
+    #[test]
+    fn the_inverse_tiles_follow_the_solve_heads() {
+        let (p, _, _) = analyse(40);
+        let words = p.pack();
+        let head = &words[words[H_SOLVE_HEAD] as usize..];
+        let inv = &words[words[H_INV_TILES] as usize..];
+        let (mut next, mut wide) = (0u32, 0);
+        for s in 0..p.ns {
+            let q = p.dims[2 * s];
+            let first = head[SOLVE_HEAD * s + 5];
+            if q as usize > NB {
+                assert_eq!(first, next, "supernode {s}: its first tile");
+                for (i, j0) in (0..q).step_by(32).enumerate() {
+                    let t = first as usize + i;
+                    assert_eq!(inv[2 * t..2 * t + 2], [s as u32, j0], "supernode {s}: tile {i}");
+                }
+                next += q.div_ceil(32);
+                wide += 1;
+            } else {
+                assert_eq!(first, 0, "supernode {s} of {q} columns");
+            }
+        }
+        assert!(wide > 1, "supernodes wider than NB: {wide}");
+        assert_eq!(p.inv_tiles().len(), 2 * next as usize);
     }
 
     /// Unset, the solve's GEMV takes blocks of 16384 multiply-adds on an
