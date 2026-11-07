@@ -254,7 +254,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let trsm_rows = params.trsm_rows_on(dev.arch());
         assert!(trsm_rows as usize >= NB && (NB * NB).is_multiple_of(trsm_rows as usize), "trsm_rows {trsm_rows} is at least {NB} and divides {NB} * {NB}");
         let plan = Plan::new(sn, asym);
-        let lw = build_levels(&plan, params, dev.arch().multiprocessors, syrk_block as usize, trsm_rows);
+        let lw = build_levels(&plan, params, dev.arch());
         let lu = params.lane_unroll.unwrap_or(if fs == 4 { 4 } else { 8 });
         assert!(lu >= 2 && lu.is_multiple_of(2), "the lane unroll is even and at least 2");
         // room for every array and its alignment, so the block is not regrown
@@ -758,7 +758,8 @@ mod tests {
             chain_flops_f64: 0.0,
             chain_items: 0,
             solve_chain_work: 0.0,
-            solve_work: 512,
+            gather_work: 512,
+            gemv_work: Some(512),
             lane_unroll: None,
             blocks_per_sm: 4,
             syrk_block: None,
@@ -841,7 +842,7 @@ mod tests {
         supernodal_solve(&sn, &cpu, &mut x_cpu, &mut ctx, 1);
         let dev = device();
         // the cut parameters do cut: some big tile is shared between items
-        let lw = plan::build_levels(&Plan::new(&sn, a.symbolic()), &cut_updates(), dev.arch().multiprocessors, NB, 32);
+        let lw = plan::build_levels(&Plan::new(&sn, a.symbolic()), &cut_updates(), dev.arch());
         assert!(lw.iter().any(|w| w.big_items.chunks(plan::BIG_ITEM).any(|it| it[7] == 1)), "a tile cut between items");
         for params in [GpuSupernodalParams::default(), every_kernel_busy(), cut_updates(), small_kernel_only(), chains_everywhere()].into_iter().chain(both_syrks()) {
             let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();

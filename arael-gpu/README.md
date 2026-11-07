@@ -121,8 +121,14 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
   this per multiprocessor has its tiles' updates cut across blocks (by
   rectangles, then along k), the shared tiles subtracted atomically; a
   level's small updates are cut into pieces of its share of the work.
-- `solve_work` (65536): the multiply-adds per block of the solve's gather
-  and GEMV.
+- `gather_work` (65536): the multiply-adds per block of the solve's
+  gather, which also takes at most 256 rows per block.
+- `gemv_work`: the multiply-adds per block of the solve's GEMV (the rows
+  below a supernode times its solved columns). Unset, 16384 on an
+  integrated GPU (and the CPU device) and 2048 on a discrete one: on SLAM
+  and pose graph systems an NVIDIA discrete GPU runs the GEMV fastest in
+  blocks of 1024 to 4096, an AMD integrated GPU in blocks of 16384.
+  Discrete AMD GPUs are not measured.
 - `lane_unroll`: the loads in flight of the backward dot products (8 in
   f64, 4 in f32).
 - `syrk_block`: the columns per block of the panel steps' trailing update,

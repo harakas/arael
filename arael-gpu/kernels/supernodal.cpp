@@ -1031,14 +1031,11 @@ KERNEL_THREADS(THREADS) void k_fwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL 
 }
 
 // Backward solve, part one: x_s -= L_below^T x for the columns [c0, c1) of
-// a supernode (the item at `it`, 3 words) by the block of THREADS threads;
-// the rows' x gathered into `xr` XR_CH at a time, a warp per column with
-// the lanes over the rows.
-DEVICE_INLINE void bwd_gemv_item(GLOBAL const u32* it, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* xr) {
+// supernode s by the block of THREADS threads; the rows' x gathered into
+// `xr` XR_CH at a time, a warp per column with the lanes over the rows. A
+// column's sums do not depend on the range it is in.
+DEVICE_INLINE void bwd_gemv_cols(u32 s, u32 c0, u32 c1, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* xr) {
     u32 o_row_sc = plan[H_ROW_SC];
-    u32 s = it[0];
-    u32 c0 = it[1];
-    u32 c1 = it[2];
     GLOBAL const u32* head = plan + plan[H_SOLVE_HEAD] + SOLVE_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
@@ -1061,6 +1058,11 @@ DEVICE_INLINE void bwd_gemv_item(GLOBAL const u32* it, GLOBAL const u32* plan, G
             if (lane == 0) x[col0 + c] -= part;
         }
     }
+}
+
+// The GEMV item at `it`, 3 words: its supernode and columns [c0, c1).
+DEVICE_INLINE void bwd_gemv_item(GLOBAL const u32* it, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* xr) {
+    bwd_gemv_cols(it[0], it[1], it[2], plan, factor, x, xr);
 }
 
 // The backward GEMV, one block per item (bwd_gemv_item).
@@ -1167,7 +1169,13 @@ KERNEL_THREADS_REGS(THREADS) void k_bwd_chain(GLOBAL const u32* RESTRICT gate, G
     while (lv > 0) {
         lv -= 1;
         GLOBAL const u32* rec = levels + 5 * lv;
-        for (u32 g = 0; g < rec[4]; g++) bwd_gemv_item(plan + rec[3] + 3 * g, plan, factor, x, xr);
+        // the level's GEMV items cover its one supernode's columns in
+        // order: run as one range, the rows' x gathered once
+        u32 ng = rec[4];
+        if (ng > 0) {
+            GLOBAL const u32* it = plan + rec[3];
+            bwd_gemv_cols(it[0], it[1], it[3 * (ng - 1) + 2], plan, factor, x, xr);
+        }
         // the GEMVs' x in; the previous trsv's reads of `smem` done
         BARRIER();
         bwd_trsv_one(rec[2], plan, factor, x, smem);

@@ -108,8 +108,12 @@ pub struct GpuSupernodalParams {
     /// length.
     pub wide_pair_k: u32,
     pub wide_pair_flops: f64,
-    /// Multiply-adds per block of the solve's gather and GEMV kernels.
-    pub solve_work: usize,
+    /// Multiply-adds per block of the solve's gather (`k_fwd_gather`),
+    /// whose blocks also take at most `GATHER_ITEM_ROWS` rows.
+    pub gather_work: usize,
+    /// Multiply-adds per block of the solve's GEMV (`k_bwd_gemv`). `None`
+    /// takes the device's choice ([`Self::gemv_work_on`]).
+    pub gemv_work: Option<usize>,
     /// Loads in flight per iteration of the backward dot products; `None`
     /// picks 8 for f64 and 4 for f32.
     pub lane_unroll: Option<usize>,
@@ -176,6 +180,20 @@ impl GpuSupernodalParams {
     pub fn trsm_rows_on(&self, arch: &crate::Arch) -> u32 {
         self.trsm_rows.unwrap_or(if arch.integrated { 64 } else { arch.warp.max(NB as u32) })
     }
+
+    /// [`gemv_work`](Self::gemv_work) on the device `arch`, unset: 16384 on
+    /// an integrated GPU or the CPU device, 2048 on a discrete GPU.
+    /// Measured on SLAM and pose graph systems: an NVIDIA discrete GPU runs
+    /// the GEMV fastest in blocks of 1024 to 4096 multiply-adds, an AMD
+    /// integrated GPU in blocks of 16384, slower with more, smaller blocks.
+    /// Discrete AMD GPUs are not measured.
+    ///
+    /// ```ignore
+    /// let work = GpuSupernodalParams::default().gemv_work_on(dev.arch());
+    /// ```
+    pub fn gemv_work_on(&self, arch: &crate::Arch) -> usize {
+        self.gemv_work.unwrap_or(if arch.integrated { 16384 } else { 2048 })
+    }
 }
 
 impl Default for GpuSupernodalParams {
@@ -190,7 +208,8 @@ impl Default for GpuSupernodalParams {
             chain_flops_f64: 0.0,
             chain_items: 32,
             solve_chain_work: 1e5,
-            solve_work: 65536,
+            gather_work: 65536,
+            gemv_work: None,
             lane_unroll: None,
             blocks_per_sm: 4,
             syrk_block: None,
@@ -481,11 +500,14 @@ const MIN_PAIR_WORK: f64 = 2048.0;
 /// The least work (multiply-adds) a big item is cut down to.
 const MIN_ITEM_WORK: f64 = (TB * TB * TK * 2) as f64;
 
-/// The level schedule of `p` on a device of `multiprocessors`: every
-/// supernode's work sorted into its level, the panel steps' grids for
-/// `k_syrk` in blocks of `syrk_block` columns and `k_trsm` in blocks of
-/// `trsm_rows` rows.
-pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: u32, syrk_block: usize, trsm_rows: u32) -> Vec<LevelWork> {
+/// The level schedule of `p` on the device `arch`: every supernode's work
+/// sorted into its level and cut into blocks, with the sizes of `kn` that
+/// the device chooses (the panel steps' `syrk_block` and `trsm_rows`, the
+/// solve's `gemv_work`).
+pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, arch: &crate::Arch) -> Vec<LevelWork> {
+    let syrk_block = kn.syrk_block_on(arch) as usize;
+    let trsm_rows = kn.trsm_rows_on(arch);
+    let gemv_work = kn.gemv_work_on(arch);
     let mut lw: Vec<LevelWork> = (0..p.nlevels).map(|_| LevelWork::default()).collect();
     let mut g_works = vec![0usize; p.nlevels];
     let mut small_pairs: Vec<Vec<usize>> = vec![Vec::new(); p.nlevels];
@@ -520,7 +542,7 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
                     w.g_fields[f].push(v);
                 }
                 let ng = w.g_items.len() / 2;
-                if ng > 0 && *g_work + dq as usize <= kn.solve_work && w.g_items[2 * ng - 1] < GATHER_ITEM_ROWS {
+                if ng > 0 && *g_work + dq as usize <= kn.gather_work && w.g_items[2 * ng - 1] < GATHER_ITEM_ROWS {
                     w.g_items[2 * ng - 1] += 1;
                     *g_work += dq as usize;
                 } else {
@@ -530,7 +552,7 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
             }
         }
         if h > q {
-            let per = ((kn.solve_work / (h - q) as usize) as u32).max(1);
+            let per = ((gemv_work / (h - q) as usize) as u32).max(1);
             let mut c0 = 0;
             while c0 < q {
                 w.bg_items.extend_from_slice(&[s as u32, c0, q.min(c0 + per)]);
@@ -614,7 +636,7 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
             w.g_rows.extend_from_slice(f);
         }
     }
-    let blocks = (multiprocessors * kn.blocks_per_sm) as usize;
+    let blocks = (arch.multiprocessors * kn.blocks_per_sm) as usize;
     for (w, pairs) in lw.iter_mut().zip(&small_pairs) {
         split_big(w, p, blocks);
         pair_pieces(w, p, pairs, blocks);
@@ -812,6 +834,16 @@ mod tests {
         (p, sn, asym)
     }
 
+    /// A device of `multiprocessors` with `warp` lanes, integrated or discrete.
+    fn arch(multiprocessors: u32, warp: u32, integrated: bool) -> crate::Arch {
+        crate::Arch { name: String::new(), target: String::new(), warp, shared_bytes: 49152, multiprocessors, has_f64: true, integrated }
+    }
+
+    /// A discrete device of `multiprocessors` with 32-lane warps.
+    fn discrete(multiprocessors: u32) -> crate::Arch {
+        arch(multiprocessors, 32, false)
+    }
+
     /// Every element of every descendant update that the factor needs (at
     /// or below the target's diagonal) is in exactly one small piece or big
     /// rectangle, over all of its k once (a big item may cover a k range),
@@ -825,7 +857,7 @@ mod tests {
     /// [`check_coverage`] on a `k x k` grid.
     fn check_coverage_of(k: usize, kn: &GpuSupernodalParams, multiprocessors: u32, both_kernels: bool) {
         let (p, _, _) = analyse(k);
-        let lw = build_levels(&p, kn, multiprocessors, NB, 32);
+        let lw = build_levels(&p, kn, &discrete(multiprocessors));
         let dq = |pi: usize| p.dims[2 * p.pairs[pi].d as usize];
         // per element of a pair, the k it is summed over
         let mut hits: Vec<Vec<u32>> = p.pairs.iter().map(|pr| vec![0u32; (pr.m * pr.kw) as usize]).collect();
@@ -900,11 +932,17 @@ mod tests {
             assert_eq!(next, n);
         }
         assert_eq!(got, want, "gather rows");
-        // the GEMV items: every column of every supernode with rows below, once
+        // the GEMV items: every column of every supernode with rows below,
+        // once; a supernode's items are consecutive and follow its columns
+        // from 0 (a solve chain runs them as one range)
         let mut cols: Vec<u32> = vec![0; p.ns];
         for w in &lw {
+            let (mut prev_s, mut prev_c1) = (u32::MAX, 0);
             for it in w.bg_items.chunks(3) {
                 cols[it[0] as usize] += it[2] - it[1];
+                let c0 = if it[0] == prev_s { prev_c1 } else { 0 };
+                assert_eq!(it[1], c0, "supernode {}: a GEMV item out of column order", it[0]);
+                (prev_s, prev_c1) = (it[0], it[2]);
             }
         }
         for s in 0..p.ns {
@@ -941,7 +979,8 @@ mod tests {
             chain_flops_f64: 0.0,
             chain_items: 0,
             solve_chain_work: 0.0,
-            solve_work: 512,
+            gather_work: 512,
+            gemv_work: Some(512),
             lane_unroll: None,
             blocks_per_sm: 4,
             syrk_block: None,
@@ -962,7 +1001,7 @@ mod tests {
         let kn = every_kernel_busy();
         check_coverage_of(40, &kn, 10_000, true);
         let (p, _, _) = analyse(40);
-        let (whole, cut) = (build_levels(&p, &kn, 1, NB, 32), build_levels(&p, &kn, 10_000, NB, 32));
+        let (whole, cut) = (build_levels(&p, &kn, &discrete(1)), build_levels(&p, &kn, &discrete(10_000)));
         let items = |lw: &[LevelWork]| lw.iter().map(|w| w.big_items.len() / BIG_ITEM).sum::<usize>();
         assert!(items(&cut) > items(&whole), "{} items against {}", items(&cut), items(&whole));
         let k_ranges = cut.iter().flat_map(|w| w.big_items.chunks(BIG_ITEM)).filter(|it| it[6] != 0).count();
@@ -992,7 +1031,7 @@ mod tests {
             check_coverage_of(40, &kn, multiprocessors, true);
             let blocks = (multiprocessors * kn.blocks_per_sm) as f64;
             let mut levels = 0;
-            for w in build_levels(&p, &kn, multiprocessors, NB, 32) {
+            for w in build_levels(&p, &kn, &discrete(multiprocessors)) {
                 let rect_work = |r: u32| slab_work(dq(w.big_rects[5 * r as usize]));
                 let total: f64 = (0..(w.big_rects.len() / 5) as u32).map(rect_work).sum();
                 let cap = (total / blocks).max(MIN_ITEM_WORK);
@@ -1025,7 +1064,7 @@ mod tests {
         let bound = works[works.len() / 2];
         assert!(works[0] <= bound && bound < works[works.len() - 1], "the grid has narrow supernodes either side of {bound}");
         let kn = GpuSupernodalParams { small_flops: bound, ..GpuSupernodalParams::default() };
-        let lw = build_levels(&p, &kn, 128, NB, 32);
+        let lw = build_levels(&p, &kn, &discrete(128));
         for w in &lw {
             for &s in &w.small_targets {
                 assert!(work(s as usize) <= bound, "supernode {s} is small at {} multiply-adds", work(s as usize));
@@ -1044,7 +1083,7 @@ mod tests {
     fn small_updates_are_cut_to_fill_the_device() {
         let (p, _, _) = analyse(40);
         let kn = GpuSupernodalParams::default();
-        let (whole, cut) = (build_levels(&p, &kn, 1, NB, 32), build_levels(&p, &kn, 10_000, NB, 32));
+        let (whole, cut) = (build_levels(&p, &kn, &discrete(1)), build_levels(&p, &kn, &discrete(10_000)));
         let items = |lw: &[LevelWork]| lw.iter().map(|w| w.pair_items.len() / PAIR_ITEM).sum::<usize>();
         assert!(items(&cut) > items(&whole), "{} pieces against {}", items(&cut), items(&whole));
         check_coverage_of(40, &kn, 1, false);
@@ -1063,7 +1102,7 @@ mod tests {
         let k = widths[widths.len() / 2];
         assert!(widths[0] < k, "the grid has narrower and wider descendants than {k}");
         let kn = GpuSupernodalParams { big_pair_flops: f64::INFINITY, wide_pair_k: k, wide_pair_flops: 0.0, ..GpuSupernodalParams::default() };
-        let lw = build_levels(&p, &kn, 128, NB, 32);
+        let lw = build_levels(&p, &kn, &discrete(128));
         let (mut big, mut small) = (0, 0);
         for w in &lw {
             for r in w.big_rects.chunks(5) {
@@ -1084,7 +1123,7 @@ mod tests {
     #[test]
     fn chains_take_runs_of_small_levels() {
         let (p, _, _) = analyse(24);
-        let lw = build_levels(&p, &GpuSupernodalParams::default(), 128, NB, 32);
+        let lw = build_levels(&p, &GpuSupernodalParams::default(), &discrete(128));
         let work = |w: &LevelWork| w.pair_work + w.small_work;
         let items = |w: &LevelWork| (w.pair_items.len() / PAIR_ITEM) as u32;
         let mut works: Vec<f64> = lw.iter().map(work).collect();
@@ -1113,7 +1152,7 @@ mod tests {
     #[test]
     fn solve_chains_take_runs_of_single_supernodes() {
         let (p, _, _) = analyse(24);
-        let lw = build_levels(&p, &GpuSupernodalParams::default(), 128, NB, 32);
+        let lw = build_levels(&p, &GpuSupernodalParams::default(), &discrete(128));
         let mut works: Vec<f64> = lw.iter().filter(|w| w.level_sn.len() == 1).map(|w| w.solve_work).collect();
         works.sort_by(f64::total_cmp);
         assert!(works.len() > 2, "the grid has levels of one supernode");
@@ -1136,7 +1175,7 @@ mod tests {
     /// what it says on every device.
     #[test]
     fn the_syrk_block_is_the_devices_unless_set() {
-        let arch = |integrated| crate::Arch { name: String::new(), target: String::new(), warp: 32, shared_bytes: 49152, multiprocessors: 2, has_f64: true, integrated };
+        let arch = |integrated| arch(2, 32, integrated);
         let unset = GpuSupernodalParams::default();
         assert_eq!(unset.syrk_block_on(&arch(true)), 128);
         assert_eq!(unset.syrk_block_on(&arch(false)), NB as u32);
@@ -1149,7 +1188,7 @@ mod tests {
     /// says on every device.
     #[test]
     fn the_trsm_rows_are_the_devices_unless_set() {
-        let arch = |integrated, warp| crate::Arch { name: String::new(), target: String::new(), warp, shared_bytes: 49152, multiprocessors: 2, has_f64: true, integrated };
+        let arch = |integrated, warp| arch(2, warp, integrated);
         let unset = GpuSupernodalParams::default();
         assert_eq!(unset.trsm_rows_on(&arch(true, 32)), 64);
         assert_eq!(unset.trsm_rows_on(&arch(false, 32)), 32);
@@ -1157,6 +1196,49 @@ mod tests {
         assert_eq!(unset.trsm_rows_on(&arch(false, 16)), NB as u32);
         let set = GpuSupernodalParams { trsm_rows: Some(128), ..unset };
         assert_eq!((set.trsm_rows_on(&arch(true, 32)), set.trsm_rows_on(&arch(false, 32))), (128, 128));
+    }
+
+    /// Unset, the solve's GEMV takes blocks of 16384 multiply-adds on an
+    /// integrated device and of 2048 on a discrete one; set, what it says
+    /// on every device.
+    #[test]
+    fn the_gemv_work_is_the_devices_unless_set() {
+        let unset = GpuSupernodalParams::default();
+        assert_eq!(unset.gemv_work_on(&arch(2, 32, true)), 16384);
+        assert_eq!(unset.gemv_work_on(&arch(128, 32, false)), 2048);
+        let set = GpuSupernodalParams { gemv_work: Some(1000), ..unset };
+        assert_eq!((set.gemv_work_on(&arch(2, 32, true)), set.gemv_work_on(&arch(128, 32, false))), (1000, 1000));
+    }
+
+    /// The GEMV items of a supernode with rows below hold at most the
+    /// device's `gemv_work` multiply-adds (or one column), so a discrete
+    /// device gets more of them than an integrated one; the gather items
+    /// hold at most `gather_work` (or one row).
+    #[test]
+    fn the_solve_items_hold_the_devices_work() {
+        let (p, _, _) = analyse(40);
+        let kn = GpuSupernodalParams { gather_work: 4096, ..GpuSupernodalParams::default() };
+        let count = |a: &crate::Arch| {
+            let work = kn.gemv_work_on(a);
+            let mut items = 0;
+            for w in build_levels(&p, &kn, a) {
+                for it in w.bg_items.chunks(3) {
+                    let (s, c0, c1) = (it[0] as usize, it[1], it[2]);
+                    let rows = (p.dims[2 * s + 1] - p.dims[2 * s]) as usize;
+                    assert!((c1 - c0) as usize * rows <= work.max(rows), "a GEMV item of {} columns x {rows} rows over {work}", c1 - c0);
+                }
+                // g_rows holds the rows field by field: the descendant is field 2
+                let n = (w.g_rows.len() / GATHER_ROW) as u32;
+                for g in w.g_items.chunks(2) {
+                    let work: usize = (g[0]..g[0] + g[1]).map(|r| p.dims[2 * w.g_rows[(2 * n + r) as usize] as usize] as usize).sum();
+                    assert!(g[1] == 1 || work <= kn.gather_work, "a gather item of {} rows and {work} multiply-adds", g[1]);
+                }
+                items += w.bg_items.len() / 3;
+            }
+            items
+        };
+        let (int, dis) = (count(&arch(2, 32, true)), count(&discrete(128)));
+        assert!(dis > int, "GEMV items: discrete {dis}, integrated {int}");
     }
 
     /// The trailing updates of a block's steps cover every column past each
