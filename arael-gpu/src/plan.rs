@@ -168,6 +168,17 @@ pub struct GpuSupernodalParams {
     /// compute the same factor. `None` takes the device's choice
     /// ([`Self::potf2_unroll_on`]).
     pub potf2_unroll: Option<bool>,
+    /// The narrowest supernode (columns, more than [`NB`]) whose triangular
+    /// solves run over many blocks, a launch per
+    /// [`trsv_block`](Self::trsv_block) columns; a narrower one is solved
+    /// by one block. A supernode too wide for one block's shared memory
+    /// always takes the many. `None` takes the device's choice
+    /// ([`Self::trsv_wide_on`]).
+    pub trsv_wide: Option<u32>,
+    /// Columns per launch of the triangular solves over many blocks, a
+    /// multiple of 32. `None` takes the device's choice
+    /// ([`Self::trsv_block_on`]).
+    pub trsv_block: Option<u32>,
 }
 
 impl GpuSupernodalParams {
@@ -242,6 +253,32 @@ impl GpuSupernodalParams {
     pub fn potf2_unroll_on(&self, arch: &crate::Arch) -> bool {
         self.potf2_unroll.unwrap_or(!arch.integrated)
     }
+
+    /// [`trsv_wide`](Self::trsv_wide) on the device `arch`, unset: 512 on a
+    /// discrete GPU, 1024 on an integrated GPU or the CPU device. Measured
+    /// on bundle adjustment, SLAM and pose graph systems: an NVIDIA discrete
+    /// GPU gains from 512 columns on (the solve of Ladybug-372's reduced
+    /// system about halves), an AMD integrated GPU, with fewer units to
+    /// spread over, only on wider supernodes. Discrete AMD GPUs are not
+    /// measured.
+    ///
+    /// ```ignore
+    /// let wide = GpuSupernodalParams::default().trsv_wide_on(dev.arch());
+    /// ```
+    pub fn trsv_wide_on(&self, arch: &crate::Arch) -> u32 {
+        self.trsv_wide.unwrap_or(if arch.integrated { 1024 } else { 512 })
+    }
+
+    /// [`trsv_block`](Self::trsv_block) on the device `arch`, unset: 128 on
+    /// a discrete GPU, 256 on an integrated GPU or the CPU device, where
+    /// fewer, longer launches measured faster.
+    ///
+    /// ```ignore
+    /// let block = GpuSupernodalParams::default().trsv_block_on(dev.arch());
+    /// ```
+    pub fn trsv_block_on(&self, arch: &crate::Arch) -> u32 {
+        self.trsv_block.unwrap_or(if arch.integrated { 256 } else { 128 })
+    }
 }
 
 impl Default for GpuSupernodalParams {
@@ -264,6 +301,8 @@ impl Default for GpuSupernodalParams {
             trsm_rows: None,
             syrk_tile: None,
             potf2_unroll: None,
+            trsv_wide: None,
+            trsv_block: None,
         }
     }
 }
@@ -548,10 +587,33 @@ pub(crate) struct LevelWork {
     /// them (the syrk's for [`build_levels`]' blocks, [`syrk_update`]).
     pub trsm_grid: Vec<u32>,
     pub syrk_grid: Vec<u32>,
+    /// The level's supernodes whose triangular solves run on one block each
+    /// (`k_fwd_trsv`, `k_bwd_trsv`).
+    pub narrow: Vec<u32>,
+    /// The other supernodes' forward solve over many blocks
+    /// (`k_fwd_trsv_wide`): per launch its items, [`TRSV_ITEM`] words each,
+    /// the supernode, the launch's block j and rows `[a, b)`; `a == b` is
+    /// block j's own solve.
+    pub wide_fwd: Vec<Vec<u32>>,
+    /// Their backward solve (`k_bwd_trsv_wide`): per launch its items, as
+    /// `wide_fwd`'s with the block k it solves and columns `[a, b)`.
+    pub wide_bwd: Vec<Vec<u32>>,
 }
 
 /// Words per big update item ([`LevelWork::big_items`]).
 pub const BIG_ITEM: usize = 8;
+
+/// Words per item of the triangular solves over many blocks
+/// ([`LevelWork::wide_fwd`]).
+pub const TRSV_ITEM: usize = 4;
+
+/// The most rows of a forward update item of the solves over many blocks:
+/// one a thread of the block.
+pub const TRSV_UPDATE_ROWS: u32 = 256;
+
+/// The most columns of a backward update item of the solves over many
+/// blocks, a warp per column.
+pub const TRSV_UPDATE_COLS: u32 = 32;
 
 /// Words per gather row ([`LevelWork::g_rows`]).
 pub const GATHER_ROW: usize = 3;
@@ -706,9 +768,15 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, arch: &crate::Arc
         }
     }
     let blocks = (arch.multiprocessors * kn.blocks_per_sm) as usize;
+    // a supernode wider than the one-block solve's shared memory holds
+    // takes the many blocks
+    let wide = kn.trsv_wide_on(arch).min((arch.shared_bytes as usize / fs) as u32 + 1);
+    let trsv_block = kn.trsv_block_on(arch);
+    assert!(trsv_block > 0 && trsv_block.is_multiple_of(32), "trsv_block {trsv_block} is a multiple of 32");
     for (w, pairs) in lw.iter_mut().zip(&small_pairs) {
         split_big(w, p, blocks);
         pair_pieces(w, p, pairs, blocks);
+        wide_trsv(w, p, wide, trsv_block);
     }
     // the panel steps' grid sizes
     for w in &mut lw {
@@ -813,6 +881,52 @@ fn pair_pieces(w: &mut LevelWork, p: &Plan, pairs: &[usize], blocks: usize) {
                 i0 = i1;
             }
             j0 = j1;
+        }
+    }
+}
+
+/// The level's triangular solves: a supernode of at least `wide` columns
+/// (and more than [`NB`]) over many blocks, a launch per `block` columns
+/// ([`LevelWork::wide_fwd`], [`LevelWork::wide_bwd`]), the others one block
+/// each ([`LevelWork::narrow`]). Forward launch j: block j's solve, and the
+/// rows past block j in items of [`TRSV_UPDATE_ROWS`] taking block j - 1
+/// off. Backward launch j solves block k = blocks - 1 - j, and the columns
+/// before block k in items of [`TRSV_UPDATE_COLS`] take block k + 1 off. A
+/// launch's solve items come first.
+fn wide_trsv(w: &mut LevelWork, p: &Plan, wide: u32, block: u32) {
+    let wide = wide.max(NB as u32 + 1);
+    let mut wides = Vec::new();
+    for &s in &w.level_sn {
+        let q = p.dims[2 * s as usize];
+        if q >= wide {
+            wides.push((s, q));
+        } else {
+            w.narrow.push(s);
+        }
+    }
+    let launches = wides.iter().map(|&(_, q)| q.div_ceil(block)).max().unwrap_or(0) as usize;
+    w.wide_fwd = vec![Vec::new(); launches];
+    w.wide_bwd = vec![Vec::new(); launches];
+    for &(s, q) in &wides {
+        let nd = q.div_ceil(block);
+        for j in 0..nd {
+            w.wide_fwd[j as usize].extend_from_slice(&[s, j, 0, 0]);
+            let k = nd - 1 - j;
+            w.wide_bwd[j as usize].extend_from_slice(&[s, k, 0, 0]);
+        }
+    }
+    for &(s, q) in &wides {
+        let nd = q.div_ceil(block);
+        for j in 1..nd {
+            let f = &mut w.wide_fwd[j as usize];
+            for r in ((j + 1) * block..q).step_by(TRSV_UPDATE_ROWS as usize) {
+                f.extend_from_slice(&[s, j, r, (r + TRSV_UPDATE_ROWS).min(q)]);
+            }
+            let k = nd - 1 - j;
+            let b = &mut w.wide_bwd[j as usize];
+            for c in (0..k * block).step_by(TRSV_UPDATE_COLS as usize) {
+                b.extend_from_slice(&[s, k, c, (c + TRSV_UPDATE_COLS).min(k * block)]);
+            }
         }
     }
 }
@@ -1056,6 +1170,8 @@ mod tests {
             trsm_rows: None,
             syrk_tile: None,
             potf2_unroll: None,
+            trsv_wide: None,
+            trsv_block: None,
         }
     }
 
@@ -1296,6 +1412,76 @@ mod tests {
         }
         assert!(wide > 1, "supernodes wider than NB: {wide}");
         assert_eq!(p.inv_tiles().len(), 2 * next as usize);
+    }
+
+    /// Unset, the triangular solves run over many blocks from 512 columns
+    /// on, in blocks of 128, on a discrete device, from 1024 in blocks of
+    /// 256 on an integrated one; set, what they say on every device.
+    #[test]
+    fn the_wide_trsv_sizes_are_the_devices_unless_set() {
+        let unset = GpuSupernodalParams::default();
+        let (int, dis) = (arch(2, 32, true), discrete(128));
+        assert_eq!((unset.trsv_wide_on(&int), unset.trsv_block_on(&int)), (1024, 256));
+        assert_eq!((unset.trsv_wide_on(&dis), unset.trsv_block_on(&dis)), (512, 128));
+        let set = GpuSupernodalParams { trsv_wide: Some(100), trsv_block: Some(64), ..unset };
+        assert_eq!((set.trsv_wide_on(&int), set.trsv_block_on(&int)), (100, 64));
+        assert_eq!((set.trsv_wide_on(&dis), set.trsv_block_on(&dis)), (100, 64));
+    }
+
+    /// The solves over many blocks: a level's supernodes are narrow or wide,
+    /// once; forward launch j solves block j of each wide supernode (its
+    /// first item there) and takes block j - 1 off every row past block j
+    /// once; backward launch j solves block k = blocks - 1 - j and takes
+    /// block k + 1 off every column before block k once.
+    #[test]
+    fn the_wide_trsv_items_cover_every_block_row_and_column() {
+        let (p, _, _) = analyse(40);
+        for block in [32u32, 64, 128] {
+            let kn = GpuSupernodalParams { trsv_wide: Some(33), trsv_block: Some(block), ..GpuSupernodalParams::default() };
+            let mut wides = 0;
+            for w in build_levels(&p, &kn, &discrete(128), 8) {
+                let wide: Vec<(u32, u32)> = w.level_sn.iter().map(|&s| (s, p.dims[2 * s as usize])).filter(|&(_, q)| q >= 33).collect();
+                let mut seen: Vec<u32> = w.narrow.iter().copied().chain(wide.iter().map(|&(s, _)| s)).collect();
+                let mut all = w.level_sn.clone();
+                seen.sort_unstable();
+                all.sort_unstable();
+                assert_eq!(seen, all, "narrow and wide supernodes");
+                for &(s, q) in &wide {
+                    wides += 1;
+                    let nd = q.div_ceil(block);
+                    for j in 0..nd {
+                        let items: Vec<&[u32]> = w.wide_fwd[j as usize].chunks(TRSV_ITEM).filter(|it| it[0] == s).collect();
+                        assert_eq!(items[0], &[s, j, 0, 0][..], "forward launch {j}: supernode {s} solves block {j} first");
+                        let mut rows = vec![0u32; q as usize];
+                        for it in &items[1..] {
+                            assert!(it[1] == j && it[2] < it[3] && it[3] - it[2] <= TRSV_UPDATE_ROWS, "forward item {it:?}");
+                            (it[2]..it[3]).for_each(|r| rows[r as usize] += 1);
+                        }
+                        for r in 0..q {
+                            assert_eq!(rows[r as usize], u32::from(j > 0 && r >= (j + 1) * block), "forward launch {j}, supernode {s}, row {r}");
+                        }
+                        let k = nd - 1 - j;
+                        let items: Vec<&[u32]> = w.wide_bwd[j as usize].chunks(TRSV_ITEM).filter(|it| it[0] == s).collect();
+                        assert_eq!(items[0], &[s, k, 0, 0][..], "backward launch {j}: supernode {s} solves block {k} first");
+                        let mut cols = vec![0u32; q as usize];
+                        for it in &items[1..] {
+                            assert!(it[1] == k && it[2] < it[3] && it[3] - it[2] <= TRSV_UPDATE_COLS, "backward item {it:?}");
+                            (it[2]..it[3]).for_each(|c| cols[c as usize] += 1);
+                        }
+                        for c in 0..q {
+                            assert_eq!(cols[c as usize], u32::from(j > 0 && c < k * block), "backward launch {j}, supernode {s}, column {c}");
+                        }
+                    }
+                    let past = |l: &Vec<Vec<u32>>| l[nd as usize..].iter().all(|items| items.chunks(TRSV_ITEM).all(|it| it[0] != s));
+                    assert!(past(&w.wide_fwd) && past(&w.wide_bwd), "supernode {s}: items past its {nd} launches");
+                }
+                for items in w.wide_fwd.iter().chain(&w.wide_bwd) {
+                    let solves: Vec<bool> = items.chunks(TRSV_ITEM).map(|it| it[2] == it[3]).collect();
+                    assert!(solves.windows(2).all(|x| x[0] || !x[1]), "a launch's solve items come first");
+                }
+            }
+            assert!(wides > 1, "wide supernodes: {wides}");
+        }
     }
 
     /// Unset, the panel steps unroll a full diagonal tile's pivots on a

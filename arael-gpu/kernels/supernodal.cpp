@@ -1071,20 +1071,59 @@ DEVICE_INLINE F trsv_bwd_warp(GLOBAL const F* factor, u32 panel, u32 h, u32 q, F
     return b;
 }
 
+// Row i's share of a forward step: L[i][j0 + c] y[c] over the step's nb
+// columns (at `panel`, column stride h), the full step's 32 loads issued
+// before its FMAs; the one-block and the many-block forward solves both
+// take a row's steps through it.
+DEVICE_INLINE F trsv_row_step(GLOBAL const F* factor, u32 panel, u32 h, u32 j0, u32 nb, u32 i, SHARED_PTR const F* y) {
+    F acc = F(0);
+    if (nb == 32) {
+        F v[32];
+#pragma unroll
+        for (u32 c = 0; c < 32; c++) v[c] = factor[panel + (j0 + c) * h + i];
+#pragma unroll
+        for (u32 c = 0; c < 32; c++) acc += v[c] * y[c];
+    } else {
+        for (u32 c = 0; c < nb; c++) acc += factor[panel + (j0 + c) * h + i] * y[c];
+    }
+    return acc;
+}
+
+// The forward trsv of the supernode at `head` (its solve header) by the
+// block over its columns [jlo, jend) (multiples of 32, or q), held in `xs`
+// from column jlo: the columns before js are solved and only taken off the
+// rows from js on (not off each other); from js on, each 32-column step's
+// diagonal tile is solved by the first warp as a product with its inverse
+// (`inv`, k_tile_inv) and taken off the rows after it, up to jend.
+DEVICE_INLINE void fwd_trsv_steps(GLOBAL const u32* head, GLOBAL const F* factor, GLOBAL const F* inv, SHARED_PTR F* xs, u32 jlo, u32 js, u32 jend) {
+    u32 q = head[0];
+    u32 h = head[1];
+    u32 panel = head[3];
+    u32 tile0 = head[5];
+    u32 t = thread_x();
+    const u32 nt = THREADS;
+    u32 lane = t % 32;
+    for (u32 j0 = jlo; j0 < jend; j0 += 32) {
+        u32 nb = min(q - j0, 32u);
+        // the step's x in: loaded, or updated by the steps before it
+        BARRIER();
+        if (j0 >= js && t < 32) tile_inv_apply(inv + (tile0 + j0 / 32) * INV_TILE, xs + (j0 - jlo), nb, lane);
+        BARRIER();
+        for (u32 i = max(j0 + nb, js) + t; i < jend; i += nt) xs[i - jlo] -= trsv_row_step(factor, panel, h, j0, nb, i, xs + (j0 - jlo));
+    }
+}
+
 // Forward solve, part two: the trsv of supernode s by the block of THREADS
 // threads; a supernode of at most 32 columns by the first warp in
-// registers (trsv_fwd_warp). Wider, in 32-column blocks: the diagonal
-// tile's solve by the first warp as a product with its inverse (`inv`,
-// k_tile_inv), the rows below updated by all threads with the full block's
-// 32 loads issued before its FMAs. `xs`: q values (dynamic shared memory
-// for the widest supernode q of the launch).
+// registers (trsv_fwd_warp), a wider one in 32-column steps
+// (fwd_trsv_steps). `xs`: q values (dynamic shared memory for the widest
+// supernode q of the launch).
 DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL const F* inv, GLOBAL F* x, SHARED_PTR F* xs) {
     GLOBAL const u32* head = plan + plan[H_SOLVE_HEAD] + SOLVE_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
     u32 col0 = head[2];
     u32 panel = head[3];
-    u32 tile0 = head[5];
     u32 t = thread_x();
     const u32 nt = THREADS;
     u32 lane = t % 32;
@@ -1097,26 +1136,7 @@ DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* f
         return;
     }
     for (u32 c0 = t; c0 < q; c0 += nt) xs[c0] = x[col0 + c0];
-    for (u32 j0 = 0; j0 < q; j0 += 32) {
-        u32 nb = min(q - j0, 32u);
-        // the block's x in: copied, or updated by the blocks before it
-        BARRIER();
-        if (t < 32) tile_inv_apply(inv + (tile0 + j0 / 32) * INV_TILE, xs + j0, nb, lane);
-        BARRIER();
-        for (u32 i = j0 + nb + t; i < q; i += nt) {
-            F acc = F(0);
-            if (nb == 32) {
-                F v[32];
-#pragma unroll
-                for (u32 c = 0; c < 32; c++) v[c] = factor[panel + (j0 + c) * h + i];
-#pragma unroll
-                for (u32 c = 0; c < 32; c++) acc += v[c] * xs[j0 + c];
-            } else {
-                for (u32 c = 0; c < nb; c++) acc += factor[panel + (j0 + c) * h + i] * xs[j0 + c];
-            }
-            xs[i] -= acc;
-        }
-    }
+    fwd_trsv_steps(head, factor, inv, xs, 0, 0, q);
     BARRIER();
     for (u32 c1 = t; c1 < q; c1 += nt) x[col0 + c1] = xs[c1];
 }
@@ -1170,24 +1190,51 @@ KERNEL_THREADS(THREADS) void k_bwd_gemv(GLOBAL const u32* RESTRICT gate, GLOBAL 
     bwd_gemv_item(items + 3 * block_x(), plan, factor, x, xr);
 }
 
+// The transposed trsv of the supernode at `head` by the block over its
+// columns [cbegin, cend) against its rows up to rend, `xs` holding
+// [cbegin, rend) from cbegin (the rows from cend on solved): 32-column
+// steps from the last, each step's columns taken the rows after the step
+// off (a warp per column), then its diagonal tile solved by the first warp
+// as a product with its inverse transposed (`inv`, k_tile_inv).
+DEVICE_INLINE void bwd_trsv_steps(GLOBAL const u32* head, GLOBAL const F* factor, GLOBAL const F* inv, SHARED_PTR F* xs, u32 cbegin, u32 cend, u32 rend) {
+    u32 q = head[0];
+    u32 h = head[1];
+    u32 panel = head[3];
+    u32 tile0 = head[5];
+    u32 t = thread_x();
+    u32 lane = t % 32;
+    u32 warp = t / 32;
+    u32 nwarps = THREADS / 32;
+    u32 bi = (cend + 31) / 32;
+    while (bi > cbegin / 32) {
+        bi -= 1;
+        u32 j0 = bi * 32;
+        u32 nb = min(q - j0, 32u);
+        u32 n = rend - j0 - nb;
+        for (u32 c = warp; c < nb; c += nwarps) {
+            u32 pc = panel + (j0 + c) * h + j0 + nb;
+            F part = warp_sum(lane_dot(factor, pc, xs, j0 + nb - cbegin, n, lane));
+            if (lane == 0) xs[j0 + c - cbegin] -= part;
+        }
+        BARRIER();
+        if (t < 32) tile_inv_apply(inv + (tile0 + bi) * INV_TILE + 1024, xs + (j0 - cbegin), nb, lane);
+        BARRIER();
+    }
+}
+
 // Backward solve, part two: the transposed trsv of supernode s by the block
 // of THREADS threads; a supernode of at most 32 columns by the first warp
-// in registers (trsv_bwd_warp). Wider, 32-column blocks from the last, the
-// block's columns against the rows below it (a warp per column), then the
-// diagonal tile's solve by the first warp as a product with its inverse
-// transposed (`inv`, k_tile_inv). `xs` as fwd_trsv_one's.
+// in registers (trsv_bwd_warp), a wider one in 32-column steps from the
+// last (bwd_trsv_steps). `xs` as fwd_trsv_one's.
 DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL const F* inv, GLOBAL F* x, SHARED_PTR F* xs) {
     GLOBAL const u32* head = plan + plan[H_SOLVE_HEAD] + SOLVE_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
     u32 col0 = head[2];
     u32 panel = head[3];
-    u32 tile0 = head[5];
     u32 t = thread_x();
     const u32 nt = THREADS;
     u32 lane = t % 32;
-    u32 warp = t / 32;
-    u32 nwarps = nt / 32;
     if (q <= NB) {
         // one 32-column block: the first warp in registers
         if (t < NB) {
@@ -1198,21 +1245,7 @@ DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* f
     }
     for (u32 c0 = t; c0 < q; c0 += nt) xs[c0] = x[col0 + c0];
     BARRIER();
-    u32 bi = (q + 31) / 32;
-    while (bi > 0) {
-        bi -= 1;
-        u32 j0 = bi * 32;
-        u32 nb = min(q - j0, 32u);
-        u32 n = q - j0 - nb;
-        for (u32 c = warp; c < nb; c += nwarps) {
-            u32 pc = panel + (j0 + c) * h + j0 + nb;
-            F part = warp_sum(lane_dot(factor, pc, xs, j0 + nb, n, lane));
-            if (lane == 0) xs[j0 + c] -= part;
-        }
-        BARRIER();
-        if (t < 32) tile_inv_apply(inv + (tile0 + bi) * INV_TILE + 1024, xs + j0, nb, lane);
-        BARRIER();
-    }
+    bwd_trsv_steps(head, factor, inv, xs, 0, q, q);
     for (u32 c1 = t; c1 < q; c1 += nt) x[col0 + c1] = xs[c1];
 }
 
@@ -1222,6 +1255,97 @@ KERNEL_THREADS_REGS(THREADS) void k_bwd_trsv(GLOBAL const u32* RESTRICT gate, GL
     if (gate[0] == 0) return;
     DYNAMIC_SHARED(F, smem);
     bwd_trsv_one(list[block_x()], plan, factor, inv, x, smem);
+}
+
+#if TRSV_BLOCK % 32 != 0 || TRSV_BLOCK == 0
+#error "supernodal.cpp: TRSV_BLOCK is a multiple of 32"
+#endif
+
+// The forward trsv of a wide supernode over many blocks, a launch per
+// block j of TRSV_BLOCK columns (GpuSupernodalParams::trsv_block): the
+// launch's items, 4 words each (the supernode, j, and rows [a, b)), a
+// block each. a == b: block j takes block j - 1 off its rows and solves
+// itself (fwd_trsv_steps). Otherwise rows [a, b) past block j, a row a
+// thread, take block j - 1 off in its 32-column steps (trsv_row_step). A
+// launch writes each row in one item; the launches order the blocks.
+KERNEL_THREADS(THREADS) void k_fwd_trsv_wide(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
+    if (gate[0] == 0) return;
+    SHARED F xs[2 * TRSV_BLOCK];
+    GLOBAL const u32* it = items + TRSV_ITEM * block_x();
+    u32 s = it[0];
+    u32 j = it[1];
+    u32 a = it[2];
+    u32 b = it[3];
+    GLOBAL const u32* head = plan + plan[H_SOLVE_HEAD] + SOLVE_HEAD * s;
+    u32 q = head[0];
+    u32 h = head[1];
+    u32 col0 = head[2];
+    u32 panel = head[3];
+    u32 t = thread_x();
+    const u32 nt = THREADS;
+    if (a == b) {
+        u32 jlo = j > 0 ? (j - 1) * TRSV_BLOCK : 0;
+        u32 js = j * TRSV_BLOCK;
+        u32 jend = min(js + TRSV_BLOCK, q);
+        for (u32 c = t; c < jend - jlo; c += nt) xs[c] = x[col0 + jlo + c];
+        fwd_trsv_steps(head, factor, inv, xs, jlo, js, jend);
+        BARRIER();
+        for (u32 c = js - jlo + t; c < jend - jlo; c += nt) x[col0 + jlo + c] = xs[c];
+    } else {
+        // block j - 1 is whole: its steps are 32 columns
+        u32 y0 = (j - 1) * TRSV_BLOCK;
+        for (u32 c = t; c < TRSV_BLOCK; c += nt) xs[c] = x[col0 + y0 + c];
+        BARRIER();
+        u32 i = a + t;
+        if (i < b) {
+            F xi = x[col0 + i];
+            for (u32 j0 = y0; j0 < y0 + TRSV_BLOCK; j0 += 32) xi -= trsv_row_step(factor, panel, h, j0, 32, i, xs + (j0 - y0));
+            x[col0 + i] = xi;
+        }
+    }
+}
+
+// The backward trsv of a wide supernode over many blocks, a launch per
+// block of TRSV_BLOCK columns from the last: the launch's items, 4 words
+// each (the supernode, the block k, and columns [a, b)), a block each.
+// a == b: block k takes block k + 1 (solved) off its columns and solves
+// itself (bwd_trsv_steps). Otherwise columns [a, b) before block k take
+// block k + 1's rows off, a warp per column, the lanes over the rows. A
+// launch writes each column in one item; the launches order the blocks.
+KERNEL_THREADS(THREADS) void k_bwd_trsv_wide(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
+    if (gate[0] == 0) return;
+    SHARED F xs[2 * TRSV_BLOCK];
+    GLOBAL const u32* it = items + TRSV_ITEM * block_x();
+    u32 s = it[0];
+    u32 k = it[1];
+    u32 a = it[2];
+    u32 b = it[3];
+    GLOBAL const u32* head = plan + plan[H_SOLVE_HEAD] + SOLVE_HEAD * s;
+    u32 q = head[0];
+    u32 h = head[1];
+    u32 col0 = head[2];
+    u32 panel = head[3];
+    u32 t = thread_x();
+    const u32 nt = THREADS;
+    if (a == b) {
+        u32 cbegin = k * TRSV_BLOCK;
+        u32 cend = min(cbegin + TRSV_BLOCK, q);
+        u32 rend = min(cbegin + 2 * TRSV_BLOCK, q);
+        for (u32 r = t; r < rend - cbegin; r += nt) xs[r] = x[col0 + cbegin + r];
+        BARRIER();
+        bwd_trsv_steps(head, factor, inv, xs, cbegin, cend, rend);
+        for (u32 r = t; r < cend - cbegin; r += nt) x[col0 + cbegin + r] = xs[r];
+    } else {
+        u32 r0 = (k + 1) * TRSV_BLOCK;
+        u32 r1 = min(r0 + TRSV_BLOCK, q);
+        for (u32 r = t; r < r1 - r0; r += nt) xs[r] = x[col0 + r0 + r];
+        BARRIER();
+        u32 lane = t % 32;
+        for (u32 c = a + t / 32; c < b; c += THREADS / 32) {
+            F part = warp_sum(lane_dot(factor, panel + c * h + r0, xs, 0, r1 - r0, lane));
+            if (lane == 0) x[col0 + c] -= part;
+        }
+    }
 }
 
 // A chain of the solve's levels, one supernode each, by one block in one

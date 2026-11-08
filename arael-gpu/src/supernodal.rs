@@ -42,6 +42,7 @@ const SOURCE: &str = include_str!("../kernels/supernodal.cpp");
 /// [`GpuSupernodalParams::trsm_rows`].
 const THREADS: u32 = 256;
 const _: () = assert!(plan::GATHER_ITEM_ROWS == THREADS, "a gather item is a row a thread");
+const _: () = assert!(plan::TRSV_UPDATE_ROWS == THREADS, "a forward update item of the wide trsv is a row a thread");
 
 /// The dynamic shared memory of `k_small_factor` on a supernode of `q`
 /// columns in a scalar of `fs` bytes: the diagonal block, the step's
@@ -98,6 +99,8 @@ struct Kernels<K> {
     perm_in: K,
     perm_out: K,
     tile_inv: K,
+    fwd_trsv_wide: K,
+    bwd_trsv_wide: K,
 }
 
 /// What the factorization launches, in order: one level's kernels, or a
@@ -129,10 +132,21 @@ struct Level {
     /// Per panel step, the grid sizes of `k_trsm` and `k_syrk`.
     trsm_grid: Vec<u32>,
     syrk_grid: Vec<u32>,
-    all: usize,
+    /// The level's supernodes (for tests).
+    #[cfg(test)]
     n_all: u32,
-    /// Dynamic shared memory of the trsv kernels: q values for the widest supernode.
+    /// Dynamic shared memory of a solve chain through the level: q values
+    /// for its widest supernode.
     trsv_shared: u32,
+    /// The supernodes the one-block trsv kernels solve, and their dynamic
+    /// shared memory, q values for the widest of them.
+    narrow: usize,
+    n_narrow: u32,
+    narrow_shared: u32,
+    /// Per launch of the trsvs over many blocks, forward and backward:
+    /// the items' byte offset in the structure block and count.
+    wide_fwd: Vec<(usize, u32)>,
+    wide_bwd: Vec<(usize, u32)>,
     /// The level's gather rows: their word offset in the structure block and count.
     g_rows: (u32, u32),
     g_items: usize,
@@ -261,7 +275,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         assert!(trsm_rows as usize >= NB && (NB * NB).is_multiple_of(trsm_rows as usize), "trsm_rows {trsm_rows} is at least {NB} and divides {NB} * {NB}");
         let syrk_tile = params.syrk_tile_on(dev.arch(), fs);
         assert!(syrk_tile == 32 || syrk_tile == 64, "syrk_tile {syrk_tile} is 32 or 64");
-        let sizes = DeviceSizes { syrk_block, syrk_tile, trsm_rows, potf2_unroll: params.potf2_unroll_on(dev.arch()) };
+        let sizes = DeviceSizes { syrk_block, syrk_tile, trsm_rows, potf2_unroll: params.potf2_unroll_on(dev.arch()), trsv_block: params.trsv_block_on(dev.arch()) };
         let plan = Plan::new(sn, asym);
         let lw = build_levels(&plan, params, dev.arch(), fs);
         let lu = params.lane_unroll.unwrap_or(if fs == 4 { 4 } else { 8 });
@@ -271,8 +285,9 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let level_words: usize = lw
             .iter()
             .map(|w| {
-                let lists = [&w.pair_items, &w.big_items, &w.big_rects, &w.small_targets, &w.big_targets, &w.level_sn, &w.g_rows, &w.bg_items];
-                lists.iter().map(|v| v.len()).sum::<usize>() + w.g_items.len() / 2 * 3 + 16 * 64
+                let lists = [&w.pair_items, &w.big_items, &w.big_rects, &w.small_targets, &w.big_targets, &w.level_sn, &w.g_rows, &w.bg_items, &w.narrow];
+                let wide: usize = w.wide_fwd.iter().chain(&w.wide_bwd).map(|v| v.len() + 64).sum();
+                lists.iter().map(|v| v.len()).sum::<usize>() + w.g_items.len() / 2 * 3 + wide + 16 * 64
             })
             .sum();
         // (the chains' records: 4 and 5 words a level)
@@ -291,13 +306,14 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             let small_q = w.small_targets.iter().map(q).max().unwrap_or(0);
             let small_h = w.small_targets.iter().map(|&s| plan.dims[2 * s as usize + 1]).max().unwrap_or(0);
             let max_q = w.level_sn.iter().map(q).max().unwrap_or(0);
-            let (small_shared, trsv_shared) = (small_shared_bytes(small_q, fs), max_q * fs);
+            let narrow_q = w.narrow.iter().map(q).max().unwrap_or(0);
+            let (small_shared, trsv_shared, narrow_shared) = (small_shared_bytes(small_q, fs), max_q * fs, narrow_q * fs);
             assert!(small_shared <= limit, "small_q is capped to the shared memory: {small_shared} bytes for {small_q} columns, {limit} given");
-            if trsv_shared > limit {
-                return Err(GpuError::Limit(format!(
-                    "the solve needs {trsv_shared} bytes of shared memory for a supernode of {max_q} columns, the device gives {limit}"
-                )));
-            }
+            assert!(narrow_shared <= limit, "a supernode wider than the shared memory holds takes the trsvs over many blocks");
+            let push_launches = |pk: &mut Packer, launches: &[Vec<u32>]| -> Vec<(usize, u32)> {
+                launches.iter().map(|items| (4 * pk.push(items), (items.len() / plan::TRSV_ITEM) as u32)).collect()
+            };
+            let (wide_fwd, wide_bwd) = (push_launches(&mut pk, &w.wide_fwd), push_launches(&mut pk, &w.wide_bwd));
             // the gather items with their first row's word offset in the structure block
             let g_at = pk.push(&w.g_rows) as u32;
             let g_n = (w.g_rows.len() / plan::GATHER_ROW) as u32;
@@ -316,9 +332,14 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 n_big: w.big_targets.len() as u32,
                 trsm_grid: w.trsm_grid,
                 syrk_grid: w.syrk_grid,
-                all: 4 * pk.push(&w.level_sn),
+                #[cfg(test)]
                 n_all: w.level_sn.len() as u32,
                 trsv_shared: trsv_shared as u32,
+                narrow: 4 * pk.push(&w.narrow),
+                n_narrow: w.narrow.len() as u32,
+                narrow_shared: narrow_shared as u32,
+                wide_fwd,
+                wide_bwd,
                 g_rows: (g_at, g_n),
                 g_items: 4 * pk.push(&g_items),
                 n_g: (w.g_items.len() / 2) as u32,
@@ -353,6 +374,9 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 })
                 .collect();
             let shared = levels[c.clone()].iter().map(|v| v.trsv_shared).max().unwrap_or(0);
+            if shared as usize > limit {
+                return Err(GpuError::Limit(format!("a solve chain needs {shared} bytes of shared memory, the device gives {limit}")));
+            }
             solve_steps.push(Step::Chain { records: 4 * pk.push(&records), n: c.len() as u32, shared });
             l = c.end;
         }
@@ -367,10 +391,10 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let seed_lanes = dev.arch().warp;
         let defines = format!("{}{}", wide.defines(), defines(F::CPP, fs, lu, seed_lanes, sizes));
         let source = format!("{WIDE}\n{SOURCE}");
-        let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_f64", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out", "k_tile_inv"];
-        let [zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv]: [D::Kernel; 21] =
+        let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_f64", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out", "k_tile_inv", "k_fwd_trsv_wide", "k_bwd_trsv_wide"];
+        let [zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv, fwd_trsv_wide, bwd_trsv_wide]: [D::Kernel; 23] =
             dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
-        let k = Kernels { zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv };
+        let k = Kernels { zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv, fwd_trsv_wide, bwd_trsv_wide };
         Ok(GpuSupernodal {
             dev: dev.clone(),
             k,
@@ -547,7 +571,12 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             if l.n_g > 0 {
                 self.run(&self.k.fwd_gather, l.n_g, THREADS, 0, &[gate, list(l.g_items), plan, factor, xb, xb])?;
             }
-            self.run(&self.k.fwd_trsv, l.n_all, THREADS, l.trsv_shared, &[gate, list(l.all), plan, factor, inv, xb])?;
+            if l.n_narrow > 0 {
+                self.run(&self.k.fwd_trsv, l.n_narrow, THREADS, l.narrow_shared, &[gate, list(l.narrow), plan, factor, inv, xb])?;
+            }
+            for &(items, n) in &l.wide_fwd {
+                self.run(&self.k.fwd_trsv_wide, n, THREADS, 0, &[gate, list(items), plan, factor, inv, xb])?;
+            }
         }
         for step in self.solve_steps.iter().rev() {
             let l = match *step {
@@ -560,7 +589,12 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             if l.n_bg > 0 {
                 self.run(&self.k.bwd_gemv, l.n_bg, THREADS, 0, &[gate, list(l.bg_items), plan, factor, xb])?;
             }
-            self.run(&self.k.bwd_trsv, l.n_all, THREADS, l.trsv_shared, &[gate, list(l.all), plan, factor, inv, xb])?;
+            for &(items, n) in &l.wide_bwd {
+                self.run(&self.k.bwd_trsv_wide, n, THREADS, 0, &[gate, list(items), plan, factor, inv, xb])?;
+            }
+            if l.n_narrow > 0 {
+                self.run(&self.k.bwd_trsv, l.n_narrow, THREADS, l.narrow_shared, &[gate, list(l.narrow), plan, factor, inv, xb])?;
+            }
         }
         self.run(&self.k.perm_out, blocks, THREADS, 0, &[gate, plan, xb, x, Arg::U32(self.nb)])
     }
@@ -591,6 +625,12 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     #[cfg(test)]
     fn solve_chained_levels(&self) -> usize {
         self.solve_steps.iter().map(|s| if let Step::Chain { n, .. } = s { *n as usize } else { 0 }).sum()
+    }
+
+    /// The levels whose trsvs run over many blocks.
+    #[cfg(test)]
+    fn wide_levels(&self) -> usize {
+        self.levels.iter().filter(|l| !l.wide_fwd.is_empty()).count()
     }
 
     /// The levels of one supernode.
@@ -715,6 +755,7 @@ struct DeviceSizes {
     syrk_tile: u32,
     trsm_rows: u32,
     potf2_unroll: bool,
+    trsv_block: u32,
 }
 
 /// The `#define`s of `supernodal.cpp`: the scalar, the lane unroll, the
@@ -722,10 +763,10 @@ struct DeviceSizes {
 /// slots of [`crate::plan`].
 fn defines(scalar: &str, scalar_bytes: usize, lu: usize, seed_lanes: u32, sizes: DeviceSizes) -> String {
     use plan::*;
-    let DeviceSizes { syrk_block, syrk_tile, trsm_rows, potf2_unroll } = sizes;
+    let DeviceSizes { syrk_block, syrk_tile, trsm_rows, potf2_unroll, trsv_block } = sizes;
     let mut s = format!(
         "#define SCALAR {scalar}\n#define SCALAR_BYTES {scalar_bytes}u\n#define LU {lu}u\n#define THREADS {THREADS}u\n#define SEED_LANES {seed_lanes}u\n\
-         #define SYRK_BLOCK {syrk_block}u\n#define SYRK_TB {syrk_tile}u\n#define TRSM_ROWS {trsm_rows}u\n#define POTF2_UNROLL {}\n",
+         #define SYRK_BLOCK {syrk_block}u\n#define SYRK_TB {syrk_tile}u\n#define TRSM_ROWS {trsm_rows}u\n#define POTF2_UNROLL {}\n#define TRSV_BLOCK {trsv_block}u\n",
         potf2_unroll as u32
     );
     let consts = [
@@ -758,6 +799,7 @@ fn defines(scalar: &str, scalar_bytes: usize, lu: usize, seed_lanes: u32, sizes:
         ("H_SOLVE_HEAD", H_SOLVE_HEAD),
         ("H_INV_TILES", H_INV_TILES),
         ("INV_TILE", INV_TILE),
+        ("TRSV_ITEM", TRSV_ITEM),
         ("SOLVE_HEAD", plan::SOLVE_HEAD),
         ("GATHER_ROW", plan::GATHER_ROW),
     ];
@@ -808,6 +850,8 @@ mod tests {
             trsm_rows: None,
             syrk_tile: None,
             potf2_unroll: None,
+            trsv_wide: None,
+            trsv_block: None,
         }
     }
 
@@ -964,12 +1008,12 @@ mod tests {
         assert!(rel_residual(&dense, sn.dim(), &x, &rhs) < 1e-10);
     }
 
-    /// The kernels' SYRK_BLOCK, SYRK_TB, TRSM_ROWS and POTF2_UNROLL are the
-    /// sizes asked for (`defines` brings `plan`'s names into scope, which
+    /// The kernels' SYRK_BLOCK, SYRK_TB, TRSM_ROWS, POTF2_UNROLL and
+    /// TRSV_BLOCK are the sizes asked for (`defines` brings `plan`'s names into scope, which
     /// once shadowed its flag).
     #[test]
     fn the_defines_carry_the_device_sizes() {
-        let base = DeviceSizes { syrk_block: 32, syrk_tile: 64, trsm_rows: 64, potf2_unroll: false };
+        let base = DeviceSizes { syrk_block: 32, syrk_tile: 64, trsm_rows: 64, potf2_unroll: false, trsv_block: 128 };
         let d = |sizes| defines("float", 4, 1, 32, sizes);
         assert!(d(base).contains("#define SYRK_BLOCK 32u\n"));
         assert!(d(DeviceSizes { syrk_block: 256, ..base }).contains("#define SYRK_BLOCK 256u\n"));
@@ -979,6 +1023,46 @@ mod tests {
         assert!(d(DeviceSizes { trsm_rows: 128, ..base }).contains("#define TRSM_ROWS 128u\n"));
         assert!(d(base).contains("#define POTF2_UNROLL 0\n"));
         assert!(d(DeviceSizes { potf2_unroll: true, ..base }).contains("#define POTF2_UNROLL 1\n"));
+        assert!(d(DeviceSizes { trsv_block: 256, ..base }).contains("#define TRSV_BLOCK 256u\n"));
+    }
+
+    /// The trsvs over many blocks (every supernode wider than 32 columns,
+    /// in blocks of 32, 64 and 128 columns, widths no multiple of the
+    /// block) solve as the one-block trsvs do: in f64 to rounding, and with
+    /// an f32 factor to single precision.
+    #[test]
+    fn wide_trsvs_solve_as_one_block_trsvs() {
+        let (a, dense, rhs) = grid_spd(24, &[3, 6], 11);
+        let order = nd_block_order(a.symbolic());
+        let sp = SupernodalParams { relax: Some(vec![(320, 1.0)]), ..SupernodalParams::default() };
+        let sn = SupernodalSymbolic::new(a.symbolic(), Some(&order), &sp).unwrap();
+        let n = sn.dim();
+        let dev = device();
+        let one = GpuSupernodalParams { trsv_wide: Some(u32::MAX), solve_chain_work: 0.0, ..GpuSupernodalParams::default() };
+        let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &one, Wide::F64).unwrap();
+        assert_eq!(g.wide_levels(), 0);
+        g.factorize(a.vals()).unwrap();
+        let mut x1 = rhs.clone();
+        g.solve(&mut x1).unwrap();
+        let max = x1.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        for block in [32, 64, 128] {
+            let wide = GpuSupernodalParams { trsv_wide: Some(33), trsv_block: Some(block), ..one };
+            let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &wide, Wide::F64).unwrap();
+            assert!(g.wide_levels() > 2, "levels over many blocks: {}", g.wide_levels());
+            g.factorize(a.vals()).unwrap();
+            let mut x = rhs.clone();
+            g.solve(&mut x).unwrap();
+            let diff = x.iter().zip(&x1).fold(0.0f64, |m, (u, v)| m.max((u - v).abs())) / max;
+            assert!(diff < 1e-12, "blocks of {block}: the solution off the one-block one by {diff}");
+            let res = rel_residual(&dense, n, &x, &rhs);
+            assert!(res < 1e-10, "blocks of {block}: residual {res}");
+            let mut g32 = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &wide, Wide::F64).unwrap();
+            g32.factorize(a.vals()).unwrap();
+            let mut x = rhs.clone();
+            g32.solve(&mut x).unwrap();
+            let res = rel_residual(&dense, n, &x, &rhs);
+            assert!(res < 1e-4, "blocks of {block}, an f32 factor: residual {res}");
+        }
     }
 
     /// Supernodes wider than two blocks of 128 columns, with rows below them

@@ -162,3 +162,15 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
   unrolled is faster on an NVIDIA discrete GPU and slower on an AMD
   integrated GPU, where its registers lower the occupancy of the whole
   trailing update. Discrete AMD GPUs are not measured.
+- `trsv_wide`: the narrowest supernode (columns) whose triangular solves
+  run over many blocks, a launch per `trsv_block` columns: one block
+  solves the launch's diagonal block, the others take the block before it
+  off the rows (forward) or columns (backward) past it. Narrower
+  supernodes are solved by one block each; one too wide for a block's
+  shared memory always takes the many. Unset, 512 on a discrete GPU, 1024
+  on an integrated one (and the CPU device): on an NVIDIA discrete GPU the
+  solve of a bundle adjustment's reduced system about halves; an AMD
+  integrated GPU, with fewer units, gains only on wider supernodes.
+- `trsv_block`: the columns per launch of those solves, a multiple of 32.
+  Unset, 128 on a discrete GPU, 256 on an integrated one, where fewer
+  launches measured faster. Discrete AMD GPUs are not measured.
