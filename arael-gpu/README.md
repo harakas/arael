@@ -184,3 +184,20 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
   both precisions, an NVIDIA discrete GPU 5 to 32% faster in `f64`, but
   up to 6% slower in `f32`, where the multiply-adds are cheap and the
   atomic adds are the cost. Discrete AMD GPUs are not measured.
+
+`GpuSchurParams` (`GpuSchur::with_params`), for the forming of S, which
+takes a tile of S per lockstep unit (a warp or a wavefront):
+
+- `tile_warps`: units per block. Unset, 4 on a discrete GPU, where a tile
+  of more than `split_pairs` (128) pairs takes a whole block, its units
+  summing every fourth pair; 1 on an integrated GPU (and the CPU device),
+  a block per tile in storage order. On an NVIDIA discrete GPU 4 units cut
+  the reduction's tail; an AMD integrated GPU has none to fill. Discrete
+  AMD GPUs are not measured.
+- `tile_groups`: lane groups per unit, 1, 2, 4 or 8, each on a different
+  pair of the tile, the groups' sums added at the tile's end. More groups
+  leave fewer lanes idle on small tiles. Unset, two when they issue more
+  than 10% fewer products over the plan's tiles than one, else one. On an
+  NVIDIA discrete and an AMD integrated GPU two groups form SLAM's 6 x 6
+  tiles in 20% and 11% less time than one, and bundle adjustment's 9 x 9
+  tiles in 3% and 15% more. Four groups are slower than two on both.

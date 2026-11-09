@@ -116,11 +116,13 @@ DEVICE u32 atomic_add(u32* p, u32 v) { return atomicAdd(p, v); }
 #if ARAEL_CUDA
 DEVICE float shfl_xor(float v, u32 mask) { return __shfl_xor_sync(0xffffffffu, v, mask); }
 DEVICE double shfl_xor(double v, u32 mask) { return __shfl_xor_sync(0xffffffffu, v, mask); }
+DEVICE u32 shfl_xor(u32 v, u32 mask) { return __shfl_xor_sync(0xffffffffu, v, mask); }
 DEVICE float shfl(float v, u32 src) { return __shfl_sync(0xffffffffu, v, (int)src); }
 DEVICE double shfl(double v, u32 src) { return __shfl_sync(0xffffffffu, v, (int)src); }
 #else
 DEVICE float shfl_xor(float v, u32 mask) { return __shfl_xor(v, (int)mask, (int)WARP); }
 DEVICE double shfl_xor(double v, u32 mask) { return __shfl_xor(v, (int)mask, (int)WARP); }
+DEVICE u32 shfl_xor(u32 v, u32 mask) { return __shfl_xor(v, (int)mask, (int)WARP); }
 DEVICE float shfl(float v, u32 src) { return __shfl(v, (int)src, (int)WARP); }
 DEVICE double shfl(double v, u32 src) { return __shfl(v, (int)src, (int)WARP); }
 #endif
@@ -211,6 +213,7 @@ template <typename T> DEVICE T atomic_add(T* p, typename arael_same<T>::type v) 
 
 DEVICE float shfl_xor(float v, u32 mask) { return arael_cpu::exchange(v, arael_cpu::lane() ^ mask); }
 DEVICE double shfl_xor(double v, u32 mask) { return arael_cpu::exchange(v, arael_cpu::lane() ^ mask); }
+DEVICE u32 shfl_xor(u32 v, u32 mask) { return arael_cpu::exchange(v, arael_cpu::lane() ^ mask); }
 DEVICE float shfl(float v, u32 src) { return arael_cpu::exchange(v, src); }
 DEVICE double shfl(double v, u32 src) { return arael_cpu::exchange(v, src); }
 DEVICE u32 uniform(u32 v) { return v; }

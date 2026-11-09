@@ -69,18 +69,50 @@ pub(crate) const SK_W: usize = 27;
 pub(crate) const SB_ITEMS: usize = 28;
 pub(crate) const SHEADER: usize = 32;
 
-/// Lockstep units (TILE_LANES threads each) per block of `k_schur_tiles`
-/// on a discrete GPU whose lockstep width is a unit's. Measured on bundle
-/// adjustment and SLAM: on an NVIDIA discrete GPU, 4 units, heavy tiles
-/// split over a block, cut the reduction's tail (`k_schur_tiles` 36% faster
-/// on Ladybug-372, 18% on slam); on an AMD integrated GPU, with nothing to
-/// fill, a block per tile in storage order measured fastest, so it takes
-/// one (as does a unit wider than the device's lockstep width).
-const TILE_WARPS: u32 = 4;
+/// How [`GpuSchur`] cuts the forming of S (`k_schur_tiles`), whose
+/// lockstep units (the device's lockstep width of threads each) take a tile
+/// of S each. The defaults are the measured ones.
+#[derive(Clone, Copy, Debug)]
+pub struct GpuSchurParams {
+    /// Units per block; `None` takes the device's choice
+    /// ([`Self::tile_warps_on`]).
+    pub tile_warps: Option<u32>,
+    /// The most pairs of a tile that one unit sums, with more than one unit
+    /// per block: a tile with more takes a whole block.
+    pub split_pairs: u32,
+    /// Lane groups per unit, 1, 2, 4 or 8: each group takes a different pair
+    /// of the tile, and the groups' sums are added at the tile's end. More
+    /// groups leave fewer lanes idle on small tiles (a 6 x 6 tile on 32
+    /// lanes: 36 of 64 lane-products busy with one group, 36 of 48 with
+    /// two) and take more registers and shared memory. `None`: two groups
+    /// when they issue more than 10% fewer products over the plan's tiles
+    /// than one, else one (measured: two on SLAM, one on bundle
+    /// adjustment; four slower than two on both).
+    pub tile_groups: Option<u32>,
+}
 
-/// The most pairs of a tile of S that one unit of `k_schur_tiles` sums; a
-/// tile with more takes a whole block.
-const SPLIT_PAIRS: u32 = 128;
+impl GpuSchurParams {
+    /// [`tile_warps`](Self::tile_warps) on the device `arch`, unset: 4 on a
+    /// discrete GPU, 1 on an integrated one. Measured on bundle adjustment
+    /// and SLAM: on an NVIDIA discrete GPU, 4 units, heavy tiles split over
+    /// a block, cut the reduction's tail (`k_schur_tiles` 36% faster on
+    /// Ladybug-372, 18% on slam); on an AMD integrated GPU, with nothing to
+    /// fill, a block per tile in storage order measured fastest. Discrete
+    /// AMD GPUs are not measured.
+    ///
+    /// ```ignore
+    /// let units = GpuSchurParams::default().tile_warps_on(dev.arch());
+    /// ```
+    pub fn tile_warps_on(&self, arch: &crate::Arch) -> u32 {
+        self.tile_warps.unwrap_or(if arch.integrated { 1 } else { 4 })
+    }
+}
+
+impl Default for GpuSchurParams {
+    fn default() -> Self {
+        GpuSchurParams { tile_warps: None, split_pairs: 128, tile_groups: None }
+    }
+}
 
 // The refinement's state on the device: f64 words and u32 flags, read back
 // with the step.
@@ -179,7 +211,9 @@ pub(crate) struct SchurPlan {
     pub dinv_len: usize,
     pub z_len: usize,
     pub w_len: usize,
-    /// The widest eliminated and kept blocks, rounded up as the kernels take them.
+    /// The widest eliminated block, and it and the widest kept block
+    /// rounded up as the kernels take them.
+    pub ew_max: usize,
     pub ew_cap: usize,
     pub kw_cap: usize,
     /// The widest kept block: a tile of S has at most kw_max^2 entries.
@@ -426,6 +460,7 @@ impl SchurPlan {
             dinv_len: dinv_len as usize,
             z_len: z_len as usize,
             w_len: w_len as usize,
+            ew_max,
             ew_cap,
             kw_cap,
             kw_max,
@@ -545,10 +580,11 @@ pub struct GpuSchur<D: Device> {
     status_at: usize,
     ne: u32,
     no: u32,
-    /// Threads per tile of S in `k_schur_tiles`, its units per block, and
-    /// its blocks.
+    /// Threads per unit of `k_schur_tiles`, its units per block, its lane
+    /// groups per unit, and its blocks.
     lanes: u32,
     tile_warps: u32,
+    tile_groups: u32,
     tile_blocks: u32,
     /// Threads per observer in `k_schur_w`.
     w_rows: u32,
@@ -570,32 +606,44 @@ impl<D: Device> GpuSchur<D> {
     /// structure `hsym`, uploaded to `dev`, with the reduction's blocks and
     /// kernels, in `wide`.
     pub fn new(dev: &Arc<D>, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> Result<Self, GpuError> {
-        Self::build(dev, SchurPlan::reduction(sym, hsym), hsym.val_count(), wide)
+        Self::with_params(dev, sym, hsym, wide, &GpuSchurParams::default())
+    }
+
+    /// [`new`](Self::new) with the work cut by `params`.
+    ///
+    /// ```ignore
+    /// let params = GpuSchurParams { tile_groups: Some(1), ..Default::default() };
+    /// let g = GpuSchur::with_params(&dev, &sym, h.symbolic(), Wide::F64, &params)?;
+    /// ```
+    pub fn with_params(dev: &Arc<D>, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide, params: &GpuSchurParams) -> Result<Self, GpuError> {
+        Self::build(dev, SchurPlan::reduction(sym, hsym), hsym.val_count(), wide, params)
     }
 
     /// [`new`](Self::new) with nothing eliminated: S is H, and a solve is
     /// the whole system's.
     pub fn whole(dev: &Arc<D>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> Result<Self, GpuError> {
-        Self::build(dev, SchurPlan::whole(hsym), hsym.val_count(), wide)
+        Self::build(dev, SchurPlan::whole(hsym), hsym.val_count(), wide, &GpuSchurParams::default())
     }
 
-    fn build(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide) -> Result<Self, GpuError> {
-        Self::build_lanes(dev, p, nh, wide, dev.arch().warp.max(PLANE), SPLIT_PAIRS)
+    fn build(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide, params: &GpuSchurParams) -> Result<Self, GpuError> {
+        Self::build_lanes(dev, p, nh, wide, dev.arch().warp.max(PLANE), params)
     }
 
-    /// [`build`](Self::build) with `lanes` threads per tile of S in
-    /// `k_schur_tiles` (the device's lockstep width in `build`), and a tile
-    /// of more than `split_pairs` pairs on a whole block of it.
-    fn build_lanes(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide, lanes: u32, split_pairs: u32) -> Result<Self, GpuError> {
+    /// [`build`](Self::build) with `lanes` threads per unit of
+    /// `k_schur_tiles` (the device's lockstep width in `build`).
+    fn build_lanes(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide, lanes: u32, params: &GpuSchurParams) -> Result<Self, GpuError> {
         // k_schur_w's threads per observer, a row of W each
         let w_rows = p.kw_cap as u32;
-        // a unit wider than the device's lockstep width, or an integrated
-        // device, takes a block alone
-        let tile_warps = if lanes == dev.arch().warp && !dev.arch().integrated { TILE_WARPS } else { 1 };
-        let defines = format!("{}{}", wide.defines(), defines(&p, lanes, tile_warps));
+        // a unit wider than the device's lockstep width takes a block alone:
+        // its barrier is the block's
+        let tile_warps = if lanes == dev.arch().warp { params.tile_warps_on(dev.arch()) } else { 1 };
+        assert!(tile_warps >= 1, "tile_warps {tile_warps} is at least 1");
+        let tile_groups = params.tile_groups.unwrap_or_else(|| tile_groups(&p.words, p.nt as usize, lanes));
+        assert!(matches!(tile_groups, 1 | 2 | 4 | 8), "tile_groups {tile_groups} is 1, 2, 4 or 8");
+        let defines = format!("{}{}", wide.defines(), defines(&p, lanes, tile_warps, tile_groups));
         let (kt_ptr_words, kt_words) = tiles_by_kept_block(&p);
         let mut pk = Packer { words: p.words };
-        let blocks = tile_blocks(&pk.words, p.nt as usize, tile_warps as usize, split_pairs);
+        let blocks = tile_blocks(&pk.words, p.nt as usize, tile_warps as usize, params.split_pairs);
         let tile_blocks = (blocks.len() / (tile_warps as usize + 1)) as u32;
         let at_blocks = pk.push(&blocks);
         pk.words[SB_ITEMS] = at_blocks as u32;
@@ -645,6 +693,7 @@ impl<D: Device> GpuSchur<D> {
             no: p.no,
             lanes,
             tile_warps,
+            tile_groups,
             tile_blocks,
             w_rows,
             nk: p.nk,
@@ -657,6 +706,12 @@ impl<D: Device> GpuSchur<D> {
             host_out: vec![0; status_at + STATUS_BYTES],
             step: vec![0.0; p.n],
         })
+    }
+
+    /// The lane groups per unit of the forming of S
+    /// ([`GpuSchurParams::tile_groups`]), as given or as the plan chose.
+    pub fn tile_groups(&self) -> u32 {
+        self.tile_groups
     }
 
     /// The device the reduction runs on; its factor runs there too.
@@ -1002,9 +1057,54 @@ fn tile_blocks(words: &[u32], nt: usize, units: usize, split_pairs: u32) -> Vec<
     out
 }
 
+/// The entries of a tile of S per lane of `k_schur_tiles`, at most, for
+/// kept blocks of at most `kw_max` columns, `groups` groups of a unit of
+/// `lanes` lanes.
+fn tile_acc(kw_max: usize, lanes: u32, groups: u32) -> usize {
+    (kw_max * kw_max).div_ceil((lanes / groups) as usize)
+}
+
+/// [`tile_groups`] picks two lane groups per unit when they issue fewer
+/// products than one by more than this share.
+const TWO_GROUPS_SAVING: f64 = 0.1;
+
+/// The lane groups per unit of `k_schur_tiles`
+/// ([`GpuSchurParams::tile_groups`]) for the plan's `nt` tiles (`words`)
+/// on units of `lanes` lanes: two when they issue more than
+/// [`TWO_GROUPS_SAVING`] fewer products than one ([`issued_products`]),
+/// else one. Measured on an NVIDIA discrete and an AMD integrated GPU: on
+/// SLAM's 6 x 6 tiles two groups save 24% of the products and take 20% and
+/// 11% less time than one; on bundle adjustment's 9 x 9 tiles they save 2%
+/// and take 3% and 15% more; four groups are slower than two on both.
+fn tile_groups(words: &[u32], nt: usize, lanes: u32) -> u32 {
+    let (one, two) = (issued_products(words, nt, lanes, 1), issued_products(words, nt, lanes, 2));
+    if (two as f64) < (1.0 - TWO_GROUPS_SAVING) * one as f64 { 2 } else { 1 }
+}
+
+/// The products `k_schur_tiles` issues over the plan's `nt` tiles
+/// (`words`) with `groups` groups of a unit of `lanes` lanes, per column of
+/// the pairs' eliminated blocks: per tile, its pairs over the groups times
+/// its entries over a group's lanes, both rounded up.
+///
+/// A 6 x 6 tile of 4 pairs on 32 lanes: 2 x 3 with 2 groups against 4 x 2
+/// with one; of 1 pair, 1 x 3 against 1 x 2.
+fn issued_products(words: &[u32], nt: usize, lanes: u32, groups: u32) -> u64 {
+    let at = |slot: usize| &words[words[slot] as usize..][..nt];
+    let (wr, wc, a, b) = (at(ST_WR), at(ST_WC), at(ST_A), at(ST_B));
+    let ptr = &words[words[ST_PAIR_PTR] as usize..][..nt + 1];
+    let group_lanes = (lanes / groups) as u64;
+    (0..nt)
+        .map(|t| {
+            let (r, c) = (wr[t] as u64, wc[t] as u64);
+            let entries = if a[t] == b[t] { r * (r + 1) / 2 } else { r * c };
+            ((ptr[t + 1] - ptr[t]) as u64).div_ceil(groups as u64) * entries.div_ceil(group_lanes)
+        })
+        .sum()
+}
+
 /// The `#define`s of `schur.cpp`: the block sizes, the width classes, and
 /// the plan header's and the status's slots of [`crate::schur`].
-fn defines(p: &SchurPlan, lanes: u32, tile_warps: u32) -> String {
+fn defines(p: &SchurPlan, lanes: u32, tile_warps: u32, tile_groups: u32) -> String {
     let mut s = String::new();
     define_u32s(
         &mut s,
@@ -1012,10 +1112,11 @@ fn defines(p: &SchurPlan, lanes: u32, tile_warps: u32) -> String {
             ("THREADS", THREADS as usize),
             ("TILE_LANES", lanes as usize),
             ("TILE_WARPS", tile_warps as usize),
+            ("TILE_GROUPS", tile_groups as usize),
+            ("EWX", p.ew_max),
             ("EW", p.ew_cap),
             ("KW", p.kw_cap),
-            // the entries of a tile of S per lane, at most
-            ("ACC", (p.kw_max * p.kw_max).div_ceil(lanes as usize)),
+            ("ACC", tile_acc(p.kw_max, lanes, tile_groups)),
             ("SE_DIAG_OFF", SE_DIAG_OFF),
             ("SE_W", SE_W),
             ("SE_ORIG_OFF", SE_ORIG_OFF),
@@ -1126,23 +1227,28 @@ mod tests {
     }
 
     /// Tiles split over a block's units (every tile of more than one pair)
-    /// and tiles on one unit each reduce as the CPU does, in both wide
-    /// scalars.
+    /// and tiles on one unit each, on 1, 2, 4 and 8 lane groups a unit,
+    /// reduce as the CPU does, in both wide scalars. The fixture's
+    /// eliminated blocks are 2 and 3 wide, so a step's groups take pairs of
+    /// different widths.
     #[test]
-    fn split_tiles_reduce_as_the_cpu() {
+    fn split_and_grouped_tiles_reduce_as_the_cpu() {
         let (h, _, rhs, elim) = ba_like(40, 300, 5);
         let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
+        assert!(sym.elim_w().contains(&2) && sym.elim_w().contains(&3), "eliminated blocks of two widths");
         let mut s_cpu = sym.alloc_s::<f64>();
         let mut rhs_cpu = vec![0.0f64; sym.kept_size()];
         schur_reduce(&sym, &h, &rhs, &mut SchurContext::new(), &mut s_cpu, &mut rhs_cpu).unwrap();
         let dev = device();
         for wide in WIDES {
             for split_pairs in [1, u32::MAX] {
-                let p = SchurPlan::reduction(&sym, h.symbolic());
-                let mut g = GpuSchur::build_lanes(&dev, p, h.symbolic().val_count(), wide, dev.arch().warp.max(PLANE), split_pairs).unwrap();
-                g.reduce(h.vals(), &rhs).unwrap();
-                let es = err_max(&g.download().unwrap().0, s_cpu.vals());
-                assert!(es < 1e-12, "{wide:?}, tiles over {split_pairs} pairs split: S err/max {es}");
+                for groups in [1, 2, 4, 8] {
+                    let params = GpuSchurParams { split_pairs, tile_groups: Some(groups), ..Default::default() };
+                    let mut g = GpuSchur::with_params(&dev, &sym, h.symbolic(), wide, &params).unwrap();
+                    g.reduce(h.vals(), &rhs).unwrap();
+                    let es = err_max(&g.download().unwrap().0, s_cpu.vals());
+                    assert!(es < 1e-12, "{wide:?}, tiles over {split_pairs} pairs split, {groups} groups: S err/max {es}");
+                }
             }
         }
     }
@@ -1159,10 +1265,10 @@ mod tests {
         let ptr = &p.words[p.words[ST_PAIR_PTR] as usize..][..p.nt as usize + 1];
         let pairs = |t: u32| ptr[t as usize + 1] - ptr[t as usize];
         let split_pairs = 20;
-        let blocks = tile_blocks(&p.words, p.nt as usize, TILE_WARPS as usize, split_pairs);
+        let units = 4;
+        let blocks = tile_blocks(&p.words, p.nt as usize, units, split_pairs);
         let mut seen = vec![0u32; p.nt as usize];
         let mut order = Vec::new();
-        let units = TILE_WARPS as usize;
         for item in blocks.chunks(units + 1) {
             if item[0] != 0 {
                 assert!(pairs(item[1]) > split_pairs && item[2..].iter().all(|&t| t == NONE), "split item {item:?}");
@@ -1184,21 +1290,75 @@ mod tests {
         assert_eq!(one, (0..p.nt).flat_map(|t| [0, t]).collect::<Vec<u32>>());
     }
 
+    /// The plan words [`issued_products`] reads, for tiles of (rows,
+    /// columns, diagonal, pairs).
+    fn tiles_plan(tiles: &[(u32, u32, bool, u32)]) -> Vec<u32> {
+        let mut words = vec![0u32; SHEADER];
+        let mut ptr = vec![0u32];
+        for t in tiles {
+            ptr.push(ptr.last().unwrap() + t.3);
+        }
+        let arrays: [(usize, Vec<u32>); 5] = [
+            (ST_WR, tiles.iter().map(|t| t.0).collect()),
+            (ST_WC, tiles.iter().map(|t| t.1).collect()),
+            (ST_A, (0..tiles.len() as u32).collect()),
+            (ST_B, tiles.iter().zip(0u32..).map(|(t, i)| if t.2 { i } else { i + 1 }).collect()),
+            (ST_PAIR_PTR, ptr),
+        ];
+        for (slot, v) in arrays {
+            words[slot] = words.len() as u32;
+            words.extend(v);
+        }
+        words
+    }
+
+    /// A tile's issued products: its pairs over the groups times its
+    /// entries over a group's lanes, both rounded up; a diagonal tile's
+    /// entries its upper ones.
+    #[test]
+    fn the_issued_products_count_steps_and_lane_passes() {
+        let issued = |tile, groups| issued_products(&tiles_plan(&[tile]), 1, 32, groups);
+        assert_eq!(issued((6, 6, false, 4), 1), 4 * 2);
+        assert_eq!(issued((6, 6, false, 4), 2), 2 * 3);
+        assert_eq!(issued((6, 6, false, 1), 1), 2);
+        assert_eq!(issued((6, 6, false, 1), 2), 3);
+        // 21 upper entries
+        assert_eq!(issued((6, 6, true, 4), 1), 4);
+        assert_eq!(issued((6, 6, true, 4), 2), 2 * 2);
+        assert_eq!(issued((6, 6, false, 0), 2), 0);
+    }
+
+    /// Two lane groups for 6 x 6 tiles of many pairs (SLAM), one for 9 x 9
+    /// tiles (bundle adjustment) and for tiles of one pair.
+    #[test]
+    fn two_groups_take_small_tiles_of_many_pairs() {
+        let groups = |tile| tile_groups(&tiles_plan(&[tile; 10]), 10, 32);
+        assert_eq!(groups((6, 6, false, 40)), 2);
+        assert_eq!(groups((9, 9, false, 40)), 1);
+        assert_eq!(groups((6, 6, false, 1)), 1);
+        // no pairs, as in a whole system's plan
+        assert_eq!(groups((6, 6, false, 0)), 1);
+    }
+
     /// A tile of S on 64 lanes, as on a 64-lane wavefront, is the tile on
-    /// 32.
+    /// 32, with one lane group a unit and with several (a group's pairs and
+    /// the order of the groups' sums do not depend on the lanes).
     #[test]
     fn a_tile_on_64_lanes_is_the_tile_on_32() {
         let (h, _, rhs, elim) = ba_like(40, 300, 5);
         let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
         let dev = device();
         for wide in WIDES {
-            let reduce = |lanes| {
-                let p = SchurPlan::reduction(&sym, h.symbolic());
-                let mut g = GpuSchur::build_lanes(&dev, p, h.symbolic().val_count(), wide, lanes, SPLIT_PAIRS).unwrap();
-                g.reduce(h.vals(), &rhs).unwrap();
-                g.download().unwrap()
-            };
-            assert_eq!(reduce(64), reduce(32), "{wide:?}");
+            for groups in [1, 4] {
+                let reduce = |lanes| {
+                    let p = SchurPlan::reduction(&sym, h.symbolic());
+                    let params = GpuSchurParams { tile_groups: Some(groups), ..Default::default() };
+                    let mut g = GpuSchur::build_lanes(&dev, p, h.symbolic().val_count(), wide, lanes, &params).unwrap();
+                    g.reduce(h.vals(), &rhs).unwrap();
+                    g.download().unwrap()
+                };
+                assert_eq!(reduce(64), reduce(32), "{wide:?}, {groups} groups");
+            }
         }
     }
 
@@ -1490,7 +1650,8 @@ mod tests {
     }
 
     /// At BA widths (eliminated blocks of 3, kept of 6) the per-thread
-    /// arrays stay in registers: no kernel uses local memory (a GPU's).
+    /// arrays stay in registers: no kernel uses local memory (a GPU's), on
+    /// 1, 2, 4 and 8 lane groups a unit.
     #[test]
     #[cfg(any(feature = "cuda", feature = "hip"))]
     fn the_kernels_keep_their_arrays_in_registers() {
@@ -1502,10 +1663,13 @@ mod tests {
     #[cfg(any(feature = "cuda", feature = "hip"))]
     fn the_kernels_keep_their_arrays_in_registers_in(wide: Wide) {
         let (h, _, _, _, sym, _) = setup(10, 30, 2);
-        let g = GpuSchur::new(&device(), &sym, h.symbolic(), wide).unwrap();
-        let k = &g.k;
-        for (name, kernel) in [("elim", &k.elim), ("tiles", &k.tiles), ("rhs", &k.rhs), ("backsub", &k.backsub)] {
-            assert_eq!(kernel.local_bytes().unwrap(), 0, "k_schur_{name}: {} registers", kernel.registers().unwrap());
+        for groups in [1, 2, 4, 8] {
+            let params = GpuSchurParams { tile_groups: Some(groups), ..Default::default() };
+            let g = GpuSchur::with_params(&device(), &sym, h.symbolic(), wide, &params).unwrap();
+            let k = &g.k;
+            for (name, kernel) in [("elim", &k.elim), ("tiles", &k.tiles), ("rhs", &k.rhs), ("backsub", &k.backsub)] {
+                assert_eq!(kernel.local_bytes().unwrap(), 0, "{wide:?} k_schur_{name}, {groups} tile groups: {} registers", kernel.registers().unwrap());
+            }
         }
     }
 

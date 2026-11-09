@@ -56,7 +56,7 @@ pub use cache::{KernelCache, kernel_cache, set_kernel_cache};
 pub use disk::take_cache_failure;
 pub use lm::{LmVectors, Scalars};
 pub use plan::GpuSupernodalParams;
-pub use schur::{GpuSchur, GpuSchurError, GraphKey, RefineStats};
+pub use schur::{GpuSchur, GpuSchurError, GpuSchurParams, GraphKey, RefineStats};
 pub use supernodal::{FactorizeError, GpuFactor, GpuSupernodal};
 
 /// The device this crate's tests run on: CUDA when its runtime is built

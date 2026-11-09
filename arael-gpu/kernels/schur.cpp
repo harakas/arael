@@ -2,15 +2,17 @@
 // reduced solve (docs/dev/GPU.md, E2 and E9), launched by
 // arael-gpu/src/schur.rs over its plan.
 //
-// In W, the route's wide scalar (wide.h). Compiled per EW (the widest
-// eliminated block, rounded up to 4, 8, 16, 32 or 64), KW (the widest kept
-// block, rounded likewise), TILE_LANES (k_schur_tiles' threads per tile:
-// the device's lockstep width, 32 or 64), TILE_WARPS (its units per block)
-// and ACC (the widest kept block's square over TILE_LANES, rounded up: the
-// entries of a tile of S per lane); the plan header's
-// slots (SE_*, SO_*, ST_*, SP_*, SK_*, SB_*), the refinement state's words (R_*)
-// and flags (F_*) come from schur.rs as #defines. Kernels launched with
-// THREADS threads per block, or PLANE where said.
+// In W, the route's wide scalar (wide.h). Compiled per EWX (the widest
+// eliminated block), EW (it rounded up to 4, 8, 16, 32 or 64), KW (the
+// widest kept block, rounded likewise), TILE_LANES (k_schur_tiles' threads
+// per unit: the device's lockstep width, 32 or 64), TILE_WARPS (its units
+// per block), TILE_GROUPS (a unit's lane groups) and ACC (the widest kept
+// block's square over a group's lanes, rounded up: the entries of a tile of
+// S per lane);
+// the plan header's slots (SE_*, SO_*, ST_*, SP_*, SK_*, SB_*), the
+// refinement state's words (R_*) and flags (F_*) come from schur.rs as
+// #defines. Kernels launched with THREADS threads per block, or PLANE where
+// said.
 //
 // Per-thread arrays are indexed only by constants once their loops unroll:
 // the loops run to EW or KW and skip what is past the block's width, so the
@@ -157,12 +159,17 @@ KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL c
 // Stage 3, blocks of TILE_WARPS lockstep units of TILE_LANES threads, the
 // plan's block items (SB_ITEMS, TILE_WARPS + 1 words each): word 0 zero, a
 // tile of S per unit (NONE: idle); nonzero, one heavy tile on the whole
-// block, its units taking every TILE_WARPS-th pair and summing their
+// block, its units taking every TILE_WARPS-th step and summing their
 // accumulators in shared memory at the end. A tile: the kept-kept tile of
-// H (or nothing) minus W_oa C_ob^T over its pairs, lane `lane` of the unit
-// owning the entries lane, lane + TILE_LANES, ... (ACC of them at most); a
+// H (or nothing) minus W_oa C_ob^T over its pairs, the sum accumulated and
+// subtracted once at the end (a sign in the products' loop is an f64
+// instruction of its own where the selects below take it). A unit's lanes
+// form TILE_GROUPS groups of GROUP_LANES, lane `lane` in group lane %
+// TILE_GROUPS; a step of the unit takes TILE_GROUPS consecutive pairs, one
+// per group, and the groups' sums are added at the tile's end. Lane `l` of
+// a group owns the entries l, l + GROUP_LANES, ... (ACC of them at most); a
 // diagonal tile its upper entries only, zeros below. A pair's W_oa and C_ob
-// are copied once into the unit's shared memory as they lie in memory; in
+// are copied once into its group's shared memory as they lie in memory; in
 // f64 the products go straight into the accumulators. A unit's tile is the
 // same in all its lanes, so are its plan words (scalar loads on AMD).
 // A unit's barrier: its lockstep width's, or, when a unit is wider than the
@@ -172,14 +179,72 @@ KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL c
 #else
 #define UNIT_BARRIER() WARP_BARRIER()
 #endif
+#define GROUP_LANES (TILE_LANES / TILE_GROUPS)
 
-KERNEL_THREADS(TILE_LANES * TILE_WARPS) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const W* RESTRICT w, GLOBAL W* RESTRICT s) {
-    SHARED W ws_all[TILE_WARPS * KW * EW];
-    SHARED W cs_all[TILE_WARPS * KW * EW];
-    SHARED W red[TILE_WARPS * ACC * TILE_LANES];
+// v + a c, a and c zeros where not `on` (past a group's pair's width;
+// always on with one group).
+DEVICE W tile_fma(W v, bool on, W a, W c) {
+    on = TILE_GROUPS == 1 || on;
+    W zero = 0.0f;
+    return wide_fma(v, on ? a : zero, on ? c : zero);
+}
+
+// A step's products: acc[m] plus W_oa(i, k) C_ob(j, k) over the columns k,
+// (i, j) the entry of ij[m], W_oa(i, k) at ws[i we + k] and C_ob(j, k) at
+// cs[j cj + k ck], zeros past the group's pair's width `we`. The columns
+// to K, a constant: unrolled, without conditions; with K 0 to kn, uniform:
+// a loop (unrolled to EW behind guards, the compiler turns the guards into
+// predicates and all EW products issue). The loop indexes shared memory
+// only. An accumulator past the tile's n entries in every lane is skipped.
+template <u32 K>
+DEVICE_INLINE void tile_products(W* acc, const u32* ij, u32 n, u32 kn, u32 we, u32 cj, u32 ck, SHARED_PTR const W* ws, SHARED_PTR const W* cs) {
+#pragma unroll
+    for (u32 m = 0; m < ACC; m++) {
+        if (GROUP_LANES * m < n) {
+            SHARED_PTR const W* a = ws + (ij[m] & 0xffffu) * we;
+            SHARED_PTR const W* c = cs + (ij[m] >> 16) * cj;
+#if ARAEL_WIDE_DF32
+            // df32: the pair's sum first, then one accurate addition
+            W v = 0.0f;
+            if constexpr (K != 0) {
+#pragma unroll
+                for (u32 k = 0; k < K; k++) v = tile_fma(v, k < we, a[k], c[k * ck]);
+            } else {
+#pragma unroll 1
+                for (u32 k = 0; k < kn; k++) v = tile_fma(v, k < we, a[k], c[k * ck]);
+            }
+            acc[m] += v;
+#else
+            if constexpr (K != 0) {
+#pragma unroll
+                for (u32 k = 0; k < K; k++) acc[m] = tile_fma(acc[m], k < we, a[k], c[k * ck]);
+            } else {
+#pragma unroll 1
+                for (u32 k = 0; k < kn; k++) acc[m] = tile_fma(acc[m], k < we, a[k], c[k * ck]);
+            }
+#endif
+        }
+    }
+}
+
+// df32: registers uncapped, as capped to fit more blocks the accumulators of
+// several groups spill (CUDA); f64 runs faster capped.
+#if ARAEL_WIDE_DF32
+#define TILES_ENTRY KERNEL_THREADS_REGS(TILE_LANES * TILE_WARPS)
+#else
+#define TILES_ENTRY KERNEL_THREADS(TILE_LANES * TILE_WARPS)
+#endif
+TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const W* RESTRICT w, GLOBAL W* RESTRICT s) {
+    SHARED W ws_all[TILE_WARPS * TILE_GROUPS * KW * EW];
+    SHARED W cs_all[TILE_WARPS * TILE_GROUPS * KW * EW];
+    SHARED W red[TILE_WARPS * ACC * GROUP_LANES];
     u32 lane = thread_x() % TILE_LANES;
+    // the groups interleaved, so each 32-lane warp holds all of them and
+    // their sums are shuffles
+    u32 g = lane % TILE_GROUPS;
+    u32 l = lane / TILE_GROUPS;
     // the unit, and so its tile, uniform in the unit: the pair loop's
-    // guards on the pair's width stay branches
+    // guards on the tile's size stay branches
     u32 unit = uniform(thread_x() / TILE_LANES);
     GLOBAL const u32* item = plan + plan[SB_ITEMS] + (TILE_WARPS + 1) * block_x();
     bool split = item[0] != 0;
@@ -187,8 +252,8 @@ KERNEL_THREADS(TILE_LANES * TILE_WARPS) void k_schur_tiles(GLOBAL const u32* RES
     // a unit without a tile ends here; a split block has no idle unit, and
     // only it waits for the whole block
     if (t == NONE) return;
-    SHARED_PTR W* ws = ws_all + unit * KW * EW;
-    SHARED_PTR W* cs = cs_all + unit * KW * EW;
+    SHARED_PTR W* ws = ws_all + (unit * TILE_GROUPS + g) * KW * EW;
+    SHARED_PTR W* cs = cs_all + (unit * TILE_GROUPS + g) * KW * EW;
     u32 o_ew = plan[SE_W];
     u32 o_ca = plan[SO_CA_OFF];
     u32 o_trans = plan[SO_TRANS];
@@ -209,83 +274,98 @@ KERNEL_THREADS(TILE_LANES * TILE_WARPS) void k_schur_tiles(GLOBAL const u32* RES
     // the entries computed: a diagonal tile's upper ones, column by column
     u32 n = diag ? wr * (wr + 1) / 2 : wr * wc;
     W acc[ACC];
-    // each accumulator's entry of the tile, i | j << 16, found once
+    // each accumulator's entry of the tile, i | j << 16, found once; past
+    // the tile's entries, entry (0, 0), computed and not written, so the
+    // products need no condition of the lane's own
     u32 ij[ACC];
 #pragma unroll
     for (u32 m = 0; m < ACC; m++) {
         acc[m] = 0.0f;
-        u32 ent = lane + TILE_LANES * m;
-        u32 i;
-        u32 j;
-        if (diag) {
-            j = 0;
-            while ((j + 1) * (j + 2) / 2 <= ent) j++;
-            i = ent - j * (j + 1) / 2;
-        } else {
-            j = ent / wr;
-            i = ent - j * wr;
+        u32 ent = l + GROUP_LANES * m;
+        u32 i = 0;
+        u32 j = 0;
+        if (ent < n) {
+            if (diag) {
+                while ((j + 1) * (j + 2) / 2 <= ent) j++;
+                i = ent - j * (j + 1) / 2;
+            } else {
+                j = ent / wr;
+                i = ent - j * wr;
+            }
         }
         ij[m] = i | (j << 16);
     }
-    for (u32 p = p0 + (split ? unit : 0u); p < p1; p += split ? TILE_WARPS : 1u) {
-        u32 oa = plan[o_oa + p];
-        u32 ob = plan[o_ob + p];
-        u32 e = plan[o_e + oa];
-        u32 we = plan[o_ew + e];
-        u32 woff = plan[o_woff + oa];
-        u32 cb = plan[o_ca + ob];
-        u32 tb = plan[o_trans + ob];
-        u32 wb = plan[o_ow + ob];
-        // the unit's previous pair's reads are done
+    // a unit's steps, every TILE_WARPS-th of a split tile
+    u32 stride = (split ? TILE_WARPS : 1u) * TILE_GROUPS;
+    for (u32 q = p0 + (split ? unit * TILE_GROUPS : 0u); q < p1; q += stride) {
+        // the group's pair; none past the tile's last
+        u32 p = q + g;
+        u32 we = 0u;
+        u32 woff = 0u;
+        u32 cb = 0u;
+        u32 tb = 0u;
+        u32 wb = 0u;
+        if (p < p1) {
+            u32 oa = plan[o_oa + p];
+            u32 ob = plan[o_ob + p];
+            we = plan[o_ew + plan[o_e + oa]];
+            woff = plan[o_woff + oa];
+            cb = plan[o_ca + ob];
+            tb = plan[o_trans + ob];
+            wb = plan[o_ow + ob];
+        }
+        // the step's widest pair, uniform in the unit (one group's too, for
+        // the compiler): the products' columns
+        u32 wu = we;
+#pragma unroll
+        for (u32 o = 1; o < TILE_GROUPS; o <<= 1) {
+            u32 x = shfl_xor(wu, o);
+            wu = x > wu ? x : wu;
+        }
+        wu = uniform(wu);
+        // the unit's previous step's reads are done
         UNIT_BARRIER();
         // W_oa (row-major wr x we) and C_ob as H holds it (coupling(): row j
         // at j we when transposed, else column k at k wb), both contiguous:
         // one pass of coalesced loads, no index division
-        for (u32 x = lane; x < wr * we; x += TILE_LANES) ws[x] = w[woff + x];
-        for (u32 x = lane; x < wc * we; x += TILE_LANES) cs[x] = h[cb + x];
+        for (u32 x = l; x < wr * we; x += GROUP_LANES) ws[x] = w[woff + x];
+        for (u32 x = l; x < wc * we; x += GROUP_LANES) cs[x] = h[cb + x];
         UNIT_BARRIER();
         // entry (j, k) of C_ob at cs[j cj + k ck]
         u32 cj = tb != 0 ? we : 1u;
         u32 ck = tb != 0 ? 1u : wb;
+        if (wu == EWX) tile_products<EWX>(acc, ij, n, wu, we, cj, ck, ws, cs);
+        else tile_products<0>(acc, ij, n, wu, we, cj, ck, ws, cs);
+    }
+    // the groups' sums, in every lane
 #pragma unroll
-        for (u32 m = 0; m < ACC; m++) {
-            if (lane + TILE_LANES * m < n) {
-                u32 wi = (ij[m] & 0xffffu) * we;
-                u32 cjo = (ij[m] >> 16) * cj;
-#if ARAEL_WIDE_DF32
-                // df32: the pair's sum first, then one accurate subtraction
-                W v = 0.0f;
+    for (u32 m = 0; m < ACC; m++) {
 #pragma unroll
-                for (u32 k = 0; k < EW; k++)
-                    if (k < we) v = wide_fma(v, ws[wi + k], cs[cjo + k * ck]);
-                acc[m] -= v;
-#else
-#pragma unroll
-                for (u32 k = 0; k < EW; k++)
-                    if (k < we) acc[m] = wide_fma(acc[m], -ws[wi + k], cs[cjo + k * ck]);
-#endif
-            }
-        }
+        for (u32 o = 1; o < TILE_GROUPS; o <<= 1) acc[m] += shfl_xor(acc[m], o);
     }
     if (split) {
         // the units' sums, added in unit order by the first unit
+        if (g == 0) {
 #pragma unroll
-        for (u32 m = 0; m < ACC; m++) red[(unit * ACC + m) * TILE_LANES + lane] = acc[m];
+            for (u32 m = 0; m < ACC; m++) red[(unit * ACC + m) * GROUP_LANES + l] = acc[m];
+        }
         BARRIER();
         if (unit != 0) return;
 #pragma unroll
         for (u32 m = 0; m < ACC; m++) {
-            for (u32 u = 1; u < TILE_WARPS; u++) acc[m] += red[(u * ACC + m) * TILE_LANES + lane];
+            for (u32 u = 1; u < TILE_WARPS; u++) acc[m] += red[(u * ACC + m) * GROUP_LANES + l];
         }
     }
+    if (g == 0) {
 #pragma unroll
-    for (u32 m = 0; m < ACC; m++) {
-        if (lane + TILE_LANES * m < n) {
-            u32 i = ij[m] & 0xffffu;
-            u32 j = ij[m] >> 16;
-            W v = acc[m];
-            if (copy != NONE) v += h[copy + i + j * wr];
-            s[val + i + j * wr] = v;
+        for (u32 m = 0; m < ACC; m++) {
+            if (l + GROUP_LANES * m < n) {
+                u32 i = ij[m] & 0xffffu;
+                u32 j = ij[m] >> 16;
+                W zero = 0.0f;
+                W v = (copy != NONE ? h[copy + i + j * wr] : zero) - acc[m];
+                s[val + i + j * wr] = v;
+            }
         }
     }
     if (diag) {
