@@ -174,3 +174,13 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
 - `trsv_block`: the columns per launch of those solves, a multiple of 32.
   Unset, 128 on a discrete GPU, 256 on an integrated one, where fewer
   launches measured faster. Discrete AMD GPUs are not measured.
+- `pair_tiles`: whether the big descendant updates are tiled in each
+  pair's own rows and columns, every result added into the target
+  atomically, instead of in the target's 64 x 64 tiles, which sum the
+  rectangles of several pairs in shared memory but compute each rectangle
+  as a whole tile. Pair tiles execute about half the multiply-adds. Unset,
+  on an integrated GPU (and the CPU device), and on a discrete one for an
+  `f64` factor: an AMD integrated GPU factors 13 to 29% faster with them in
+  both precisions, an NVIDIA discrete GPU 5 to 32% faster in `f64`, but
+  up to 6% slower in `f32`, where the multiply-adds are cheap and the
+  atomic adds are the cost. Discrete AMD GPUs are not measured.

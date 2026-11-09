@@ -732,23 +732,24 @@ KERNEL_THREADS(TRSM_ROWS) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npa
 // A k_syrk thread's accumulator rows (and columns) in its tile, 16 apart.
 #define SYRK_R (SYRK_TB / 16)
 
-// One slab of nk staged columns into a thread's accumulators: rows
-// tx + 16 r of sa against columns ty + 16 c of sb, acc[SYRK_R r + c]. On a
-// diagonal tile (DIAG) the accumulators with r < c lie wholly above the
-// diagonal, which the tile does not write, and are skipped.
-template <bool DIAG> DEVICE_INLINE void syrk_slab(F (&acc)[SYRK_R * SYRK_R], SHARED_PTR const F* sa, SHARED_PTR const F* sb, u32 nk, u32 tx, u32 ty) {
+// One slab of nk staged columns of a 16 R x 16 R tile into a thread's
+// accumulators: rows tx + 16 r of sa against columns ty + 16 c of sb (each
+// staged column 16 R values), acc[R r + c]. On a diagonal tile (DIAG) the
+// accumulators with r < c lie wholly above the diagonal, which the tile
+// does not write, and are skipped.
+template <u32 R, bool DIAG> DEVICE_INLINE void tile_slab(F (&acc)[R * R], SHARED_PTR const F* sa, SHARED_PTR const F* sb, u32 nk, u32 tx, u32 ty) {
     for (u32 kk = 0; kk < nk; kk++) {
-        F a[SYRK_R];
-        F b[SYRK_R];
+        F a[R];
+        F b[R];
 #pragma unroll
-        for (u32 r = 0; r < SYRK_R; r++) a[r] = sa[kk * SYRK_TB + tx + 16 * r];
+        for (u32 r = 0; r < R; r++) a[r] = sa[kk * 16 * R + tx + 16 * r];
 #pragma unroll
-        for (u32 c = 0; c < SYRK_R; c++) b[c] = sb[kk * SYRK_TB + ty + 16 * c];
+        for (u32 c = 0; c < R; c++) b[c] = sb[kk * 16 * R + ty + 16 * c];
 #pragma unroll
-        for (u32 r = 0; r < SYRK_R; r++) {
+        for (u32 r = 0; r < R; r++) {
 #pragma unroll
-            for (u32 c = 0; c < SYRK_R; c++) {
-                if (!DIAG || r >= c) acc[r * SYRK_R + c] += a[r] * b[c];
+            for (u32 c = 0; c < R; c++) {
+                if (!DIAG || r >= c) acc[r * R + c] += a[r] * b[c];
             }
         }
     }
@@ -849,9 +850,9 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
         BARRIER();
         // the branch is uniform: a block's tile is diagonal or not
         if (ti == tj) {
-            syrk_slab<true>(acc, sa, sb, nk, tx, ty);
+            tile_slab<SYRK_R, true>(acc, sa, sb, nk, tx, ty);
         } else {
-            syrk_slab<false>(acc, sa, sb, nk, tx, ty);
+            tile_slab<SYRK_R, false>(acc, sa, sb, nk, tx, ty);
         }
     }
 #pragma unroll
@@ -868,6 +869,83 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
         // done (potf2_warp's column)
         BARRIER();
         if (t < NB) potf2_warp(factor, panel + k1 * h + k1, h, min(q - k1, NB), t, fail, s, sa);
+    }
+}
+
+#if TB % 16 != 0
+#error "supernodal.cpp: TB is a multiple of 16"
+#endif
+
+// The big descendants' updates tiled in each pair's own rows and columns
+// (GpuSupernodalParams::pair_tiles): one block per item (PAIR_TILE words:
+// the target s, the pair, the tile's first row i0 and column j0 of the
+// pair's m x kw block, its rows and columns, and the k range [k0, k1), k1
+// 0: every k). The tile's products over the k range stream through shared
+// memory TK columns at a time (tile_slab: rows tx + 16 r, columns
+// ty + 16 c, the last slab to the k range's end); then each element at or
+// below the pair's diagonal (pair row i >= column j) is subtracted from
+// the target through the pair's maps, atomically, as other items reach
+// the same element. A warp's atomics take 16 consecutive pair rows, mostly
+// consecutive target rows.
+KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor) {
+    SHARED F sa[TK * TB];
+    SHARED F sb[TK * TB];
+    GLOBAL const u32* it = items + PAIR_TILE * block_x();
+    u32 s = it[0];
+    u32 pi = it[1];
+    u32 i0 = it[2];
+    u32 j0 = it[3];
+    u32 nr = it[4];
+    u32 nc = it[5];
+    u32 kb = it[6];
+    u32 ke = it[7];
+    u32 o_dims = plan[H_DIMS];
+    u32 o_val_ptr = plan[H_VAL_PTR];
+    u32 d = plan[plan[H_PR_D] + pi];
+    u32 dh = plan[o_dims + 2 * d + 1];
+    u32 dp = plan[o_val_ptr + d] + plan[plan[H_PR_R0] + pi];
+    u32 k_end = ke == 0 ? plan[o_dims + 2 * d] : ke;
+    u32 t = thread_x();
+    const u32 nt = THREADS;
+    u32 tx = t % 16;
+    u32 ty = t / 16;
+    F acc[(TB / 16) * (TB / 16)];
+#pragma unroll
+    for (u32 z = 0; z < (TB / 16) * (TB / 16); z++) acc[z] = F(0);
+    for (u32 k0 = kb; k0 < k_end; k0 += TK) {
+        u32 nk = min(k_end - k0, TK);
+        // the previous slab's reads are done
+        BARRIER();
+        for (u32 e = t; e < TK * TB; e += nt) {
+            u32 kk = e / TB;
+            u32 i = e - kk * TB;
+            F va = F(0);
+            F vb = F(0);
+            if (kk < nk && i < nr) va = factor[dp + (k0 + kk) * dh + i0 + i];
+            if (kk < nk && i < nc) vb = factor[dp + (k0 + kk) * dh + j0 + i];
+            sa[e] = va;
+            sb[e] = vb;
+        }
+        BARRIER();
+        // the branch is uniform: a block's tile is diagonal or not
+        if (i0 == j0) {
+            tile_slab<TB / 16, true>(acc, sa, sb, nk, tx, ty);
+        } else {
+            tile_slab<TB / 16, false>(acc, sa, sb, nk, tx, ty);
+        }
+    }
+    u32 rm = plan[H_RMAP] + plan[plan[H_PR_RMAP] + pi] + i0;
+    u32 cm = plan[H_CMAP] + plan[plan[H_PR_CMAP] + pi] + j0;
+    u32 panel = plan[o_val_ptr + s];
+    u32 h = plan[o_dims + 2 * s + 1];
+#pragma unroll
+    for (u32 r = 0; r < TB / 16; r++) {
+#pragma unroll
+        for (u32 c = 0; c < TB / 16; c++) {
+            u32 i = tx + 16 * r;
+            u32 j = ty + 16 * c;
+            if (i < nr && j < nc && i0 + i >= j0 + j) atomic_add(&factor[panel + plan[cm + j] * h + plan[rm + i]], -acc[r * (TB / 16) + c]);
+        }
     }
 }
 

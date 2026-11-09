@@ -101,6 +101,7 @@ struct Kernels<K> {
     tile_inv: K,
     fwd_trsv_wide: K,
     bwd_trsv_wide: K,
+    big_pair: K,
 }
 
 /// What the factorization launches, in order: one level's kernels, or a
@@ -120,6 +121,10 @@ struct Level {
     big_items: usize,
     big_rects: usize,
     n_big_items: u32,
+    /// The big updates tiled in the pairs' own rows and columns
+    /// (`k_big_pair`), and their count.
+    pair_tiles: usize,
+    n_pair_tiles: u32,
     small: usize,
     n_small: u32,
     /// Dynamic shared memory of `k_small_factor` ([`small_shared_bytes`]) for the widest small supernode.
@@ -285,7 +290,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let level_words: usize = lw
             .iter()
             .map(|w| {
-                let lists = [&w.pair_items, &w.big_items, &w.big_rects, &w.small_targets, &w.big_targets, &w.level_sn, &w.g_rows, &w.bg_items, &w.narrow];
+                let lists = [&w.pair_items, &w.big_items, &w.big_rects, &w.pair_tiles, &w.small_targets, &w.big_targets, &w.level_sn, &w.g_rows, &w.bg_items, &w.narrow];
                 let wide: usize = w.wide_fwd.iter().chain(&w.wide_bwd).map(|v| v.len() + 64).sum();
                 lists.iter().map(|v| v.len()).sum::<usize>() + w.g_items.len() / 2 * 3 + wide + 16 * 64
             })
@@ -324,6 +329,8 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 big_items: 4 * pk.push(&w.big_items),
                 big_rects: 4 * pk.push(&w.big_rects),
                 n_big_items: (w.big_items.len() / plan::BIG_ITEM) as u32,
+                pair_tiles: 4 * pk.push(&w.pair_tiles),
+                n_pair_tiles: (w.pair_tiles.len() / plan::PAIR_TILE) as u32,
                 small: 4 * pk.push(&w.small_targets),
                 n_small: w.small_targets.len() as u32,
                 small_shared: small_shared as u32,
@@ -391,10 +398,10 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let seed_lanes = dev.arch().warp;
         let defines = format!("{}{}", wide.defines(), defines(F::CPP, fs, lu, seed_lanes, sizes));
         let source = format!("{WIDE}\n{SOURCE}");
-        let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_f64", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out", "k_tile_inv", "k_fwd_trsv_wide", "k_bwd_trsv_wide"];
-        let [zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv, fwd_trsv_wide, bwd_trsv_wide]: [D::Kernel; 23] =
+        let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_f64", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out", "k_tile_inv", "k_fwd_trsv_wide", "k_bwd_trsv_wide", "k_big_pair"];
+        let [zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv, fwd_trsv_wide, bwd_trsv_wide, big_pair]: [D::Kernel; 24] =
             dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
-        let k = Kernels { zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv, fwd_trsv_wide, bwd_trsv_wide };
+        let k = Kernels { zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv, fwd_trsv_wide, bwd_trsv_wide, big_pair };
         Ok(GpuSupernodal {
             dev: dev.clone(),
             k,
@@ -487,6 +494,9 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             if l.n_big_items > 0 {
                 let args = [list(l.big_items), list(l.big_rects), plan, factor];
                 self.run(&self.k.big_update, l.n_big_items, THREADS, 0, &args)?;
+            }
+            if l.n_pair_tiles > 0 {
+                self.run(&self.k.big_pair, l.n_pair_tiles, THREADS, 0, &[list(l.pair_tiles), plan, factor])?;
             }
             if l.n_small > 0 {
                 self.run(&self.k.small_factor, l.n_small, l.small_threads, l.small_shared, &[list(l.small), plan, factor, fail])?;
@@ -642,7 +652,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     /// The levels of one small supernode and no big updates.
     #[cfg(test)]
     fn path_levels(&self) -> usize {
-        self.levels.iter().filter(|l| l.n_small == 1 && l.n_big == 0 && l.n_big_items == 0).count()
+        self.levels.iter().filter(|l| l.n_small == 1 && l.n_big == 0 && l.n_big_items == 0 && l.n_pair_tiles == 0).count()
     }
 
     fn run(&self, kernel: &D::Kernel, blocks: u32, threads: u32, shared_bytes: u32, args: &[Arg<'_, D::Block>]) -> Result<(), GpuError> {
@@ -774,6 +784,7 @@ fn defines(scalar: &str, scalar_bytes: usize, lu: usize, seed_lanes: u32, sizes:
         ("TB", TB),
         ("TK", TK),
         ("BIG_ITEM", plan::BIG_ITEM),
+        ("PAIR_TILE", plan::PAIR_TILE),
         ("PAIR_ITEM", plan::PAIR_ITEM),
         ("PAIR_NI", PAIR_NI),
         ("PAIR_NJ", PAIR_NJ),
@@ -852,6 +863,7 @@ mod tests {
             potf2_unroll: None,
             trsv_wide: None,
             trsv_block: None,
+            pair_tiles: None,
         }
     }
 
@@ -871,6 +883,12 @@ mod tests {
     /// on a device far larger than the grid's levels.
     fn cut_updates() -> GpuSupernodalParams {
         GpuSupernodalParams { blocks_per_sm: 1000, ..every_kernel_busy() }
+    }
+
+    /// The big updates in target tiles and in pair tiles, cut as
+    /// `cut_updates`: both on every device, whichever it takes by default.
+    fn both_big_updates() -> [GpuSupernodalParams; 2] {
+        [false, true].map(|p| GpuSupernodalParams { pair_tiles: Some(p), ..cut_updates() })
     }
 
     /// Every supernode the small kernel holds on it, however wide or tall.
@@ -929,10 +947,12 @@ mod tests {
         let mut x_cpu = rhs.clone();
         supernodal_solve(&sn, &cpu, &mut x_cpu, &mut ctx, 1);
         let dev = device();
-        // the cut parameters do cut: some big tile is shared between items
-        let lw = plan::build_levels(&Plan::new(&sn, a.symbolic()), &cut_updates(), dev.arch(), 8);
-        assert!(lw.iter().any(|w| w.big_items.chunks(plan::BIG_ITEM).any(|it| it[7] == 1)), "a tile cut between items");
-        for params in [GpuSupernodalParams::default(), every_kernel_busy(), cut_updates(), small_kernel_only(), chains_everywhere()].into_iter().chain(both_syrks()) {
+        // the cut parameters do cut: some target tile is shared between
+        // items, some pair tile cut along k
+        let [targets, pairs] = both_big_updates().map(|kn| plan::build_levels(&Plan::new(&sn, a.symbolic()), &kn, dev.arch(), 8));
+        assert!(targets.iter().any(|w| w.big_items.chunks(plan::BIG_ITEM).any(|it| it[7] == 1)), "a tile cut between items");
+        assert!(pairs.iter().any(|w| w.pair_tiles.chunks(plan::PAIR_TILE).any(|it| it[7] != 0)), "a pair tile cut along k");
+        for params in [GpuSupernodalParams::default(), every_kernel_busy(), cut_updates(), small_kernel_only(), chains_everywhere()].into_iter().chain(both_syrks()).chain(both_big_updates()) {
             let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
             assert!(sn.n_supernodes() > 20, "a tree with levels");
             if params.chain_flops_f64 == f64::INFINITY {
@@ -963,7 +983,7 @@ mod tests {
         let (a, dense, rhs, sn) = setup(24);
         let n = sn.dim();
         let dev = device();
-        for params in [GpuSupernodalParams::default(), every_kernel_busy(), cut_updates(), small_kernel_only(), chains_everywhere()].into_iter().chain(both_syrks()) {
+        for params in [GpuSupernodalParams::default(), every_kernel_busy(), cut_updates(), small_kernel_only(), chains_everywhere()].into_iter().chain(both_syrks()).chain(both_big_updates()) {
             let mut g = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
             if params.chain_flops_f32 == f64::INFINITY {
                 assert!(g.chained_levels() > 0 && g.chained_levels() == g.path_levels(), "the levels of one small supernode in chains");
@@ -1205,6 +1225,8 @@ mod tests {
                 ("fwd_chain", &k.fwd_chain),
                 ("bwd_chain", &k.bwd_chain),
                 ("tile_inv", &k.tile_inv),
+                ("big_update", &k.big_update),
+                ("big_pair", &k.big_pair),
             ];
             for (name, kernel) in kernels {
                 let local = kernel.local_bytes().unwrap();
@@ -1231,7 +1253,7 @@ mod tests {
         let (q, _) = sn.supernode_dims(sn.n_supernodes() - 1);
         assert!(q > crate::plan::NB, "the root spans more than one panel step: {q} columns");
         let dev = device();
-        for params in [GpuSupernodalParams::default(), every_kernel_busy(), cut_updates(), small_kernel_only(), chains_everywhere()].into_iter().chain(both_syrks()) {
+        for params in [GpuSupernodalParams::default(), every_kernel_busy(), cut_updates(), small_kernel_only(), chains_everywhere()].into_iter().chain(both_syrks()).chain(both_big_updates()) {
             let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, &asym, &params, Wide::F64).unwrap();
             if params.chain_flops_f64 == f64::INFINITY {
                 assert!(matches!(g.steps.last(), Some(Step::Chain { .. })), "the bad root in a chain");
