@@ -5,10 +5,10 @@
 // In W, the route's wide scalar (wide.h). Compiled per EW (the widest
 // eliminated block, rounded up to 4, 8, 16, 32 or 64), KW (the widest kept
 // block, rounded likewise), TILE_LANES (k_schur_tiles' threads per tile:
-// the device's lockstep width, 32 or 64) and ACC (the widest kept block's
-// square over TILE_LANES, rounded up: the entries of a tile of S per lane);
-// the plan header's
-// slots (SE_*, SO_*, ST_*, SP_*, SK_*), the refinement state's words (R_*)
+// the device's lockstep width, 32 or 64), TILE_WARPS (its units per block)
+// and ACC (the widest kept block's square over TILE_LANES, rounded up: the
+// entries of a tile of S per lane); the plan header's
+// slots (SE_*, SO_*, ST_*, SP_*, SK_*, SB_*), the refinement state's words (R_*)
 // and flags (F_*) come from schur.rs as #defines. Kernels launched with
 // THREADS threads per block, or PLANE where said.
 //
@@ -154,18 +154,41 @@ KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL c
     }
 }
 
-// Stage 3, one block of TILE_LANES threads per tile of S (a lockstep unit):
-// the kept-kept tile of H (or nothing) minus W_oa C_ob^T over the tile's
-// pairs, thread `lane` owning the entries lane, lane + TILE_LANES, ... (ACC
-// of them at most); a diagonal tile upper-only. A pair's W_oa and C_ob are
-// copied once into shared memory as they lie in memory; in f64 the products
-// go straight into the accumulators. The tile is the block's, so its plan
-// words are the same in every lane (scalar loads on AMD).
-KERNEL_THREADS(TILE_LANES) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const W* RESTRICT w, GLOBAL W* RESTRICT s) {
-    SHARED W ws[KW * EW];
-    SHARED W cs[KW * EW];
-    u32 t = block_x();
-    u32 lane = thread_x();
+// Stage 3, blocks of TILE_WARPS lockstep units of TILE_LANES threads, the
+// plan's block items (SB_ITEMS, TILE_WARPS + 1 words each): word 0 zero, a
+// tile of S per unit (NONE: idle); nonzero, one heavy tile on the whole
+// block, its units taking every TILE_WARPS-th pair and summing their
+// accumulators in shared memory at the end. A tile: the kept-kept tile of
+// H (or nothing) minus W_oa C_ob^T over its pairs, lane `lane` of the unit
+// owning the entries lane, lane + TILE_LANES, ... (ACC of them at most); a
+// diagonal tile its upper entries only, zeros below. A pair's W_oa and C_ob
+// are copied once into the unit's shared memory as they lie in memory; in
+// f64 the products go straight into the accumulators. A unit's tile is the
+// same in all its lanes, so are its plan words (scalar loads on AMD).
+// A unit's barrier: its lockstep width's, or, when a unit is wider than the
+// device's lockstep width (TILE_WARPS 1), the block's.
+#if TILE_WARPS == 1
+#define UNIT_BARRIER() BARRIER()
+#else
+#define UNIT_BARRIER() WARP_BARRIER()
+#endif
+
+KERNEL_THREADS(TILE_LANES * TILE_WARPS) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const W* RESTRICT w, GLOBAL W* RESTRICT s) {
+    SHARED W ws_all[TILE_WARPS * KW * EW];
+    SHARED W cs_all[TILE_WARPS * KW * EW];
+    SHARED W red[TILE_WARPS * ACC * TILE_LANES];
+    u32 lane = thread_x() % TILE_LANES;
+    // the unit, and so its tile, uniform in the unit: the pair loop's
+    // guards on the pair's width stay branches
+    u32 unit = uniform(thread_x() / TILE_LANES);
+    GLOBAL const u32* item = plan + plan[SB_ITEMS] + (TILE_WARPS + 1) * block_x();
+    bool split = item[0] != 0;
+    u32 t = uniform(item[1 + (split ? 0 : unit)]);
+    // a unit without a tile ends here; a split block has no idle unit, and
+    // only it waits for the whole block
+    if (t == NONE) return;
+    SHARED_PTR W* ws = ws_all + unit * KW * EW;
+    SHARED_PTR W* cs = cs_all + unit * KW * EW;
     u32 o_ew = plan[SE_W];
     u32 o_ca = plan[SO_CA_OFF];
     u32 o_trans = plan[SO_TRANS];
@@ -182,6 +205,9 @@ KERNEL_THREADS(TILE_LANES) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, G
     u32 copy = plan[plan[ST_COPY_OFF] + t];
     u32 p0 = plan[plan[ST_PAIR_PTR] + t];
     u32 p1 = plan[plan[ST_PAIR_PTR] + t + 1];
+    bool diag = a == b;
+    // the entries computed: a diagonal tile's upper ones, column by column
+    u32 n = diag ? wr * (wr + 1) / 2 : wr * wc;
     W acc[ACC];
     // each accumulator's entry of the tile, i | j << 16, found once
     u32 ij[ACC];
@@ -189,11 +215,19 @@ KERNEL_THREADS(TILE_LANES) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, G
     for (u32 m = 0; m < ACC; m++) {
         acc[m] = 0.0f;
         u32 ent = lane + TILE_LANES * m;
-        u32 j = ent / wr;
-        ij[m] = (ent - j * wr) | (j << 16);
+        u32 i;
+        u32 j;
+        if (diag) {
+            j = 0;
+            while ((j + 1) * (j + 2) / 2 <= ent) j++;
+            i = ent - j * (j + 1) / 2;
+        } else {
+            j = ent / wr;
+            i = ent - j * wr;
+        }
+        ij[m] = i | (j << 16);
     }
-    u32 n = wr * wc;
-    for (u32 p = p0; p < p1; p++) {
+    for (u32 p = p0 + (split ? unit : 0u); p < p1; p += split ? TILE_WARPS : 1u) {
         u32 oa = plan[o_oa + p];
         u32 ob = plan[o_ob + p];
         u32 e = plan[o_e + oa];
@@ -202,14 +236,14 @@ KERNEL_THREADS(TILE_LANES) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, G
         u32 cb = plan[o_ca + ob];
         u32 tb = plan[o_trans + ob];
         u32 wb = plan[o_ow + ob];
-        // the previous pair's reads are done
-        BARRIER();
+        // the unit's previous pair's reads are done
+        UNIT_BARRIER();
         // W_oa (row-major wr x we) and C_ob as H holds it (coupling(): row j
         // at j we when transposed, else column k at k wb), both contiguous:
         // one pass of coalesced loads, no index division
         for (u32 x = lane; x < wr * we; x += TILE_LANES) ws[x] = w[woff + x];
         for (u32 x = lane; x < wc * we; x += TILE_LANES) cs[x] = h[cb + x];
-        BARRIER();
+        UNIT_BARRIER();
         // entry (j, k) of C_ob at cs[j cj + k ck]
         u32 cj = tb != 0 ? we : 1u;
         u32 ck = tb != 0 ? 1u : wb;
@@ -233,6 +267,17 @@ KERNEL_THREADS(TILE_LANES) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, G
             }
         }
     }
+    if (split) {
+        // the units' sums, added in unit order by the first unit
+#pragma unroll
+        for (u32 m = 0; m < ACC; m++) red[(unit * ACC + m) * TILE_LANES + lane] = acc[m];
+        BARRIER();
+        if (unit != 0) return;
+#pragma unroll
+        for (u32 m = 0; m < ACC; m++) {
+            for (u32 u = 1; u < TILE_WARPS; u++) acc[m] += red[(u * ACC + m) * TILE_LANES + lane];
+        }
+    }
 #pragma unroll
     for (u32 m = 0; m < ACC; m++) {
         if (lane + TILE_LANES * m < n) {
@@ -240,8 +285,14 @@ KERNEL_THREADS(TILE_LANES) void k_schur_tiles(GLOBAL const u32* RESTRICT plan, G
             u32 j = ij[m] >> 16;
             W v = acc[m];
             if (copy != NONE) v += h[copy + i + j * wr];
-            if (a == b && i > j) v = 0.0f;
             s[val + i + j * wr] = v;
+        }
+    }
+    if (diag) {
+        for (u32 x = lane; x < wr * wr; x += TILE_LANES) {
+            u32 j = x / wr;
+            u32 i = x - j * wr;
+            if (i > j) s[val + x] = 0.0f;
         }
     }
 }

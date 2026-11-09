@@ -125,6 +125,17 @@ DEVICE float shfl(float v, u32 src) { return __shfl(v, (int)src, (int)WARP); }
 DEVICE double shfl(double v, u32 src) { return __shfl(v, (int)src, (int)WARP); }
 #endif
 
+// uniform(v): v, the same in every lane of the device's lockstep unit (a
+// CUDA warp, an AMD wavefront), as its first lane holds it, so the compiler
+// treats it as uniform: branches on what is derived from it stay branches,
+// where a value it cannot prove uniform (from thread_x(), say) turns them
+// into predicated instructions that all issue.
+#if ARAEL_CUDA
+DEVICE u32 uniform(u32 v) { return __shfl_sync(0xffffffffu, v, 0); }
+#else
+DEVICE u32 uniform(u32 v) { return (u32)__builtin_amdgcn_readfirstlane((int)v); }
+#endif
+
 // The sum of `v` over the warp, in every lane: a butterfly over lane
 // distances 1, 2, 4, ... Every lane of the warp calls it.
 template <typename T> DEVICE T warp_sum(T v) {
@@ -202,6 +213,7 @@ DEVICE float shfl_xor(float v, u32 mask) { return arael_cpu::exchange(v, arael_c
 DEVICE double shfl_xor(double v, u32 mask) { return arael_cpu::exchange(v, arael_cpu::lane() ^ mask); }
 DEVICE float shfl(float v, u32 src) { return arael_cpu::exchange(v, src); }
 DEVICE double shfl(double v, u32 src) { return arael_cpu::exchange(v, src); }
+DEVICE u32 uniform(u32 v) { return v; }
 
 template <typename T> DEVICE T warp_sum(T v) {
     for (u32 o = 1; o < WARP; o <<= 1) v += shfl_xor(v, o);
