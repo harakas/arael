@@ -14,6 +14,9 @@
 //! a copy queued behind the work before it, as on a CUDA stream; a read
 //! waits, then copies out of the buffer.
 //!
+//! [`MetalDevice::time_kernels`] times each launch on the GPU, summed per
+//! kernel.
+//!
 //! ```ignore
 //! let dev = arael_gpu::metal::MetalDevice::new(0)?;
 //! let k = dev.compile("KERNEL void k(GLOBAL float* x) { x[global_x()] = 1.0f; }", "", "k")?;
@@ -28,6 +31,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::ThreadId;
 
+use objc2::msg_send;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSRange;
@@ -80,6 +84,19 @@ struct Stream {
     /// The first error of a command buffer seen complete without a wait,
     /// for the next wait to return.
     failed: Option<String>,
+    /// Whether launches are timed ([`MetalDevice::time_kernels`]).
+    timing: bool,
+    /// Each timed kernel's launches and GPU seconds, until taken.
+    times: HashMap<String, (usize, f64)>,
+}
+
+/// A kernel's GPU time over its launches while [`MetalDevice::time_kernels`]
+/// was on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KernelTime {
+    pub name: String,
+    pub launches: usize,
+    pub seconds: f64,
 }
 
 // SAFETY: command buffers and encoders are used only under the device's
@@ -337,6 +354,27 @@ impl Stream {
             None => Ok(()),
         }
     }
+
+    /// Commits the open command buffer, waits for it, and adds its GPU time
+    /// to kernel `name`'s.
+    fn time_open(&mut self, name: &str) -> Result<(), GpuError> {
+        let Some(serial) = self.open.as_ref().map(|o| o.serial) else {
+            return Ok(());
+        };
+        self.commit();
+        let cb = self.flight.back().expect("the command buffer just committed").cb.clone();
+        self.wait_until(serial)?;
+        // SAFETY: both take no arguments and return a CFTimeInterval (an
+        // f64, seconds); the command buffer has completed.
+        let (start, end): (f64, f64) = unsafe { (msg_send![&*cb, GPUStartTime], msg_send![&*cb, GPUEndTime]) };
+        match self.times.get_mut(name) {
+            Some(t) => *t = (t.0 + 1, t.1 + (end - start)),
+            None => {
+                self.times.insert(name.to_string(), (1, end - start));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The error of a failed command buffer, as text.
@@ -422,7 +460,7 @@ impl MetalDevice {
                 device,
                 queue,
                 arch,
-                stream: Mutex::new(Stream { open: None, encoder: None, launches: 0, flight: VecDeque::new(), next: 0, failed: None }),
+                stream: Mutex::new(Stream { open: None, encoder: None, launches: 0, flight: VecDeque::new(), next: 0, failed: None, timing: false, times: HashMap::new() }),
                 modules: Mutex::new(HashMap::new()),
                 capture: Mutex::new(None),
                 pool: Arc::new(Pool::new()),
@@ -433,6 +471,32 @@ impl MetalDevice {
 
     fn stream(&self) -> MutexGuard<'_, Stream> {
         self.stream.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Starts (`true`) or stops (`false`) timing each launch on the GPU,
+    /// for [`take_kernel_times`](Self::take_kernel_times). A timed launch
+    /// runs in a command buffer of its own, which the host waits for, so
+    /// launches no longer overlap one another or the host's encoding.
+    ///
+    /// ```ignore
+    /// dev.time_kernels(true);
+    /// factor.factorize_device(vals, fail)?;
+    /// dev.time_kernels(false);
+    /// for t in dev.take_kernel_times() {
+    ///     println!("{} {} {:.3} ms", t.name, t.launches, t.seconds * 1e3);
+    /// }
+    /// ```
+    pub fn time_kernels(&self, on: bool) {
+        self.stream().timing = on;
+    }
+
+    /// The GPU time of each kernel launched while timing was on, the
+    /// largest first; the sums start again from zero.
+    pub fn take_kernel_times(&self) -> Vec<KernelTime> {
+        let times = core::mem::take(&mut self.stream().times);
+        let mut v: Vec<KernelTime> = times.into_iter().map(|(name, (launches, seconds))| KernelTime { name, launches, seconds }).collect();
+        v.sort_by(|a, b| b.seconds.total_cmp(&a.seconds).then_with(|| a.name.cmp(&b.name)));
+        v
     }
 
     /// Whether the calling thread has a capture open.
@@ -483,6 +547,10 @@ impl MetalDevice {
 
     /// Encodes one launch of `kernel` on the open command buffer.
     fn encode(&self, s: &mut Stream, kernel: &MetalKernel, launch: &Launch, args: &[Bound]) -> Result<(), GpuError> {
+        if s.timing {
+            // a command buffer of its own: the copies queued before stay out of its time
+            s.commit();
+        }
         let enc = s.encoder(&self.queue)?;
         enc.setComputePipelineState(&kernel.inner.pipeline);
         for (i, a) in args.iter().enumerate() {
@@ -502,7 +570,9 @@ impl MetalDevice {
         let size = |x: u32, y: u32, z: u32| MTLSize { width: x as usize, height: y as usize, depth: z as usize };
         enc.dispatchThreadgroups_threadsPerThreadgroup(size(gx, gy, gz), size(bx, by, bz));
         s.launches += 1;
-        if s.launches >= COMMIT_EVERY {
+        if s.timing {
+            s.time_open(&kernel.inner.entry.name)?;
+        } else if s.launches >= COMMIT_EVERY {
             s.commit();
         }
         Ok(())
@@ -824,6 +894,35 @@ mod tests {
         dev.read(&x, 0, bytemuck::cast_slice_mut(&mut out)).unwrap();
         assert!(out.iter().all(|&v| v == 5.0), "{:?}", &out[..4]);
         assert_eq!(dev.allocations(), 2);
+    }
+
+    /// Timed launches are summed per kernel, the largest first, and still
+    /// compute; untimed ones are not counted; taking the sums resets them.
+    #[test]
+    fn launches_are_timed_per_kernel_while_timing_is_on() {
+        let dev = MetalDevice::new(0).unwrap();
+        let src = "KERNEL void add(GLOBAL float* x, u32 n) { u32 i = global_x(); if (i < n) x[i] += 1.0f; }\n\
+                   KERNEL void slow(GLOBAL float* x, u32 n) { u32 i = global_x(); if (i < n) for (u32 k = 0; k < 4096u; ++k) x[i] = x[i] * 0.5f + 1.0f; }";
+        let add = dev.compile(src, "", "add").unwrap();
+        let slow = dev.compile(src, "", "slow").unwrap();
+        let n = 1 << 20;
+        let x = dev.alloc(4 * n as usize).unwrap();
+        let args = [Arg::Block(&x, 0), Arg::U32(n)];
+        dev.launch(&add, Launch::linear(n, 256), &args).unwrap();
+        dev.time_kernels(true);
+        for _ in 0..3 {
+            dev.launch(&add, Launch::linear(n, 256), &args).unwrap();
+        }
+        dev.launch(&slow, Launch::linear(n, 256), &args).unwrap();
+        dev.time_kernels(false);
+        dev.launch(&add, Launch::linear(n, 256), &args).unwrap();
+        let mut out = vec![0f32; n as usize];
+        dev.read(&x, 0, bytemuck::cast_slice_mut(&mut out)).unwrap();
+        assert!(out.iter().all(|&v| v == 3.0), "{:?}", &out[..4]);
+        let times = dev.take_kernel_times();
+        assert_eq!(times.iter().map(|t| (t.name.as_str(), t.launches)).collect::<Vec<_>>(), [("slow", 1), ("add", 3)], "{times:?}");
+        assert!(times.iter().all(|t| t.seconds > 0.0), "{times:?}");
+        assert!(dev.take_kernel_times().is_empty());
     }
 
     /// Every kernel source compiles on Metal: the factor's, the reduction's,

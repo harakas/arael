@@ -1,12 +1,14 @@
 //! A block matrix's supernodal factorization and solve on a GPU against
-//! the CPU's (features `gpu-cuda`, `gpu-hip`): ms per factorization and per
-//! solve on the device (the matrix uploaded once, timed to the device's
-//! wait), in f64 and with the f32 factor, the solutions checked against
-//! the CPU's. What an Nsight Compute session profiles. A factorization
-//! not positive definite in a precision says so and is timed all the same.
+//! the CPU's (features `gpu-cuda`, `gpu-hip`, `gpu-metal`): ms per
+//! factorization and per solve on the device (the matrix uploaded once,
+//! timed to the device's wait), in f64 and with the f32 factor (the f32
+//! factor only on a device without f64, its vectors in df32), the
+//! solutions checked against the CPU's. What an Nsight Compute session
+//! profiles. A factorization not positive definite in a precision says so
+//! and is timed all the same.
 //!
 //! The environment: ROUNDS (20), BENCH_THREADS (the CPU's threads, 8),
-//! ARAEL_GPU (`cuda` or `hip`); GPU_SMALL_Q, GPU_SMALL_FLOPS,
+//! ARAEL_GPU (`cuda`, `hip` or `metal`); GPU_SMALL_Q, GPU_SMALL_FLOPS,
 //! GPU_BIG_PAIR_FLOPS, GPU_WIDE_PAIR_K, GPU_WIDE_PAIR_FLOPS,
 //! GPU_CHAIN_FLOPS_F32, GPU_CHAIN_FLOPS_F64, GPU_CHAIN_ITEMS,
 //! GPU_SOLVE_CHAIN_WORK, GPU_GATHER_WORK, GPU_GEMV_WORK, GPU_BLOCKS_PER_SM,
@@ -16,7 +18,9 @@
 //! GPU_CHECK_FACTOR=1 compares the f64 factor with the CPU's, supernode by
 //! supernode, and checks 50 more factorizations;
 //! GPU_ORDER picks the elimination order, `amd` (the default) or `nd`
-//! (nested dissection); GPU_LEVELS=1 prints the elimination tree's levels (as the device runs
+//! (nested dissection); GPU_PROFILE=1 (Metal) prints each kernel's GPU time
+//! in one factorization and one solve, the kernels launched one at a time;
+//! GPU_LEVELS=1 prints the elimination tree's levels (as the device runs
 //! them, leaves first): supernodes, the widest and the tallest, the
 //! descendant pairs and the multiply-adds of the updates and the factor.
 //!
@@ -27,7 +31,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use arael::__gpu::{Device, FactorizeError, GpuFactor, GpuPrecision, GpuSupernodalParams, Wide, bytemuck};
+use arael::__gpu::{Device, FactorizeError, GpuFactor, GpuPrecision, GpuSupernodalParams, Wide};
 use arael_faer::SparseIndex;
 use arael_faer::bsc::SparseBlockColMat;
 use arael_faer::supernodal::{
@@ -140,14 +144,34 @@ fn check_factor(sn: &SupernodalSymbolic, got: &[f64], cpu: &[f64]) {
     println!("  {bad} of {} supernodes differ", sn.n_supernodes());
 }
 
-fn run<D: Device>(dev: Arc<D>, a: &SparseBlockColMat<SparseIndex, f64>, rhs: &[f64], sn: &SupernodalSymbolic, cpu_factor: &[f64], x_cpu: &[f64], rounds: usize) {
-    let n = rhs.len();
-    let mut vals = dev.alloc(8 * a.vals().len()).unwrap();
-    dev.write(&mut vals, 0, bytemuck::cast_slice(a.vals())).unwrap();
+/// The factorization and solve of `a` and `rhs` on `dev`, timed and checked
+/// against the CPU's `cpu_factor` and `x_cpu`; `profile`, when given, runs
+/// one factorization and one solve again and reports their kernels.
+#[allow(clippy::too_many_arguments)]
+fn run<D: Device>(
+    dev: Arc<D>,
+    a: &SparseBlockColMat<SparseIndex, f64>,
+    rhs: &[f64],
+    sn: &SupernodalSymbolic,
+    cpu_factor: &[f64],
+    x_cpu: &[f64],
+    rounds: usize,
+    profile: Option<&dyn Fn(&str, &mut dyn FnMut())>,
+) {
+    // the device's own wide scalar; without f64, only the f32 factor
+    let has_f64 = dev.arch().has_f64;
+    let wide = if has_f64 { Wide::F64 } else { Wide::Df32 };
+    let precisions: &[GpuPrecision] = if has_f64 { &[GpuPrecision::F64, GpuPrecision::F32] } else { &[GpuPrecision::F32] };
+    let mut bytes = Vec::new();
+    wide.encode_into(a.vals(), &mut bytes);
+    let mut vals = dev.alloc(bytes.len()).unwrap();
+    dev.write(&mut vals, 0, &bytes).unwrap();
     let fail = dev.alloc(4).unwrap();
-    let mut xb = dev.alloc(8 * n).unwrap();
-    for precision in [GpuPrecision::F64, GpuPrecision::F32] {
-        let mut f = GpuFactor::new(&dev, precision, sn, a.symbolic(), &params(), Wide::F64).unwrap();
+    let mut rhs_bytes = Vec::new();
+    wide.encode_into(rhs, &mut rhs_bytes);
+    let mut xb = dev.alloc(rhs_bytes.len()).unwrap();
+    for &precision in precisions {
+        let mut f = GpuFactor::new(&dev, precision, sn, a.symbolic(), &params(), wide).unwrap();
         // through the host API once (compiles the kernels), checked; a matrix
         // not positive definite in this precision is reported and still timed:
         // a bad pivot continues with 1, the kernels are the same
@@ -181,7 +205,7 @@ fn run<D: Device>(dev: Arc<D>, a: &SparseBlockColMat<SparseIndex, f64>, rhs: &[f
             f.factorize_device((&vals, 0), (&fail, 0)).unwrap();
             dev.sync().unwrap();
         });
-        dev.write(&mut xb, 0, bytemuck::cast_slice(rhs)).unwrap();
+        dev.write(&mut xb, 0, &rhs_bytes).unwrap();
         let solve = times(rounds, || {
             f.solve_device((&xb, 0)).unwrap();
             dev.sync().unwrap();
@@ -196,6 +220,32 @@ fn run<D: Device>(dev: Arc<D>, a: &SparseBlockColMat<SparseIndex, f64>, rhs: &[f
             solve.iter().cloned().fold(f64::INFINITY, f64::min),
             diff
         );
+        if let Some(profile) = profile {
+            profile("factor", &mut || {
+                f.factorize_device((&vals, 0), (&fail, 0)).unwrap();
+                dev.sync().unwrap();
+            });
+            profile("solve", &mut || {
+                f.solve_device((&xb, 0)).unwrap();
+                dev.sync().unwrap();
+            });
+        }
+    }
+}
+
+/// `run`'s `profile` on Metal: each kernel's GPU time over `f`, launched
+/// one at a time.
+#[cfg(feature = "gpu-metal")]
+fn metal_profile(dev: &arael::__gpu::metal::MetalDevice, what: &str, f: &mut dyn FnMut()) {
+    dev.time_kernels(true);
+    f();
+    dev.time_kernels(false);
+    let times = dev.take_kernel_times();
+    let total: f64 = times.iter().map(|t| t.seconds).sum();
+    let launches: usize = times.iter().map(|t| t.launches).sum();
+    println!("  {what}, kernels one at a time: {:.2} ms of GPU time in {launches} launches", total * 1e3);
+    for t in &times {
+        println!("    {:<20} {:5} launches {:8.3} ms {:5.1}%", t.name, t.launches, t.seconds * 1e3, 100.0 * t.seconds / total);
     }
 }
 
@@ -297,9 +347,16 @@ pub fn compare(what: &str, a: &SparseBlockColMat<SparseIndex, f64>, rhs: &[f64])
     println!("cpu  F64: factor {:8.2} ms, solve {:7.2} ms", median(cpu), median(cpu_solve));
     match std::env::var("ARAEL_GPU").as_deref().unwrap_or("cuda") {
         #[cfg(feature = "gpu-cuda")]
-        "cuda" => run(Arc::new(arael::__gpu::cuda::CudaDevice::new(0).unwrap()), a, rhs, &sn, &factor, &x_cpu, rounds),
+        "cuda" => run(Arc::new(arael::__gpu::cuda::CudaDevice::new(0).unwrap()), a, rhs, &sn, &factor, &x_cpu, rounds, None),
         #[cfg(feature = "gpu-hip")]
-        "hip" => run(Arc::new(arael::__gpu::hip::HipDevice::new(0).unwrap()), a, rhs, &sn, &factor, &x_cpu, rounds),
-        other => panic!("ARAEL_GPU={other}: not a runtime this binary was built with (features gpu-cuda, gpu-hip)"),
+        "hip" => run(Arc::new(arael::__gpu::hip::HipDevice::new(0).unwrap()), a, rhs, &sn, &factor, &x_cpu, rounds, None),
+        #[cfg(feature = "gpu-metal")]
+        "metal" => {
+            let dev = Arc::new(arael::__gpu::metal::MetalDevice::new(0).unwrap());
+            let profile = |what: &str, f: &mut dyn FnMut()| metal_profile(&dev, what, f);
+            let profile: Option<&dyn Fn(&str, &mut dyn FnMut())> = if std::env::var_os("GPU_PROFILE").is_some() { Some(&profile) } else { None };
+            run(dev.clone(), a, rhs, &sn, &factor, &x_cpu, rounds, profile)
+        }
+        other => panic!("ARAEL_GPU={other}: not a runtime this binary was built with (features gpu-cuda, gpu-hip, gpu-metal)"),
     }
 }
