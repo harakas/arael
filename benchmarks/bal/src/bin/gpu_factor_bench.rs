@@ -36,9 +36,10 @@ fn main() {
     let (mut h, grad, partition) = bench_harness::arael::hessian::<SparseIndex, _>(&mut scene);
     let lambda: f64 = std::env::var("BAL_LAMBDA0").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-4);
     let nblk = partition.len() - 1;
+    // the structure once: cloned per block, it made this quadratic
+    let hs = h.symbolic().clone();
     for b in 0..nblk {
         let w = partition[b + 1] - partition[b];
-        let hs = h.symbolic().clone();
         let d = hs.col_range(b).find(|&x| hs.blk_row(x) == b).unwrap();
         let base = hs.val_range(d).start;
         for k in 0..w {

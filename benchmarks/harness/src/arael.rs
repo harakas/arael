@@ -340,9 +340,10 @@ where
     let mut h = SparseBlockColMat::<I, f64>::zeroed(hsym);
     let mut grad = vec![0.0; n];
     problem.calc_grad_hessian_sparse_indexed(&params, &mut grad, h.vals_mut(), &positions, &mut ctx);
+    // the structure once: cloned per block, it made this quadratic
+    let hs = h.symbolic().clone();
     for b in 0..partition.len() - 1 {
         let w = partition[b + 1] - partition[b];
-        let hs = h.symbolic().clone();
         let d = hs.col_range(b).find(|&x| hs.blk_row(x) == b).expect("every block has its diagonal tile");
         let base = hs.val_range(d).start;
         for k in 0..w {
