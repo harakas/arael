@@ -43,6 +43,11 @@ if(UNIX)
   set_property(TARGET arael_loc_demo APPEND PROPERTY
     INTERFACE_LINK_LIBRARIES pthread dl m)
 endif()
+# The Metal runtime's frameworks: a staticlib carries no link dependencies.
+if(APPLE AND ARAEL_GPU STREQUAL "metal")
+  set_property(TARGET arael_loc_demo APPEND PROPERTY INTERFACE_LINK_LIBRARIES
+    "-framework Metal" "-framework Foundation" "-framework CoreFoundation" "-framework IOKit" objc)
+endif()
 # Keep the staticlib's symbols inside whatever links it. Exported from a
 # shared library, the asm routines faer uses on x86-64 (private-gemm-x86)
 # call one another through lazily bound PLT slots, which they do not survive.

@@ -18,3 +18,10 @@ add_library(consumer_shared SHARED shared.cpp)
 target_link_libraries(consumer_shared PRIVATE arael::cxx_fit)
 add_executable(smoke_shared smoke_shared.cpp)
 target_link_libraries(smoke_shared PRIVATE consumer_shared)
+
+# The interface built with the Metal runtime (-DARAEL_GPU=metal): a solve
+# on the device.
+if(ARAEL_GPU STREQUAL "metal")
+  add_executable(smoke_metal metal.cpp)
+  target_link_libraries(smoke_metal PRIVATE arael::cxx_fit)
+endif()

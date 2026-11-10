@@ -72,6 +72,40 @@ fn cmake_consumer_builds_and_runs() {
     }
 }
 
+/// The consumer with the interface built for Metal (`-DARAEL_GPU=metal`):
+/// the glue links Metal's frameworks, and the line fit solves on the
+/// device's f32 factor to the CPU's end cost (`smoke_metal`).
+#[cfg(target_vendor = "apple")]
+#[test]
+fn cmake_consumer_solves_on_metal() {
+    if !have("cmake") || !have("c++") {
+        eprintln!("cmake consumer on metal: cmake or c++ missing, skipping");
+        return;
+    }
+    let ws: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let build = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cmake_build_metal");
+    let _ = std::fs::remove_dir_all(&build);
+
+    let status = Command::new("cmake")
+        .arg("-S").arg(ws.join("runner/tests/cmake_consumer"))
+        .arg("-B").arg(&build)
+        .arg(format!("-DMODEL_CXX_DIR={}", ws.join("model/cxx").display()))
+        .arg("-DARAEL_GPU=metal")
+        .status().expect("cmake spawn");
+    assert!(status.success(), "cmake configure failed");
+
+    let status = Command::new("cmake")
+        .arg("--build").arg(&build)
+        .status().expect("cmake build spawn");
+    assert!(status.success(), "cmake build failed");
+
+    let out = Command::new(build.join("smoke_metal")).output().expect("smoke_metal run");
+    assert!(out.status.success(), "smoke_metal failed: {}{}",
+        String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("gpu_factor 1") && text.contains("f32_factor 1"), "{text}");
+}
+
 // A Rust symbol: v0 mangling, or legacy mangling ending in the hash
 // `17h<16 hex digits>E`.
 #[cfg(target_os = "linux")]
