@@ -425,9 +425,10 @@ or on any of:
 - `iter >= max_iters`
 - `accepted >= max_accepted_iters`, when set
 - `cost <= cost_threshold`
-- the new cost is within `16 * epsilon * cost` of the old one
-  (machine-precision noise floor -- further digits are not
-  resolvable)
+- a rejected step's new cost is within `16 * epsilon * cost` of the
+  old one, and so is the reduction the linear model predicted for it,
+  or the step is within `16 * epsilon * |x|` (machine-precision noise
+  floor -- further digits are not resolvable)
 - 20 consecutive damped attempts without an accepted step (the inner
   retry budget; hard-coded)
 - the damping schedule gives up (the lambda driver returns `None` on a

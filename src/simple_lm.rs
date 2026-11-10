@@ -2984,8 +2984,9 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     let mut delta = vec![T::zero(); n];
 
     // The noise floor of a cost comparison, in units of eps * cost: a
-    // rejected step whose cost difference is inside it is rounding, and
-    // the solve is at its precision.
+    // rejected step whose cost difference is inside it, its predicted
+    // reduction or its step at rounding too, is rounding, and the solve is
+    // at its precision.
     let sixteen = T::from(16.0).unwrap();
 
     // Set by driver.start() after the first assembly (so the driver
@@ -3452,10 +3453,6 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                     step_us);
             }
 
-            // At machine precision, cost differences are just rounding noise
-            let at_precision = new_cost.is_finite()
-                && (end_cost - new_cost).abs() < sixteen * T::epsilon() * end_cost.abs();
-
             // Wanted by both outcomes below, and by the parameter-tolerance test.
             let step_norm = match dev {
                 _ if !gather => 0.0,
@@ -3689,6 +3686,25 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 break;
             }
 
+            // At machine precision cost differences are rounding noise: the
+            // trial's cost inside the noise floor, and with it the model's
+            // predicted reduction or the step (at the rounding of the
+            // parameters: an exact fit's cost is all rounding, and so is
+            // the reduction predicted for it). A trial that lands near the
+            // current cost on a real step with a gain predicted above the
+            // floor stepped across the valley, and a smaller step follows.
+            let noise = sixteen * T::epsilon() * end_cost.abs();
+            let at_precision = new_cost.is_finite()
+                && (end_cost - new_cost).abs() < noise
+                && (predicted.unwrap_or_else(|| model_predicted_reduction(&delta, &grad, &diagonal, lambda)) < noise || {
+                    let sq = |v: &[T]| v.iter().fold(0.0f64, |a, e| a + e.to_f64().unwrap().powi(2));
+                    let (step2, x2) = match dev {
+                        Some(a) => (a.step2, a.try2),
+                        None => (sq(&delta), sq(&cur_x)),
+                    };
+                    let tol = 16.0 * T::epsilon().to_f64().unwrap();
+                    step2 <= tol * tol * x2
+                });
             if at_precision {
                 status = LmStatus::Converged;
                 done = true;
@@ -9206,6 +9222,45 @@ mod tests {
         assert!(r.accepted_iterations > 0);
         assert!(r.accepted_iterations <= r.iterations);
         assert!((r.x[0] - 3.0).abs() < 1e-8 && (r.x[1] + 1.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn a_step_across_the_valley_to_the_same_cost_is_not_the_noise_floor() {
+        // cost = sin(x)^2 from x0 with tan(x0) = 4 x0: the first step, at
+        // lambda 1, is tan(x0) / 2 = 2 x0 and lands on -x0, the same cost to
+        // rounding, while the model predicts the whole cost as the gain. The
+        // solve rejects it and goes on to the minimum at 0.
+        struct Sine;
+        impl LmProblem<f64> for Sine {
+            fn calc_cost(&mut self, p: &[f64]) -> f64 {
+                p[0].sin().powi(2)
+            }
+            fn calc_grad_hessian_dense(&mut self, p: &[f64], grad: &mut [f64], hessian: &mut [f64]) -> f64 {
+                let (s, c) = p[0].sin_cos();
+                grad[0] = 2.0 * s * c;
+                hessian[0] = 2.0 * c * c;
+                self.calc_cost(p)
+            }
+            fn calc_grad_hessian_sparse(&mut self, _: &[f64], _: &mut [f64], _: &mut CooMatrix<f64>) -> f64 {
+                unreachable!("dense-only test problem")
+            }
+        }
+        impl LmProblemInternals<f64> for Sine {}
+        let mut x0 = 1.39f64;
+        for _ in 0..50 {
+            x0 -= (x0.tan() - 4.0 * x0) / (1.0 / x0.cos().powi(2) - 4.0);
+        }
+        let attempts: std::sync::Arc<std::sync::Mutex<Vec<(bool, f64, f64)>>> = Default::default();
+        let log = attempts.clone();
+        let cfg = LmConfig::<f64> { initial_lambda: 1.0, ..Default::default() }.with_observer(move |it: &LmIter<f64>| {
+            log.lock().unwrap().push((it.accepted, it.cost, it.new_cost));
+            std::ops::ControlFlow::Continue(())
+        });
+        let r = lm_solve(&[x0], &mut Dense, &mut Sine, &cfg).unwrap();
+        let attempts = attempts.lock().unwrap();
+        let (accepted, cost, new_cost) = attempts[0];
+        assert!(!accepted && (cost - new_cost).abs() < 16.0 * f64::EPSILON * cost, "the first step ties: {:?}", attempts[0]);
+        assert!(r.end_cost < 1e-12 && r.x[0].abs() < 1e-6, "{:?} at {} after {} iterations", r.status, r.x[0], r.iterations);
     }
 
     // A strongly nonlinear 2-parameter Rosenbrock fit, as residuals
