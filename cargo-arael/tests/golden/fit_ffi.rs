@@ -570,6 +570,7 @@ impl CSparseOptions {
                 1 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Cuda, self.gpu_index as usize)),
                 2 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Hip, self.gpu_index as usize)),
                 3 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Cpu, self.gpu_index as usize)),
+                4 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Metal, self.gpu_index as usize)),
                 t => panic!("unknown gpu tag {t}"),
             }.map(|g| g.with_wide(match self.gpu_wide {
                 0 => arael::simple_lm::GpuWide::F64,
@@ -650,6 +651,7 @@ pub unsafe extern "C" fn fit_sparse_options(out: *mut CSparseOptions) {
             Some(arael::simple_lm::GpuBackend::Cuda) => 1,
             Some(arael::simple_lm::GpuBackend::Hip) => 2,
             Some(arael::simple_lm::GpuBackend::Cpu) => 3,
+            Some(arael::simple_lm::GpuBackend::Metal) => 4,
         },
         gpu_index: d.gpu.as_ref().map_or(0, |g| g.index as u32),
         gpu_assembly: d.gpu_assembly,

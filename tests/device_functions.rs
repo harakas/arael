@@ -1,10 +1,12 @@
 //! Every built-in function of arael-sym in a constraint body assembles on
-//! the device (feature `gpu-cuda` or `gpu-hip`) as on the CPU: per function
-//! a model whose instances all take that function's constraint (the others
-//! guarded off), checked in an f64 root, an f32 root and an f32 root with
-//! `wide = df32`, in both of the device's wide scalars, at points across
-//! the function's domain and off its kinks and cuts, and at its edges.
-#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+//! the device (feature `gpu-cuda`, `gpu-hip`, `gpu-metal` or `gpu-cpu`) as
+//! on the CPU: per function a model whose instances all take that
+//! function's constraint (the others guarded off), checked in an f64 root,
+//! an f32 root and an f32 root with `wide = df32`, in each of the device's
+//! wide scalars, at points across the function's domain and off its kinks
+//! and cuts, and at its edges. A device without f64 (Metal) checks the f32
+//! roots in df32.
+#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
 
 use arael::df32;
 use arael::model::{Param, SelfBlock};
@@ -258,12 +260,15 @@ fn perturbed<T: Float>(x: &[T]) -> Vec<T> {
     x.iter().enumerate().map(|(i, &v)| v * T::from(1.0 + 1e-3 * ((i % 7) as f64 - 3.0)).unwrap()).collect()
 }
 
-/// The device: CUDA when it is compiled in, else HIP, else the CPU device.
+/// The device: CUDA when it is compiled in, else HIP, else Metal, else the
+/// CPU device.
 #[cfg(feature = "gpu-cuda")]
 type Dev = arael::__gpu::cuda::CudaDevice;
 #[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
 type Dev = arael::__gpu::hip::HipDevice;
-#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+#[cfg(all(gpu_metal, not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+type Dev = arael::__gpu::metal::MetalDevice;
+#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip", gpu_metal))))]
 type Dev = arael::__gpu::cpu::CpuDevice;
 
 /// One device per test: its compiled kernels are found again in memory.
@@ -271,12 +276,24 @@ fn device() -> std::sync::Arc<Dev> {
     std::sync::Arc::new(Dev::new(0).unwrap())
 }
 
+/// Whether `dev` assembles f64 roots; without f64 (Metal) it prints that
+/// the f64 root's checks of `what` are skipped.
+fn has_f64(dev: &std::sync::Arc<Dev>, what: &str) -> bool {
+    use arael::__gpu::Device;
+    let has = dev.arch().has_f64;
+    if !has {
+        eprintln!("{what}: the device has no f64, the f64 root's checks skipped");
+    }
+    has
+}
+
 /// The CPU's and the device's assembly of `root` against each other on
-/// `dev`, in both wide scalars, at its parameters `moved` off (else where
-/// they are): a line per disagreement beyond `tol` (cost relative,
-/// gradient and Hessian relative to their largest CPU entries).
+/// `dev`, in each of its wide scalars (df32 alone without f64), at its
+/// parameters `moved` off (else where they are): a line per disagreement
+/// beyond `tol` (cost relative, gradient and Hessian relative to their
+/// largest CPU entries).
 fn disagreements<T: Float, R: RootProblem<T> + LmProblemInternals<T>>(dev: &std::sync::Arc<Dev>, mut root: R, moved: bool, what: &str, tol: f64) -> Vec<String> {
-    use arael::__gpu::Wide;
+    use arael::__gpu::{Device, Wide};
     let mut out = Vec::new();
     if let Some(why) = LmProblemInternals::<T>::device_unsupported(&root) {
         return vec![format!("{what}: no device form: {why}")];
@@ -284,7 +301,8 @@ fn disagreements<T: Float, R: RootProblem<T> + LmProblemInternals<T>>(dev: &std:
     let mut x = Vec::new();
     root.serialize(&mut x);
     let x1 = if moved { perturbed(&x) } else { x.clone() };
-    for wide in [Wide::F64, Wide::Df32] {
+    let wides = if dev.arch().has_f64 { vec![Wide::F64, Wide::Df32] } else { vec![Wide::Df32] };
+    for wide in wides {
         let chk = arael::__gpu::device_check(&mut root, &x, &x1, dev, wide);
         let cost_err = (chk.device_cost - chk.cpu_cost).abs() / chk.cpu_cost.abs().max(f64::MIN_POSITIVE);
         if !(cost_err <= tol && chk.grad_err <= tol && chk.hess_err <= tol) {
@@ -309,9 +327,12 @@ fn the_zoo_covers_every_built_in_function() {
 #[test]
 fn every_built_in_function_assembles_on_the_device_as_on_the_cpu() {
     let dev = device();
+    let f64s = has_f64(&dev, "every built-in function");
     let mut bad = Vec::new();
     for (f, (label, ..)) in ZOO.iter().enumerate() {
-        bad.extend(disagreements(&dev, Zoo64 { fs: instances(&[f]) }, true, &format!("{label} f64"), T64));
+        if f64s {
+            bad.extend(disagreements(&dev, Zoo64 { fs: instances(&[f]) }, true, &format!("{label} f64"), T64));
+        }
         bad.extend(disagreements(&dev, Zoo32 { fs: instances(&[f]) }, true, &format!("{label} f32"), 1e-4));
         bad.extend(disagreements(&dev, Zoo32W { fs: instances(&[f]) }, true, &format!("{label} f32 wide df32"), 1e-4));
     }
@@ -323,9 +344,12 @@ fn every_built_in_function_assembles_on_the_device_as_on_the_cpu() {
 #[test]
 fn the_built_in_functions_at_their_edges_assemble_on_the_device_as_on_the_cpu() {
     let dev = device();
+    let f64s = has_f64(&dev, "the built-in functions at their edges");
     let mut bad = Vec::new();
     for (e, &(label, .., tol64)) in EDGES.iter().enumerate() {
-        bad.extend(disagreements(&dev, Zoo64 { fs: edge_instances(e) }, false, &format!("{label} f64"), tol64));
+        if f64s {
+            bad.extend(disagreements(&dev, Zoo64 { fs: edge_instances(e) }, false, &format!("{label} f64"), tol64));
+        }
         bad.extend(disagreements(&dev, Zoo32 { fs: edge_instances(e) }, false, &format!("{label} f32"), 1e-4));
         bad.extend(disagreements(&dev, Zoo32W { fs: edge_instances(e) }, false, &format!("{label} f32 wide df32"), 1e-4));
     }
@@ -337,7 +361,10 @@ fn the_built_in_functions_at_their_edges_assemble_on_the_device_as_on_the_cpu() 
 fn the_whole_zoo_assembles_on_the_device_as_on_the_cpu() {
     let all: Vec<usize> = (0..ZOO.len()).collect();
     let dev = device();
-    let mut bad = disagreements(&dev, Zoo64 { fs: instances(&all) }, true, "the zoo f64", T64);
+    let mut bad = Vec::new();
+    if has_f64(&dev, "the whole zoo") {
+        bad.extend(disagreements(&dev, Zoo64 { fs: instances(&all) }, true, "the zoo f64", T64));
+    }
     bad.extend(disagreements(&dev, Zoo32 { fs: instances(&all) }, true, "the zoo f32", 1e-4));
     bad.extend(disagreements(&dev, Zoo32W { fs: instances(&all) }, true, "the zoo f32 wide df32", 1e-4));
     assert!(bad.is_empty(), "{}", bad.join("\n"));

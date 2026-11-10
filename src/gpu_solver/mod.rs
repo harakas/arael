@@ -37,6 +37,9 @@ pub(crate) trait GpuSolver<T>: Send {
     fn runtime(&self) -> String;
     /// The factor's scalar.
     fn precision(&self) -> GpuPrecision;
+    /// Whether the device computes in f64 (Metal does not): an f64 root
+    /// assembles on the CPU without it.
+    fn has_f64(&self) -> bool;
 
     /// Factorize the matrix whose tile values are `vals`, in the storage
     /// order of the structure the factor was built for; the inner `Err`

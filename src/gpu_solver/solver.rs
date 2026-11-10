@@ -156,6 +156,10 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         self.factor.precision()
     }
 
+    fn has_f64(&self) -> bool {
+        self.factor.device().arch().has_f64
+    }
+
     fn factorize(&mut self, vals: &[T]) -> Result<Result<(), SupernodalError>, DeviceFailure> {
         match self.factor.factorize(vals) {
             Ok(()) => Ok(Ok(())),

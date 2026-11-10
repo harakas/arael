@@ -1,4 +1,11 @@
 fn main() {
+    // `gpu_metal`: the Metal runtime is built, feature `gpu-metal` on an
+    // Apple target (elsewhere there is no Metal to build).
+    println!("cargo::rustc-check-cfg=cfg(gpu_metal)");
+    if std::env::var_os("CARGO_FEATURE_GPU_METAL").is_some() && std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
+        println!("cargo:rustc-cfg=gpu_metal");
+    }
+
     #[cfg(feature = "lapack")]
     {
         println!("cargo:rustc-link-lib=lapack");

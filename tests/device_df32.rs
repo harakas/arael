@@ -1,14 +1,18 @@
 //! The device df32 (`arael-gpu/kernels/wide.h`, feature `gpu-cuda`,
-//! `gpu-hip` or `gpu-cpu`) against the host's `arael::df32`: the same
-//! operations give the same bits.
-#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+//! `gpu-hip`, `gpu-metal` or `gpu-cpu`) against the host's `arael::df32`:
+//! the same operations give the same bits. A device whose f32 arithmetic
+//! flushes subnormals (Metal) drops the low parts the flush takes
+//! ([`flushed`]).
+#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
 
 use arael::__gpu::bytemuck;
 #[cfg(feature = "gpu-cuda")]
 use arael::__gpu::cuda::CudaDevice as Dev;
 #[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
 use arael::__gpu::hip::HipDevice as Dev;
-#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+#[cfg(all(gpu_metal, not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+use arael::__gpu::metal::MetalDevice as Dev;
+#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip", gpu_metal))))]
 use arael::__gpu::cpu::CpuDevice as Dev;
 use arael::__gpu::{Arg, Device, Launch, WIDE, Wide};
 use arael::df32;
@@ -69,6 +73,24 @@ fn same(a: df32, b: df32) -> bool {
     a.hi.to_bits() == b.hi.to_bits() && a.lo.to_bits() == b.lo.to_bits()
 }
 
+/// On a device that flushes f32 subnormals: whether `got` is the host's
+/// `want` of `x` and `y` less the low parts the flush takes. The flush
+/// reaches an operation with a subnormal part in an input or the result;
+/// with an input, a product of the inputs or the result below 2^-78 (its
+/// error terms, about 2^-48 of those, fall below f32's smallest normal
+/// 2^-126); or with a nonzero low part below 2^-102 (that part's own error
+/// terms, 2^-24 of it, do). There the device keeps the result to f32's
+/// precision, or to the smallest normal.
+fn flushed(got: df32, want: df32, x: df32, y: df32) -> bool {
+    let subnormal = |v: df32| v.hi.is_subnormal() || v.lo.is_subnormal();
+    let low_part_flushes = |v: df32| v.lo != 0.0 && (v.lo.abs() as f64) < 2f64.powi(-102);
+    let (a, b, r) = (x.hi.abs() as f64, y.hi.abs() as f64, want.hi.abs() as f64);
+    let small = [a, b, r, a * a, b * b, a * b].iter().any(|&v| v < 2f64.powi(-78));
+    let reaches = [x, y, want].iter().any(|&v| subnormal(v) || low_part_flushes(v)) || small;
+    let tol = (f32::MIN_POSITIVE as f64).max(r * f32::EPSILON as f64);
+    reaches && (got.to_f64() - want.to_f64()).abs() <= tol
+}
+
 fn up(dev: &Dev, v: &[df32]) -> <Dev as Device>::Block {
     let flat: Vec<f32> = v.iter().flat_map(|x| [x.hi, x.lo]).collect();
     let mut b = dev.alloc(4 * flat.len()).unwrap();
@@ -79,6 +101,8 @@ fn up(dev: &Dev, v: &[df32]) -> <Dev as Device>::Block {
 #[test]
 fn device_df32_matches_the_host_bit_for_bit() {
     let dev = Dev::new(0).unwrap();
+    let flushes = dev.arch().flushes_subnormals;
+    let mut flushed_parts = 0;
     let source = format!("{WIDE}\n{SOURCE}");
     let ops = dev.compile(&source, Wide::Df32.defines(), "k_ops").unwrap();
     let cmp = dev.compile(&source, Wide::Df32.defines(), "k_cmp").unwrap();
@@ -103,7 +127,9 @@ fn device_df32_matches_the_host_bit_for_bit() {
             let want = [x + y, x - y, x * y, x / y, x.abs().sqrt(), x.mul_f32(y.hi), s, c];
             for (k, w) in want.iter().enumerate() {
                 let g = df32 { hi: got[16 * i + 2 * k], lo: got[16 * i + 2 * k + 1] };
-                if !same(g, *w) {
+                if !same(g, *w) && flushes && flushed(g, *w, x, y) {
+                    flushed_parts += 1;
+                } else if !same(g, *w) {
                     bad += 1;
                     if bad < 10 {
                         eprintln!("op {k} of ({:?}, {:?}) and ({:?}, {:?}): device ({:?}, {:?}), host ({:?}, {:?})", x.hi, x.lo, y.hi, y.lo, g.hi, g.lo, w.hi, w.lo);
@@ -121,6 +147,11 @@ fn device_df32_matches_the_host_bit_for_bit() {
             }
         }
         assert_eq!(bad, 0, "seed {seed}: {bad} results differ from the host");
+    }
+    if flushes {
+        eprintln!("{}: {flushed_parts} results lost low parts to the subnormal flush", dev.arch().name);
+    } else {
+        assert_eq!(flushed_parts, 0);
     }
 }
 

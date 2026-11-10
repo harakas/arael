@@ -1308,13 +1308,33 @@ pub fn check_tolerance(bits: u32) -> f64 {
 }
 
 /// The device the check runs on: CUDA when it is compiled in, else HIP,
-/// else the CPU device.
+/// else Metal, else the CPU device.
 #[cfg(feature = "gpu-cuda")]
 type CheckDevice = arael_gpu::cuda::CudaDevice;
 #[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
 type CheckDevice = arael_gpu::hip::HipDevice;
-#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+#[cfg(all(gpu_metal, not(any(feature = "gpu-cuda", feature = "gpu-hip"))))]
+type CheckDevice = arael_gpu::metal::MetalDevice;
+#[cfg(all(feature = "gpu-cpu", not(any(feature = "gpu-cuda", feature = "gpu-hip", gpu_metal))))]
 type CheckDevice = arael_gpu::cpu::CpuDevice;
+
+/// The check's device, made at its first use.
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
+fn check_device() -> &'static Arc<CheckDevice> {
+    static DEV: std::sync::OnceLock<Arc<CheckDevice>> = std::sync::OnceLock::new();
+    DEV.get_or_init(|| Arc::new(CheckDevice::new(0).unwrap_or_else(|e| panic!("{DEVICE_CHECK_VAR}: no device: {e}"))))
+}
+
+/// Whether the check's device computes in f64 (Metal does not).
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
+fn check_device_has_f64() -> bool {
+    check_device().arch().has_f64
+}
+
+#[cfg(not(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal)))]
+fn check_device_has_f64() -> bool {
+    true
+}
 
 /// The device check ([`DEVICE_CHECK_VAR`]) at a solve's start and at a
 /// root's assembly entry points: `problem`, of the root type `P`, at `x0`.
@@ -1346,6 +1366,11 @@ where
             seen.push(name);
             format!("{name}: no device assembly: {why}")
         }
+        // an f64 root assembles on the CPU where the device has no f64
+        None if core::mem::size_of::<T>() == 8 && !check_device_has_f64() => {
+            seen.push(name);
+            format!("{name} (f64): no device assembly here: the device has no f64")
+        }
         None => {
             let precision = if core::mem::size_of::<T>() == 8 { "f64" } else { "f32" };
             match check_root(problem, x0, name) {
@@ -1373,14 +1398,13 @@ where
 /// [`check_solve`]'s check of the root `name`: its largest differences,
 /// or a panic where one is beyond [`check_tolerance`]; `Err` with the
 /// message of a panic of the CPU's assembly.
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
 fn check_root<T, P>(problem: &mut P, x0: &[T], name: &str) -> Result<String, String>
 where
     T: crate::utils::Float + 'static,
     P: crate::simple_lm::LmProblemInternals<T>,
 {
-    static DEV: std::sync::OnceLock<Arc<CheckDevice>> = std::sync::OnceLock::new();
-    let dev = DEV.get_or_init(|| Arc::new(CheckDevice::new(0).unwrap_or_else(|e| panic!("{DEVICE_CHECK_VAR}: no device: {e}"))));
+    let dev = check_device();
     // moved off the start by up to three thousandths of each parameter's
     // size, or absolutely below 1: the residuals then stand well above the
     // rounding of the terms they are made of, and the re-centred
@@ -1396,7 +1420,9 @@ where
     let root_bits = if core::mem::size_of::<T>() == 8 { 53 } else { 24 };
     let mut worst = [0.0f64; 3];
     let mut bits = root_bits;
-    for wide in [Wide::F64, Wide::Df32] {
+    // both wide scalars, df32 alone on a device without f64
+    let wides: &[Wide] = if dev.arch().has_f64 { &[Wide::F64, Wide::Df32] } else { &[Wide::Df32] };
+    for &wide in wides {
         let chk = try_device_check(problem, x0, &x1, dev, wide).map_err(|panic| {
             panic.downcast_ref::<&str>().map(|m| m.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_else(|| "a panic without a message".into())
         })?;
@@ -1418,13 +1444,13 @@ where
     Ok(format!("cost {:.1e}, gradient {:.1e}, Hessian {:.1e}{narrow}", worst[0], worst[1], worst[2]))
 }
 
-#[cfg(not(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu")))]
+#[cfg(not(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal)))]
 fn check_root<T, P>(_problem: &mut P, _x0: &[T], name: &str) -> Result<String, String>
 where
     T: crate::utils::Float + 'static,
     P: crate::simple_lm::LmProblemInternals<T>,
 {
-    panic!("{DEVICE_CHECK_VAR}: `{name}`: the check needs a device runtime (feature gpu-cuda, gpu-hip or gpu-cpu)")
+    panic!("{DEVICE_CHECK_VAR}: `{name}`: the check needs a device runtime (feature gpu-cuda, gpu-hip, gpu-metal or gpu-cpu)")
 }
 
 #[cfg(test)]

@@ -4762,7 +4762,7 @@ impl Default for SchurMethod {
 /// ```
 #[derive(Clone, Debug)]
 pub struct GpuDevice {
-    /// The runtime (feature `gpu-cuda`, `gpu-hip` or `gpu-cpu`).
+    /// The runtime (feature `gpu-cuda`, `gpu-hip`, `gpu-metal` or `gpu-cpu`).
     pub backend: GpuBackend,
     /// The device, as the runtime numbers them.
     pub index: usize,
@@ -4772,16 +4772,18 @@ pub struct GpuDevice {
     cuda: DeviceSlot<arael_gpu::cuda::CudaDevice>,
     #[cfg(feature = "gpu-hip")]
     hip: DeviceSlot<arael_gpu::hip::HipDevice>,
+    #[cfg(gpu_metal)]
+    metal: DeviceSlot<arael_gpu::metal::MetalDevice>,
     #[cfg(feature = "gpu-cpu")]
     cpu: DeviceSlot<arael_gpu::cpu::CpuDevice>,
 }
 
 /// A [`GpuDevice`]'s device state, shared by its clones, made on first use.
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
 type DeviceSlot<D> = std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<D>>>>;
 
 /// The device in `slot`, made by `make` on first use.
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
 fn device_in<D>(slot: &DeviceSlot<D>, make: impl FnOnce() -> Result<D, arael_gpu::GpuError>) -> Result<std::sync::Arc<D>, arael_gpu::GpuError> {
     let mut shared = slot.lock().unwrap();
     if let Some(d) = shared.as_ref() {
@@ -4793,7 +4795,7 @@ fn device_in<D>(slot: &DeviceSlot<D>, make: impl FnOnce() -> Result<D, arael_gpu
 }
 
 /// What `f` reads of the device in `slot`; 0 before its first use.
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
 fn device_stat<D: arael_gpu::Device>(slot: &DeviceSlot<D>, f: impl Fn(&D) -> usize) -> usize {
     slot.lock().unwrap().as_deref().map_or(0, f)
 }
@@ -4803,12 +4805,14 @@ impl GpuDevice {
         GpuDevice {
             backend,
             index,
-            wide: GpuWide::F64,
+            wide: if backend.has_f64() { GpuWide::F64 } else { GpuWide::Df32 },
             staging: GpuStaging::Pinned,
             #[cfg(feature = "gpu-cuda")]
             cuda: Default::default(),
             #[cfg(feature = "gpu-hip")]
             hip: Default::default(),
+            #[cfg(gpu_metal)]
+            metal: Default::default(),
             #[cfg(feature = "gpu-cpu")]
             cpu: Default::default(),
         }
@@ -4822,6 +4826,14 @@ impl GpuDevice {
     /// HIP device `index` (feature `gpu-hip`).
     pub fn hip(index: usize) -> Self {
         Self::new(GpuBackend::Hip, index)
+    }
+
+    /// Metal device `index`, the GPU of an Apple silicon Mac (feature
+    /// `gpu-metal`). Metal has no f64: its wide values are
+    /// [`GpuWide::Df32`] and its factor `f32`, so an `f64` solve on it needs
+    /// [`MixedPrecision`], which refines the steps.
+    pub fn metal(index: usize) -> Self {
+        Self::new(GpuBackend::Metal, index)
     }
 
     /// The CPU running the GPU route's kernels (feature `gpu-cpu`), for
@@ -4843,6 +4855,17 @@ impl GpuDevice {
     /// The scalar of the device's wide values ([`Self::with_wide`]).
     pub fn wide(&self) -> GpuWide {
         self.wide
+    }
+
+    /// Whether the device computes in f64: every backend but Metal. On one
+    /// without, an `f64` solve needs [`MixedPrecision`] and an f64 root
+    /// assembles on the CPU.
+    ///
+    /// ```ignore
+    /// assert!(!GpuDevice::metal(0).has_f64());
+    /// ```
+    pub fn has_f64(&self) -> bool {
+        self.backend.has_f64()
     }
 
     /// The device with the device assembly's image staged in `staging`.
@@ -4889,6 +4912,8 @@ impl GpuDevice {
             GpuBackend::Cuda => device_stat(&self.cuda, arael_gpu::Device::reserved_bytes),
             #[cfg(feature = "gpu-hip")]
             GpuBackend::Hip => device_stat(&self.hip, arael_gpu::Device::reserved_bytes),
+            #[cfg(gpu_metal)]
+            GpuBackend::Metal => device_stat(&self.metal, arael_gpu::Device::reserved_bytes),
             #[cfg(feature = "gpu-cpu")]
             GpuBackend::Cpu => device_stat(&self.cpu, arael_gpu::Device::reserved_bytes),
             #[allow(unreachable_patterns)]
@@ -4904,6 +4929,8 @@ impl GpuDevice {
             GpuBackend::Cuda => device_stat(&self.cuda, arael_gpu::Device::allocations),
             #[cfg(feature = "gpu-hip")]
             GpuBackend::Hip => device_stat(&self.hip, arael_gpu::Device::allocations),
+            #[cfg(gpu_metal)]
+            GpuBackend::Metal => device_stat(&self.metal, arael_gpu::Device::allocations),
             #[cfg(feature = "gpu-cpu")]
             GpuBackend::Cpu => device_stat(&self.cpu, arael_gpu::Device::allocations),
             #[allow(unreachable_patterns)]
@@ -4922,6 +4949,15 @@ pub enum GpuBackend {
     /// The CPU: the kernels compiled by the host's C++ compiler, for tests
     /// and CI without a GPU.
     Cpu,
+    /// Apple silicon, through Metal: df32 and the `f32` factor.
+    Metal,
+}
+
+impl GpuBackend {
+    /// Whether the backend's devices compute in f64 ([`GpuDevice::has_f64`]).
+    pub fn has_f64(self) -> bool {
+        self != GpuBackend::Metal
+    }
 }
 
 /// What a [`GpuDevice`] keeps and sums its wide values in: H, the gradient,
@@ -5548,6 +5584,27 @@ fn device_precision<T>(mixed: bool) -> arael_gpu::GpuPrecision {
     if mixed || core::mem::size_of::<T>() == 4 { arael_gpu::GpuPrecision::F32 } else { arael_gpu::GpuPrecision::F64 }
 }
 
+/// [`SetupError::SolverUnavailable`] for what Metal, without f64, cannot
+/// run: f64 wide values, and an f64 solve without [`MixedPrecision`]
+/// (`mixed`), whose factor would be f64. Other devices run both.
+#[cfg(feature = "gpu")]
+fn metal_supports<T>(dev: &GpuDevice, mixed: bool) -> Result<(), SolveFailureKind> {
+    if dev.has_f64() {
+        return Ok(());
+    }
+    if dev.wide() == GpuWide::F64 {
+        return Err(SetupError::SolverUnavailable { solver: "gpu", reason: "Metal has no f64: its wide values are GpuWide::Df32" }.into());
+    }
+    if core::mem::size_of::<T>() == 8 && !mixed {
+        return Err(SetupError::SolverUnavailable {
+            solver: "gpu",
+            reason: "Metal factors in f32: an f64 solve on it needs MixedPrecision (SparseFaerOptions::with_mixed_precision), which refines the steps",
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// The refinement of a solution through a reduced-precision factor against
 /// the f64 matrix: its scratch, all f64 whatever the solver's scalar (the
 /// right-hand side and the iterate, the residual, which becomes the
@@ -5753,12 +5810,12 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
     sn: &arael_faer::supernodal::SupernodalSymbolic,
     asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
 ) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SolveFailureKind> {
-    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
     let wide = match dev.wide() {
         GpuWide::F64 => arael_gpu::Wide::F64,
         GpuWide::Df32 => arael_gpu::Wide::Df32,
     };
-    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
     let staging = match dev.staging() {
         GpuStaging::Pinned => crate::device::Staging::Pinned,
         GpuStaging::Pageable => crate::device::Staging::Pageable,
@@ -5799,6 +5856,17 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
         GpuBackend::Cpu => {
             let _ = (precision, sn, asym);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the CPU device is not compiled in (feature gpu-cpu)" }.into())
+        }
+        #[cfg(gpu_metal)]
+        GpuBackend::Metal => {
+            let made = device_in(&dev.metal, || arael_gpu::metal::MetalDevice::new(dev.index));
+            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging));
+            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("setup of the Metal factor", e))?))
+        }
+        #[cfg(not(gpu_metal))]
+        GpuBackend::Metal => {
+            let _ = (precision, sn, asym);
+            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the Metal runtime is not compiled in (feature gpu-metal, on an Apple target)" }.into())
         }
     }
 }
@@ -5865,6 +5933,7 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
             // the previous structure's blocks go back to the device's pool
             // first, for the new ones to reuse
             self.gpu_solver = None;
+            metal_supports::<T>(dev, self.mixed.is_some())?;
             let precision = device_precision::<T>(self.mixed.is_some());
             self.gpu_solver = Some(device_solver(dev, precision, sn, asym)?);
             Ok(())
@@ -6462,7 +6531,14 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
         #[cfg(feature = "gpu")]
         if self.sn_num.gpu_reduces() && self.sn_num.gpu_assembly {
+            // an f64 root assembles on a device that computes in f64
+            let no_f64 = core::mem::size_of::<T>() == 8 && !self.sn_num.gpu_ref().has_f64();
             match problem.device_root() {
+                Some(_) if no_f64 => {
+                    if vb {
+                        info!("gpu assembly: on the CPU -- the device has no f64, which the root's scalar is");
+                    }
+                }
                 Some(_) => {
                     let clock = vb.then(Instant::now);
                     problem.update_params(params);
