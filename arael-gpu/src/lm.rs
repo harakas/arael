@@ -154,8 +154,10 @@ fn blocks(n: usize) -> u32 {
 
 impl<D: Device> LmVectors<D> {
     /// The vectors of `pos.len()` parameters in `wide`, H's diagonal at
-    /// `pos` in its values.
+    /// `pos` in its values. [`GpuError::Unavailable`] for [`Wide::F64`] on a
+    /// device without f64.
     pub fn new(dev: &Arc<D>, pos: &[u32], wide: Wide) -> Result<Self, GpuError> {
+        crate::check_f64(dev.arch(), wide == Wide::F64, "Wide::F64")?;
         let n = pos.len();
         let parts = blocks(n) as usize;
         let mut l = Layout::new();
@@ -336,10 +338,11 @@ impl<D: Device> LmVectors<D> {
     }
 }
 
-#[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu")))]
+#[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple"))))]
 mod tests {
     use super::*;
     use crate::lm::{DiagFault, Scalars};
+    use crate::test_util::{has_f64, wide as test_wide, wides};
     use crate::{TestBlock, TestDevice};
 
     fn device() -> Arc<TestDevice> {
@@ -473,6 +476,9 @@ mod tests {
     #[test]
     fn the_passes_match_the_host() {
         let dev = device();
+        if !has_f64(&*dev, "the passes in f64 (the_passes_match_the_host_in_df32 runs)") {
+            return;
+        }
         let Fixture { n, pos, h, g, x, step } = fixture();
         let nh = h.len();
         let lambda = 0.3;
@@ -516,6 +522,9 @@ mod tests {
     #[test]
     fn the_first_faulty_diagonal_entry_is_found() {
         let dev = device();
+        if !has_f64(&*dev, "the faults in f64 (the_first_faulty_diagonal_entry_is_found_in_df32 runs)") {
+            return;
+        }
         let n = 700usize;
         let pos: Vec<u32> = (0..n as u32).collect();
         let gd = up(&dev, &vec![1.0f64; n]);
@@ -543,17 +552,22 @@ mod tests {
     #[test]
     fn a_floor_raises_the_damping_scale() {
         let dev = device();
+        let wide = test_wide(&*dev);
         let n = 300usize;
         let pos: Vec<u32> = (0..n as u32).collect();
-        let h: Vec<f64> = (0..n).map(|i| if i % 3 == 0 { 1e-9 } else { 2.0 }).collect();
-        let (hd, gd) = (up(&dev, &h), up(&dev, &vec![1.0f64; n]));
-        let mut v = LmVectors::new(&dev, &pos, Wide::F64).unwrap();
+        // the values as the wide scalar holds them
+        let h: Vec<f64> = (0..n).map(|i| wide.value(wide.bits(if i % 3 == 0 { 1e-9 } else { 2.0 }))).collect();
+        let (hd, gd) = (upw(&dev, &h, wide), upw(&dev, &vec![1.0f64; n], wide));
+        let mut v = LmVectors::new(&dev, &pos, wide).unwrap();
         v.linearized((&gd, 0), (&hd, 0), Some(1e-3)).unwrap();
         v.set_lambda(2.0).unwrap();
         v.damp((&hd, 0)).unwrap();
-        let damped = read(&dev, (&hd, 0), n);
+        let damped = readw(&dev, (&hd, 0), n, wide);
+        // exact in f64; df32's floor and lambda are its own roundings
+        let tol = if wide == Wide::F64 { 0.0 } else { 1e-13 };
         for i in 0..n {
-            assert_eq!(damped[i], h[i] + 2.0 * h[i].max(1e-3), "entry {i}");
+            let want = h[i] + 2.0 * h[i].max(1e-3);
+            assert!((damped[i] - want).abs() <= tol * want, "{wide:?} entry {i}: {} against {want}", damped[i]);
         }
     }
 
@@ -562,9 +576,10 @@ mod tests {
     #[test]
     fn zero_steps_zero_the_rotation_steps() {
         let dev = device();
+        let wide = test_wide(&*dev);
         let n = 40usize;
         let pos: Vec<u32> = (0..n as u32).collect();
-        let mut v = LmVectors::new(&dev, &pos, Wide::F64).unwrap();
+        let mut v = LmVectors::new(&dev, &pos, wide).unwrap();
         let x: Vec<f64> = (0..n).map(|i| 1.0 + i as f64).collect();
         v.write_x(&x).unwrap();
         // two entities of six parameters (rotation first), the second's middle angle fixed
@@ -573,7 +588,7 @@ mod tests {
         let at: Vec<u32> = vec![0, 6];
         let (id, ad) = (up(&dev, &idx), up(&dev, &at));
         v.zero_steps((&id, 0), (&ad, 0), 2).unwrap();
-        let got = read(&dev, v.x(), n);
+        let got = readw(&dev, v.x(), n, wide);
         for i in 0..n {
             let zeroed = [10, 11, 12, 30, 32].contains(&i);
             assert_eq!(got[i], if zeroed { 0.0 } else { x[i] }, "entry {i}");
@@ -587,7 +602,7 @@ mod tests {
     /// another lambda, each against the damped system solved on the host.
     #[test]
     fn an_attempt_on_the_device_solves_the_damped_system() {
-        for wide in [Wide::F64, Wide::Df32] {
+        for wide in wides(&*device()) {
             attempt_in(wide);
         }
     }

@@ -10,6 +10,15 @@
 // visibility: a library exports its launchers alone and shares nothing
 // with another.
 
+// macOS declares the runtime's ucontext routines, and gives ucontext_t room
+// for the machine context getcontext writes, only when _XOPEN_SOURCE is
+// defined before the first system header; _DARWIN_C_SOURCE keeps the rest
+// of the system's declarations.
+#if defined(ARAEL_CPU_RUNTIME) && defined(__APPLE__)
+#define _XOPEN_SOURCE 700
+#define _DARWIN_C_SOURCE 1
+#endif
+
 #include <cmath>
 #include <cstring>
 #include <math.h>

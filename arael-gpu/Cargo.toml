@@ -22,6 +22,9 @@ hip = ["dep:libloading"]
 # The CPU device: the kernels compiled by the host's C++ compiler and run
 # on the CPU, for tests and CI without a GPU (src/cpu.rs).
 cpu = ["dep:libloading"]
+# Metal, on Apple silicon Macs: Metal.framework ships with macOS, so a build
+# needs no Xcode. Nothing on other targets.
+metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
 
 [dependencies]
 cudarc = { version = "0.19.10", optional = true, default-features = false, features = [
@@ -37,3 +40,22 @@ arael-faer = { workspace = true }
 bytemuck = "1"
 # The user cache directory, for the kernel cache.
 etcetera = "0.11"
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = { version = "0.6.3", optional = true }
+objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "NSArray", "NSError", "NSRange", "NSString"] }
+objc2-metal = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "MTLAllocation",
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLComputeCommandEncoder",
+    "MTLComputePipeline",
+    "MTLDevice",
+    "MTLLibrary",
+    "MTLResource",
+    "MTLTypes",
+] }

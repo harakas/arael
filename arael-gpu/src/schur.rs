@@ -626,6 +626,7 @@ impl<D: Device> GpuSchur<D> {
     }
 
     fn build(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide, params: &GpuSchurParams) -> Result<Self, GpuError> {
+        crate::check_f64(dev.arch(), wide == Wide::F64, "Wide::F64")?;
         Self::build_lanes(dev, p, nh, wide, dev.arch().warp.max(PLANE), params)
     }
 
@@ -1157,12 +1158,12 @@ fn defines(p: &SchurPlan, lanes: u32, tile_warps: u32, tile_groups: u32) -> Stri
     s
 }
 
-#[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu")))]
+#[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple"))))]
 mod tests {
     use super::*;
     use crate::GpuPrecision;
     use crate::TestDevice;
-    use crate::test_util::{ba_like, rel_residual};
+    use crate::test_util::{ba_like, precisions, rel_residual, wides};
     use arael_faer::schur::{SchurContext, schur_reduce, schur_symbolic};
     use arael_faer::supernodal::{SupernodalParams, SupernodalSymbolic, nd_block_order};
 
@@ -1177,8 +1178,17 @@ mod tests {
         a.iter().zip(b).fold(0.0f64, |e, (x, y)| e.max((x - y).abs())) / m
     }
 
-    /// Both wide scalars: the reduction's tests run in each.
-    const WIDES: [Wide; 2] = [Wide::F64, Wide::Df32];
+    /// The factor scalars `dev` computes in, each with its refinement and
+    /// the residual a solve reaches: f64 unrefined, f32 refined.
+    fn solve_settings(dev: &TestDevice) -> Vec<(GpuPrecision, Option<(usize, f64)>, f64)> {
+        precisions(dev)
+            .into_iter()
+            .map(|p| match p {
+                GpuPrecision::F64 => (p, None, 1e-10),
+                GpuPrecision::F32 => (p, Some((4usize, 1e-10f64)), 1e-8),
+            })
+            .collect()
+    }
 
     fn factor(dev: &Arc<TestDevice>, precision: GpuPrecision, sn: &SupernodalSymbolic, s: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> GpuFactor<TestDevice> {
         GpuFactor::new(dev, precision, sn, s, &Default::default(), wide).unwrap()
@@ -1195,7 +1205,7 @@ mod tests {
 
     #[test]
     fn the_reduction_matches_the_cpu() {
-        for wide in WIDES {
+        for wide in wides(&*device()) {
             the_reduction_matches_the_cpu_in(wide);
         }
     }
@@ -1240,7 +1250,7 @@ mod tests {
         let mut rhs_cpu = vec![0.0f64; sym.kept_size()];
         schur_reduce(&sym, &h, &rhs, &mut SchurContext::new(), &mut s_cpu, &mut rhs_cpu).unwrap();
         let dev = device();
-        for wide in WIDES {
+        for wide in wides(&*device()) {
             for split_pairs in [1, u32::MAX] {
                 for groups in [1, 2, 4, 8] {
                     let params = GpuSchurParams { split_pairs, tile_groups: Some(groups), ..Default::default() };
@@ -1348,7 +1358,7 @@ mod tests {
         let (h, _, rhs, elim) = ba_like(40, 300, 5);
         let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
         let dev = device();
-        for wide in WIDES {
+        for wide in wides(&*device()) {
             for groups in [1, 4] {
                 let reduce = |lanes| {
                     let p = SchurPlan::reduction(&sym, h.symbolic());
@@ -1364,7 +1374,7 @@ mod tests {
 
     #[test]
     fn the_reduced_solve_solves_the_whole_system() {
-        for wide in WIDES {
+        for wide in wides(&*device()) {
             the_reduced_solve_solves_the_whole_system_in(wide);
         }
     }
@@ -1374,7 +1384,7 @@ mod tests {
         let n = h.symbolic().ncols();
         let dev = device();
         let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
-        for (precision, refine, tol) in [(GpuPrecision::F64, None, 1e-10), (GpuPrecision::F32, Some((4usize, 1e-10f64)), 1e-8)] {
+        for (precision, refine, tol) in solve_settings(&dev) {
             let mut f = factor(&dev, precision, &sn, &sym.s, wide);
             let mut delta = vec![0.0f64; n];
             let stats = g.solve(&mut f, h.vals(), &rhs, refine, &mut delta).unwrap();
@@ -1396,7 +1406,7 @@ mod tests {
     /// system, refinement included.
     #[test]
     fn nothing_eliminated_solves_the_whole_system() {
-        for wide in WIDES {
+        for wide in wides(&*device()) {
             nothing_eliminated_solves_the_whole_system_in(wide);
         }
     }
@@ -1408,7 +1418,7 @@ mod tests {
         let sn = SupernodalSymbolic::new(h.symbolic(), Some(&order), &SupernodalParams::default()).unwrap();
         let dev = device();
         let mut g = GpuSchur::whole(&dev, h.symbolic(), wide).unwrap();
-        for (precision, refine, tol) in [(GpuPrecision::F64, None, 1e-10), (GpuPrecision::F32, Some((4usize, 1e-10f64)), 1e-8)] {
+        for (precision, refine, tol) in solve_settings(&dev) {
             let mut f = factor(&dev, precision, &sn, h.symbolic(), wide);
             for _ in 0..2 {
                 let mut delta = vec![0.0f64; n];
@@ -1428,7 +1438,7 @@ mod tests {
     /// residual, and undoes that step.
     #[test]
     fn the_refinement_stops_on_the_device() {
-        for wide in WIDES {
+        for wide in wides(&*device()) {
             the_refinement_stops_on_the_device_in(wide);
         }
     }
@@ -1478,7 +1488,7 @@ mod tests {
     /// is captured anew.
     #[test]
     fn replayed_solves_match_launched_ones() {
-        for wide in WIDES {
+        for wide in wides(&*device()) {
             replayed_solves_match_launched_ones_in(wide);
         }
     }
@@ -1489,7 +1499,7 @@ mod tests {
         let dev = device();
         // another damping: the replay must see the values written before it
         let (h2, dense2) = damped(&h, &dense);
-        for precision in [GpuPrecision::F64, GpuPrecision::F32] {
+        for precision in precisions(&*dev) {
             let refine = (precision == GpuPrecision::F32).then_some((4, 1e-10));
             let mut launched = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
             launched.use_graphs(false);
@@ -1526,7 +1536,7 @@ mod tests {
     /// captures of them replays to the same.
     #[test]
     fn the_launches_alone_match_solve() {
-        for wide in WIDES {
+        for wide in wides(&*device()) {
             the_launches_alone_match_solve_in(wide);
         }
     }
@@ -1577,7 +1587,7 @@ mod tests {
     /// device's pool once an earlier structure has filled it).
     #[test]
     fn solves_allocate_nothing() {
-        for wide in WIDES {
+        for wide in wides(&*device()) {
             solves_allocate_nothing_in(wide);
         }
     }
@@ -1613,7 +1623,7 @@ mod tests {
     /// the same objects starts clean.
     #[test]
     fn bad_pivots_are_reported_with_the_result() {
-        for wide in WIDES {
+        for wide in wides(&*device()) {
             bad_pivots_are_reported_with_the_result_in(wide);
         }
     }
@@ -1625,7 +1635,7 @@ mod tests {
         let diag0 = |blk: usize| asym.val_range(asym.col_range(blk).find(|&b| asym.blk_row(b) == blk).unwrap()).start;
         let dev = device();
         let mut g = GpuSchur::new(&dev, &sym, &asym, wide).unwrap();
-        for precision in [GpuPrecision::F64, GpuPrecision::F32] {
+        for precision in precisions(&*dev) {
             let mut f = factor(&dev, precision, &sn, &sym.s, wide);
             let refine = (precision == GpuPrecision::F32).then_some((4, 1e-10));
             // an eliminated block
@@ -1655,7 +1665,7 @@ mod tests {
     #[test]
     #[cfg(any(feature = "cuda", feature = "hip"))]
     fn the_kernels_keep_their_arrays_in_registers() {
-        for wide in WIDES {
+        for wide in wides(&*device()) {
             the_kernels_keep_their_arrays_in_registers_in(wide);
         }
     }

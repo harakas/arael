@@ -19,12 +19,15 @@
 #include <cstdlib>
 #include <sys/mman.h>
 #include <ucontext.h>
+#include <unistd.h>
 
 namespace arael_cpu {
 
-// A fiber's stack, below it a guard page that faults on an overflow.
+// A fiber's stack, below it a guard page that faults on an overflow. The
+// guard is the system's page (16 KB on Apple silicon): mprotect works in
+// whole pages, so a smaller guard would protect the stack's first bytes.
 constexpr size_t STACK_BYTES = 256 * 1024;
-constexpr size_t GUARD_BYTES = 4096;
+const size_t GUARD_BYTES = (size_t)sysconf(_SC_PAGESIZE);
 
 enum State : unsigned char { READY, AT_BLOCK, AT_WARP, DONE };
 

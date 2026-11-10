@@ -310,7 +310,16 @@ impl CpuDevice {
         has_fma()?;
         runtime()?;
         Ok(CpuDevice {
-            arch: Arch { name: "CPU".into(), target: "host".into(), warp: 32, shared_bytes: 64 * 1024, multiprocessors: 1, has_f64: true, integrated: true },
+            arch: Arch {
+                name: "CPU".into(),
+                target: "host".into(),
+                warp: 32,
+                shared_bytes: 64 * 1024,
+                multiprocessors: 1,
+                has_f64: true,
+                flushes_subnormals: false,
+                integrated: true,
+            },
             modules: Mutex::new(HashMap::new()),
             capture: Mutex::new(None),
             stream: Mutex::new(()),
@@ -673,6 +682,23 @@ KERNEL void block_sum(GLOBAL const float* x, GLOBAL float* out, u32 n) {
         let dev = CpuDevice::new(0).unwrap();
         let k = dev.compile(BLOCK_SUM, "", "block_sum").unwrap();
         assert_eq!(block_sums(&dev, &k, 1000), expected_block_sums(1000));
+    }
+
+    /// A kernel library holds no thread-locals, its shared memory included:
+    /// macOS gives every loaded library with thread-locals one of the
+    /// process's 512 pthread keys and dyld aborts past them, while a process
+    /// loads a library per device and source.
+    #[test]
+    fn a_kernel_library_holds_no_thread_locals() {
+        const SECTIONS: [&[u8]; 5] = [b"__thread_vars", b"__thread_data", b"__thread_bss", b".tdata", b".tbss"];
+        let has_thread_locals = |lib: &[u8]| SECTIONS.iter().any(|s| lib.windows(s.len()).any(|w| w == *s));
+        let dev = CpuDevice::new(0).unwrap();
+        let source = format!("{}\n{}\n{BLOCK_SUM}", crate::WIDE, crate::ASSEMBLY);
+        let lib = compile("block_sum", &dev.unit(&source, &format!("{}#define SCALAR float\n", crate::Wide::Df32.defines()))).unwrap();
+        assert!(!has_thread_locals(&lib), "a kernel library with thread-locals");
+        // the check sees a thread-local where there is one
+        const TL: &str = "KERNEL void tl(GLOBAL u32* out) { static thread_local u32 v; v++; out[0] = v; }";
+        assert!(has_thread_locals(&compile("tl", &dev.unit(TL, "")).unwrap()));
     }
 
     /// A thread that has returned no longer takes part in a barrier, as on

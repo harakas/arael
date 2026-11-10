@@ -2,8 +2,8 @@
 //! `WARP_BARRIER` act within threads 32 w to 32 w + 31 of a block. A 64-lane
 //! wavefront (AMD GCN, CDNA) holds two warps, which must not see each
 //! other, also when only one of them runs. On CUDA (feature `cuda`), else on
-//! HIP (`hip`), else on the CPU device (`cpu`).
-#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
+//! HIP (`hip`), else on Metal (`metal`), else on the CPU device (`cpu`).
+#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple")))]
 
 use arael_gpu::{Arg, Device, Launch};
 
@@ -11,7 +11,9 @@ use arael_gpu::{Arg, Device, Launch};
 type Dev = arael_gpu::cuda::CudaDevice;
 #[cfg(all(feature = "hip", not(feature = "cuda")))]
 type Dev = arael_gpu::hip::HipDevice;
-#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip"))))]
+#[cfg(all(feature = "metal", target_vendor = "apple", not(any(feature = "cuda", feature = "hip"))))]
+type Dev = arael_gpu::metal::MetalDevice;
+#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip", all(feature = "metal", target_vendor = "apple")))))]
 type Dev = arael_gpu::cpu::CpuDevice;
 
 const OUTS: usize = 9;
@@ -22,13 +24,19 @@ KERNEL_THREADS(256) void warps(GLOBAL float* out) {
     u32 t = thread_x();
     u32 i = global_x();
     float v = (float)i;
-    double d = (double)i;
     GLOBAL float* o = out + 9 * i;
     o[0] = shfl_xor(v, 1u);
     o[1] = shfl(v, 5u);
     o[2] = shfl(v, 37u);
+#if HAS_F64
+    double d = (double)i;
     o[3] = (float)shfl(d, 7u);
     o[4] = (float)warp_sum(d);
+#else
+    // a device without f64: the float forms
+    o[3] = shfl(v, 7u);
+    o[4] = warp_sum(v);
+#endif
     o[5] = warp_sum(v);
     o[6] = -1.0f;
     o[7] = -1.0f;
@@ -60,8 +68,8 @@ fn warp_operations_stay_within_their_32_lanes() {
         assert_eq!(o[0], (i ^ 1) as f32, "shfl_xor in thread {i}");
         assert_eq!(o[1], (base + 5) as f32, "shfl in thread {i}");
         assert_eq!(o[2], (base + 5) as f32, "shfl from lane 37 wraps to lane 5 in thread {i}");
-        assert_eq!(o[3], (base + 7) as f32, "shfl of a double in thread {i}");
-        assert_eq!(o[4], sum, "warp_sum of a double in thread {i}");
+        assert_eq!(o[3], (base + 7) as f32, "shfl of a double (a float without f64) in thread {i}");
+        assert_eq!(o[4], sum, "warp_sum of a double (a float without f64) in thread {i}");
         assert_eq!(o[5], sum, "warp_sum in thread {i}");
         if (i % 256 / 32) % 2 == 1 {
             assert_eq!(o[6], (base + 3) as f32, "shfl, the other warp idle, in thread {i}");

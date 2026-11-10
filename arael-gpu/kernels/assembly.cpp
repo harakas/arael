@@ -41,19 +41,27 @@ DEVICE T arael_rad2rad(T v) {
 
 // The difference of two angles in [-pi, pi].
 DEVICE float arael_rad_diff(float a, float b) { return arael_rad2rad(a - b); }
+#if HAS_F64
 DEVICE double arael_rad_diff(double a, double b) { return arael_rad2rad(a - b); }
+#endif
 
 // The sum of two angles in [-pi, pi].
 DEVICE float arael_rad_sum(float a, float b) { return arael_rad2rad(a + b); }
+#if HAS_F64
 DEVICE double arael_rad_sum(double a, double b) { return arael_rad2rad(a + b); }
+#endif
 
 // sqrt(v), 0 for v at or below 0.
 DEVICE float arael_safe_sqrt(float v) { return v <= 0.0f ? 0.0f : sqrt(v); }
+#if HAS_F64
 DEVICE double arael_safe_sqrt(double v) { return v <= 0.0 ? 0.0 : sqrt(v); }
+#endif
 
 // The machine epsilon of the argument's type, its value ignored.
 DEVICE float arael_epsilon_for(float) { return 1.1920928955078125e-7f; }
+#if HAS_F64
 DEVICE double arael_epsilon_for(double) { return 2.220446049250313e-16; }
+#endif
 
 // arael::utils' fast atan (max error < 1e-6 radians), with its folds, its
 // constants and its operations in its order: the argument's magnitude
@@ -84,7 +92,9 @@ DEVICE T arael_fast_atan_t(T v) {
     return negative ? -y : y;
 }
 DEVICE float arael_fast_atan(float v) { return arael_fast_atan_t(v); }
+#if HAS_F64
 DEVICE double arael_fast_atan(double v) { return arael_fast_atan_t(v); }
+#endif
 
 // arael::utils' fast atan2 over its fast atan: 0 at the origin, +-pi / 2
 // on the y axis, the quadrant by x's and y's signs.
@@ -100,7 +110,9 @@ DEVICE T arael_fast_atan2_t(T y, T x) {
     return arael_fast_atan_t(y / x) - pi;
 }
 DEVICE float arael_fast_atan2(float y, float x) { return arael_fast_atan2_t(y, x); }
+#if HAS_F64
 DEVICE double arael_fast_atan2(double y, double x) { return arael_fast_atan2_t(y, x); }
+#endif
 
 // The arm of n a select's index x picks (arael::utils::SelectIndex): the
 // integer in [0, n) x is, -1 for an integer outside them (the default
@@ -115,7 +127,9 @@ DEVICE int arael_select_index(T x, u32 n) {
 // A quiet NaN of the argument's type, its value ignored: a select's value
 // where the CPU's select panics.
 DEVICE float arael_nan_of(float) { return __int_as_float(0x7fc00000); }
+#if HAS_F64
 DEVICE double arael_nan_of(double) { return __longlong_as_double(0x7ff8000000000000LL); }
+#endif
 #ifdef ARAEL_WIDE_DF32
 DEVICE df32 arael_nan_of(df32) { return df32(arael_nan_of(0.0f)); }
 #endif
@@ -132,7 +146,7 @@ KERNEL_THREADS(256) void k_gather_params(GLOBAL const W* RESTRICT x, GLOBAL cons
 
 // R(delta) of an Euler-angle step, row-major: roll, pitch, yaw, with
 // R = rot(z) rot(y) rot(x).
-DEVICE void euler_matrix(W dx, W dy, W dz, W* d) {
+DEVICE void euler_matrix(W dx, W dy, W dz, THREAD W* d) {
     WidePair ex = wide_sin_cos(dx), ey = wide_sin_cos(dy), ez = wide_sin_cos(dz);
     W sx = ex.s, cx = ex.c, sy = ey.s, cy = ey.c, sz = ez.s, cz = ez.c;
     d[0] = cy * cz;
@@ -147,7 +161,7 @@ DEVICE void euler_matrix(W dx, W dy, W dz, W* d) {
 }
 
 // dR/d roll, pitch, yaw of the same step, k-major (27 values).
-DEVICE void euler_derivatives(W dx, W dy, W dz, W* dd) {
+DEVICE void euler_derivatives(W dx, W dy, W dz, THREAD W* dd) {
     WidePair ex = wide_sin_cos(dx), ey = wide_sin_cos(dy), ez = wide_sin_cos(dz);
     W sx = ex.s, cx = ex.c, sy = ey.s, cy = ey.c, sz = ez.s, cz = ez.c;
     W zero = 0.0f;
@@ -303,7 +317,7 @@ KERNEL_THREADS(256) void k_simple_euler_derivatives(GLOBAL const W* RESTRICT ref
 
 // The rotation matrix of the unit quaternion q (w, x, y, z), row-major, as
 // quatern::rotation_matrix.
-DEVICE void quat_matrix(GLOBAL const W* RESTRICT q, W* m) {
+DEVICE void quat_matrix(GLOBAL const W* RESTRICT q, THREAD W* m) {
     W w = q[0], x = q[1], y = q[2], z = q[3];
     W one = 1.0f, two = 2.0f;
     m[0] = one - two * (y * y + z * z);
@@ -318,13 +332,13 @@ DEVICE void quat_matrix(GLOBAL const W* RESTRICT q, W* m) {
 }
 
 // m v, m row-major.
-DEVICE void mat_vec(const W* m, const W* v, W* out) {
+DEVICE void mat_vec(THREAD const W* m, THREAD const W* v, THREAD W* out) {
 #pragma unroll
     for (u32 i = 0; i < 3; i++) out[i] = m[i * 3] * v[0] + m[i * 3 + 1] * v[1] + m[i * 3 + 2] * v[2];
 }
 
 // a x b.
-DEVICE void cross3(const W* a, const W* b, W* c) {
+DEVICE void cross3(THREAD const W* a, THREAD const W* b, THREAD W* c) {
     c[0] = a[1] * b[2] - a[2] * b[1];
     c[1] = a[2] * b[0] - a[0] * b[2];
     c[2] = a[0] * b[1] - a[1] * b[0];
@@ -336,10 +350,10 @@ DEVICE void cross3(const W* a, const W* b, W* c) {
 // s = 2 / (1 + x^2 + y^2 + z^2), R(v) = I + s A and
 // dR/dv_k = (s dA/dk - k s^2 A) / 2.
 template <bool DERIVS>
-DEVICE void rotvec_apply(const W* m, W vx, W vy, W vz, GLOBAL W* RESTRICT wide, GLOBAL F* RESTRICT val,
+DEVICE void rotvec_apply(THREAD const W* m, W vx, W vy, W vz, GLOBAL W* RESTRICT wide, GLOBAL F* RESTRICT val,
                          GLOBAL F* RESTRICT der) {
-    W half = 0.5f, one = 1.0f, two = 2.0f, zero = 0.0f;
-    W x = vx * half, y = vy * half, z = vz * half;
+    W one_half = 0.5f, one = 1.0f, two = 2.0f, zero = 0.0f;
+    W x = vx * one_half, y = vy * one_half, z = vz * one_half;
     W s = two / (one + x * x + y * y + z * z);
     W A[9] = {-(y * y + z * z), x * y - z, x * z + y,
               x * y + z, -(x * x + z * z), y * z - x,
@@ -368,7 +382,7 @@ DEVICE void rotvec_apply(const W* m, W vx, W vy, W vz, GLOBAL W* RESTRICT wide, 
                 m2y, x, one, x, zero, z, m1, z, m2y,
                 m2z, m1, x, one, m2z, y, x, y, zero};
     W kv[3] = {x, y, z};
-    W sh = s * half, s2h = s * s * half;
+    W sh = s * one_half, s2h = s * s * one_half;
 #pragma unroll
     for (u32 c = 0; c < 3; c++) {
         W dd[9];
@@ -391,8 +405,8 @@ DEVICE void rotvec_apply(const W* m, W vx, W vy, W vz, GLOBAL W* RESTRICT wide, 
 // rotation-vector step, as QuaternionParam::advance and the components'
 // updates do.
 DEVICE void quat_advance(GLOBAL W* RESTRICT q, W vx, W vy, W vz) {
-    W half = 0.5f, one = 1.0f;
-    W sx = vx * half, sy = vy * half, sz = vz * half;
+    W one_half = 0.5f, one = 1.0f;
+    W sx = vx * one_half, sy = vy * one_half, sz = vz * one_half;
     W inv = one / sqrt(one + sx * sx + sy * sy + sz * sz);
     W sw = inv;
     sx *= inv;
@@ -445,13 +459,13 @@ KERNEL_THREADS(256) void k_quat_advance(GLOBAL W* RESTRICT refr, GLOBAL const F*
 
 // carry(w, d) = d + (w x d) / 2 + (w x (w x d)) / 6, the translation of a
 // twist step (crate::twist::carry).
-DEVICE void carry3(const W* w, const W* d, W* t) {
-    W half = 0.5f, sixth = (W)1.0f / (W)6.0f;
+DEVICE void carry3(THREAD const W* w, THREAD const W* d, THREAD W* t) {
+    W one_half = 0.5f, sixth = (W)1.0f / (W)6.0f;
     W wd[3], wwd[3];
     cross3(w, d, wd);
     cross3(w, wd, wwd);
 #pragma unroll
-    for (u32 i = 0; i < 3; i++) t[i] = d[i] + wd[i] * half + wwd[i] * sixth;
+    for (u32 i = 0; i < 3; i++) t[i] = d[i] + wd[i] * one_half + wwd[i] * sixth;
 }
 
 // A TransformParam, as TransformParam::__precompute_symbolic: its reference
@@ -482,7 +496,7 @@ DEVICE void transform_compose(GLOBAL const W* RESTRICT refr, GLOBAL const F* RES
         ov[9 + i] = (F)t;
     }
     if (!DERIVS) return;
-    W half = 0.5f, sixth = (W)1.0f / (W)6.0f, zero = 0.0f, one = 1.0f;
+    W one_half = 0.5f, sixth = (W)1.0f / (W)6.0f, zero = 0.0f, one = 1.0f;
     W wd[3];
     cross3(w, d, wd);
 #pragma unroll
@@ -500,7 +514,7 @@ DEVICE void transform_compose(GLOBAL const W* RESTRICT refr, GLOBAL const F* RES
         cross3(ek, wd, ewd);
         cross3(w, ed, wed);
 #pragma unroll
-        for (u32 i = 0; i < 3; i++) t[i] = ed[i] * half + (ewd[i] + wed[i]) * sixth;
+        for (u32 i = 0; i < 3; i++) t[i] = ed[i] * one_half + (ewd[i] + wed[i]) * sixth;
         mat_vec(m, t, mt);
 #pragma unroll
         for (u32 i = 0; i < 3; i++) od[36 + k * 3 + i] = (F)mt[i];
@@ -555,7 +569,7 @@ DEVICE void unitvec_compose(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTR
     W m[9];
     quat_matrix(refr + e * 4, m);
     W dx = (W)ev[a], dy = (W)ev[a + 1];
-    W one = 1.0f, two = 2.0f, quarter = 0.25f, half = 0.5f;
+    W one = 1.0f, two = 2.0f, quarter = 0.25f, one_half = 0.5f;
     W u = dx * dx + dy * dy;
     W s2 = one + u * quarter;
     W local[3] = {one - u / (two * s2), dy / s2, -dx / s2};
@@ -568,8 +582,8 @@ DEVICE void unitvec_compose(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTR
     }
     if (!DERIVS) return;
     W inv2 = one / (s2 * s2);
-    W lx[3] = {-dx * inv2, -(dx * dy * half) * inv2, -(s2 - dx * dx * half) * inv2};
-    W ly[3] = {-dy * inv2, (s2 - dy * dy * half) * inv2, (dx * dy * half) * inv2};
+    W lx[3] = {-dx * inv2, -(dx * dy * one_half) * inv2, -(s2 - dx * dx * one_half) * inv2};
+    W ly[3] = {-dy * inv2, (s2 - dy * dy * one_half) * inv2, (dx * dy * one_half) * inv2};
     W ox[3], oy[3];
     mat_vec(m, lx, ox);
     mat_vec(m, ly, oy);
@@ -626,30 +640,28 @@ KERNEL_THREADS(256) void k_zero_steps(GLOBAL W* RESTRICT x, GLOBAL const u32* RE
     }
 }
 
-// The block's sum of its threads' v into part[block]: a shared-memory tree
-// over a block of 256 threads. Every thread of the block calls it.
-DEVICE void cost_partial(GLOBAL W* part, W v) {
-    SHARED W sh[256];
-    u32 t = thread_x();
+// The block's sum of its threads' v into part[b]: a shared-memory tree over
+// a block of 256 threads, in `sh` (256 values of the kernel's shared
+// memory); t is the thread, b the block. Every thread of the block calls it.
+DEVICE void cost_partial(GLOBAL W* part, W v, SHARED_PTR W* sh, u32 t, u32 b) {
     sh[t] = v;
     BARRIER();
-    for (u32 half = 128; half > 0; half >>= 1) {
-        if (t < half) sh[t] += sh[t + half];
+    for (u32 span = 128; span > 0; span >>= 1) {
+        if (t < span) sh[t] += sh[t + span];
         BARRIER();
     }
-    if (t == 0) part[block_x()] = sh[0];
+    if (t == 0) part[b] = sh[0];
 }
 
-// cost[0] += the sum of part[0..m), by one block of 256 threads.
-DEVICE void cost_sum(GLOBAL const W* part, u32 m, GLOBAL W* cost) {
-    SHARED W sh[256];
-    u32 t = thread_x();
+// cost[0] += the sum of part[0..m), by one block of 256 threads, `sh` and
+// t as cost_partial's.
+DEVICE void cost_sum(GLOBAL const W* part, u32 m, GLOBAL W* cost, SHARED_PTR W* sh, u32 t) {
     W acc = 0.0f;
     for (u32 i = t; i < m; i += 256) acc += part[i];
     sh[t] = acc;
     BARRIER();
-    for (u32 half = 128; half > 0; half >>= 1) {
-        if (t < half) sh[t] += sh[t + half];
+    for (u32 span = 128; span > 0; span >>= 1) {
+        if (t < span) sh[t] += sh[t + span];
         BARRIER();
     }
     if (t == 0) cost[0] += sh[0];
@@ -661,14 +673,13 @@ DEVICE void cost_sum(GLOBAL const W* part, u32 m, GLOBAL W* cost) {
 // 2 d_i d_j, entry i of the gradient 2 r d_i, over the rows of the slot's
 // instances inst[off[s]..off[s + 1]], its derivatives at OFF in each
 // row of STRIDE values of a record of R rows. idx and tile are the entity
-// array's global indices and tiles.
+// array's global indices and tiles; t is the thread's global index.
 template <u32 N, u32 R, u32 STRIDE, u32 OFF>
 DEVICE void reduce_entity(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRICT off, GLOBAL const u32* RESTRICT inst,
                           GLOBAL const u32* RESTRICT idx, GLOBAL const u32* RESTRICT tile, GLOBAL W* RESTRICT h,
-                          GLOBAL W* RESTRICT g, u32 slots) {
+                          GLOBAL W* RESTRICT g, u32 slots, u32 t) {
     const u32 nt = N * (N + 1) / 2;
     const u32 ne = nt + N;
-    u32 t = global_x();
     if (t >= slots * ne) return;
     u32 s = t / ne;
     u32 e = t - s * ne;
@@ -717,14 +728,14 @@ DEVICE void reduce_entity(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRI
 // two entities of one array, NA = NB) adds dA_j dB_i. A slot whose two
 // sides are one entity (aliased refs) sums into that entity's own tile,
 // the upper triangle: (i, j) and (j, i) land in one cell, which the thread
-// of i <= j sums, dA_i dB_j + dA_j dB_i (2 dA_i dB_i on the diagonal).
+// of i <= j sums, dA_i dB_j + dA_j dB_i (2 dA_i dB_i on the diagonal). t
+// is the thread's global index.
 template <u32 NA, u32 NB, u32 R, u32 STRIDE, u32 OFFA, u32 OFFB>
 DEVICE void reduce_cross(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRICT off, GLOBAL const u32* RESTRICT inst,
                          GLOBAL const u32* RESTRICT slot_a, GLOBAL const u32* RESTRICT slot_b,
                          GLOBAL const u32* RESTRICT idx_a, GLOBAL const u32* RESTRICT tile_a,
                          GLOBAL const u32* RESTRICT idx_b, GLOBAL const u32* RESTRICT tile_b,
-                         GLOBAL const u32* RESTRICT tile_x, GLOBAL W* RESTRICT h, u32 slots) {
-    u32 t = global_x();
+                         GLOBAL const u32* RESTRICT tile_x, GLOBAL W* RESTRICT h, u32 slots, u32 t) {
     if (t >= slots * NA * NB) return;
     u32 x = t / (NA * NB);
     u32 e = t - x * (NA * NB);

@@ -39,7 +39,7 @@ pub fn disarm() -> u64 {
 /// A device operation `op` starts: its injected failure when it is the one
 /// [`arm`] named. One relaxed load when unarmed.
 #[inline]
-#[cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
+#[cfg(any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple")))]
 pub(crate) fn check(op: &'static str) -> Result<(), crate::GpuError> {
     if !ARMED.load(Ordering::Relaxed) {
         return Ok(());

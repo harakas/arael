@@ -81,7 +81,8 @@ struct Kernels<K> {
     zero: K,
     zero_u32: K,
     seed_f32: K,
-    seed_f64: K,
+    /// None on a device without f64: f64 values are rounded on the host.
+    seed_f64: Option<K>,
     seed_wide: K,
     pair_update: K,
     big_update: K,
@@ -255,7 +256,9 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     /// structure `asym`, uploaded to `dev`, with the factor's buffers and
     /// the kernels; the vectors it solves and the values a device
     /// factorization reads are in `wide`. [`GpuError::Limit`] when a
-    /// supernode needs more shared memory than the device gives.
+    /// supernode needs more shared memory than the device gives;
+    /// [`GpuError::Unavailable`] for an f64 factor or [`Wide::F64`] on a
+    /// device without f64.
     pub fn new(
         dev: &Arc<D>,
         sn: &SupernodalSymbolic,
@@ -264,6 +267,8 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         wide: Wide,
     ) -> Result<Self, GpuError> {
         let fs = core::mem::size_of::<F>();
+        crate::check_f64(dev.arch(), fs == 8, "an f64 factor")?;
+        crate::check_f64(dev.arch(), wide == Wide::F64, "Wide::F64")?;
         // a supernode the small kernel's shared memory does not hold, or
         // wider than its block (its diagonal rows are the first pass's), takes
         // the panel steps
@@ -398,9 +403,11 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let seed_lanes = dev.arch().warp;
         let defines = format!("{}{}", wide.defines(), defines(F::CPP, fs, lu, seed_lanes, sizes));
         let source = format!("{WIDE}\n{SOURCE}");
-        let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_f64", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out", "k_tile_inv", "k_fwd_trsv_wide", "k_bwd_trsv_wide", "k_big_pair"];
-        let [zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv, fwd_trsv_wide, bwd_trsv_wide, big_pair]: [D::Kernel; 24] =
-            dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
+        let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out", "k_tile_inv", "k_fwd_trsv_wide", "k_bwd_trsv_wide", "k_big_pair"];
+        let kernels = dev.compile_many(&source, &defines, &entries)?;
+        let seed_f64 = if dev.arch().has_f64 { Some(dev.compile(&source, &defines, "k_seed_f64")?) } else { None };
+        let [zero, zero_u32, seed_f32, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv, fwd_trsv_wide, bwd_trsv_wide, big_pair]: [D::Kernel; 23] =
+            kernels.try_into().ok().expect("a kernel per entry point");
         let k = Kernels { zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv, fwd_trsv_wide, bwd_trsv_wide, big_pair };
         Ok(GpuSupernodal {
             dev: dev.clone(),
@@ -453,8 +460,22 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         assert_eq!(vals.len(), self.nvals, "the values of the structure the plan was built from");
         let fail = self.sec.fail;
         self.run(&self.k.zero_u32, 1, 32, 0, &[Arg::Block(&self.work, fail), Arg::U32(1)])?;
-        self.dev.write(&mut self.work, self.sec.vals, scalar_bytes(vals))?;
-        let seed = if is_f64::<M>() { &self.k.seed_f64 } else { &self.k.seed_f32 };
+        let seed = match (&self.k.seed_f64, is_f64::<M>()) {
+            (Some(seed_f64), true) => {
+                self.dev.write(&mut self.work, self.sec.vals, scalar_bytes(vals))?;
+                seed_f64
+            }
+            // a device without f64 seeds from the values rounded here
+            (None, true) => {
+                let rounded: Vec<f32> = bytemuck::cast_slice::<u8, f64>(scalar_bytes(vals)).iter().map(|&v| v as f32).collect();
+                self.dev.write(&mut self.work, self.sec.vals, bytemuck::cast_slice(&rounded))?;
+                &self.k.seed_f32
+            }
+            (_, false) => {
+                self.dev.write(&mut self.work, self.sec.vals, scalar_bytes(vals))?;
+                &self.k.seed_f32
+            }
+        };
         self.factorize_with((&self.work, self.sec.vals), seed, (&self.work, fail))?;
         let mut flag = [0u32];
         self.dev.read(&self.work, fail, bytemuck::cast_slice_mut(&mut flag))?;
@@ -820,11 +841,11 @@ fn defines(scalar: &str, scalar_bytes: usize, lu: usize, seed_lanes: u32, sizes:
     s
 }
 
-#[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu")))]
+#[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple"))))]
 mod tests {
     use super::*;
     use crate::TestDevice;
-    use crate::test_util::{grid_spd, grid_spd_sparse, rel_residual};
+    use crate::test_util::{grid_spd, grid_spd_sparse, has_f64, rel_residual, wide};
     use arael_faer::bsc::SparseBlockColMat;
     use arael_faer::supernodal::{SupernodalContext, SupernodalParams, nd_block_order, supernodal_factorize, supernodal_solve};
 
@@ -947,6 +968,9 @@ mod tests {
         let mut x_cpu = rhs.clone();
         supernodal_solve(&sn, &cpu, &mut x_cpu, &mut ctx, 1);
         let dev = device();
+        if !has_f64(&*dev, "the f64 factor") {
+            return;
+        }
         // the cut parameters do cut: some target tile is shared between
         // items, some pair tile cut along k
         let [targets, pairs] = both_big_updates().map(|kn| plan::build_levels(&Plan::new(&sn, a.symbolic()), &kn, dev.arch(), 8));
@@ -984,7 +1008,7 @@ mod tests {
         let n = sn.dim();
         let dev = device();
         for params in [GpuSupernodalParams::default(), every_kernel_busy(), cut_updates(), small_kernel_only(), chains_everywhere()].into_iter().chain(both_syrks()).chain(both_big_updates()) {
-            let mut g = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
+            let mut g = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params, wide(&*dev)).unwrap();
             if params.chain_flops_f32 == f64::INFINITY {
                 assert!(g.chained_levels() > 0 && g.chained_levels() == g.path_levels(), "the levels of one small supernode in chains");
             }
@@ -1017,15 +1041,23 @@ mod tests {
     fn a_supernode_beyond_the_shared_memory_takes_the_panel_steps() {
         let (a, dense, rhs, sn) = setup(32);
         let dev = device();
-        let fs = core::mem::size_of::<f64>();
-        let widest = (0..sn.n_supernodes()).map(|s| sn.supernode_dims(s).0).max().unwrap();
-        assert!(small_shared_bytes(widest, fs) > dev.arch().shared_bytes as usize, "a supernode of {widest} columns fits the device");
-        let params = GpuSupernodalParams { small_q: 100_000, small_flops: f64::INFINITY, ..GpuSupernodalParams::default() };
-        let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
-        g.factorize(a.vals()).unwrap();
-        let mut x = rhs.clone();
-        g.solve(&mut x).unwrap();
-        assert!(rel_residual(&dense, sn.dim(), &x, &rhs) < 1e-10);
+        fn check<F: Scalar>(dev: &Arc<TestDevice>, a: &Matrix, dense: &[f64], rhs: &[f64], sn: &SupernodalSymbolic, tol: f64) {
+            let fs = core::mem::size_of::<F>();
+            let widest = (0..sn.n_supernodes()).map(|s| sn.supernode_dims(s).0).max().unwrap();
+            assert!(small_shared_bytes(widest, fs) > dev.arch().shared_bytes as usize, "a supernode of {widest} columns fits the device");
+            let params = GpuSupernodalParams { small_q: 100_000, small_flops: f64::INFINITY, ..GpuSupernodalParams::default() };
+            let mut g = GpuSupernodal::<F, _>::new(dev, sn, a.symbolic(), &params, wide(&**dev)).unwrap();
+            g.factorize(a.vals()).unwrap();
+            let mut x = rhs.to_vec();
+            g.solve(&mut x).unwrap();
+            let res = rel_residual(dense, sn.dim(), &x, rhs);
+            assert!(res < tol, "{}: residual {res}", F::CPP);
+        }
+        if has_f64(&*dev, "the f64 factor") {
+            check::<f64>(&dev, &a, &dense, &rhs, &sn, 1e-10);
+        } else {
+            check::<f32>(&dev, &a, &dense, &rhs, &sn, 1e-4);
+        }
     }
 
     /// The kernels' SYRK_BLOCK, SYRK_TB, TRSM_ROWS, POTF2_UNROLL and
@@ -1058,25 +1090,31 @@ mod tests {
         let sn = SupernodalSymbolic::new(a.symbolic(), Some(&order), &sp).unwrap();
         let n = sn.dim();
         let dev = device();
+        let f64s = has_f64(&*dev, "the f64 factor");
         let one = GpuSupernodalParams { trsv_wide: Some(u32::MAX), solve_chain_work: 0.0, ..GpuSupernodalParams::default() };
-        let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &one, Wide::F64).unwrap();
-        assert_eq!(g.wide_levels(), 0);
-        g.factorize(a.vals()).unwrap();
         let mut x1 = rhs.clone();
-        g.solve(&mut x1).unwrap();
+        if f64s {
+            let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &one, Wide::F64).unwrap();
+            assert_eq!(g.wide_levels(), 0);
+            g.factorize(a.vals()).unwrap();
+            g.solve(&mut x1).unwrap();
+        }
         let max = x1.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         for block in [32, 64, 128] {
-            let wide = GpuSupernodalParams { trsv_wide: Some(33), trsv_block: Some(block), ..one };
-            let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &wide, Wide::F64).unwrap();
-            assert!(g.wide_levels() > 2, "levels over many blocks: {}", g.wide_levels());
-            g.factorize(a.vals()).unwrap();
-            let mut x = rhs.clone();
-            g.solve(&mut x).unwrap();
-            let diff = x.iter().zip(&x1).fold(0.0f64, |m, (u, v)| m.max((u - v).abs())) / max;
-            assert!(diff < 1e-12, "blocks of {block}: the solution off the one-block one by {diff}");
-            let res = rel_residual(&dense, n, &x, &rhs);
-            assert!(res < 1e-10, "blocks of {block}: residual {res}");
-            let mut g32 = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &wide, Wide::F64).unwrap();
+            let wide_trsv = GpuSupernodalParams { trsv_wide: Some(33), trsv_block: Some(block), ..one };
+            if f64s {
+                let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &wide_trsv, Wide::F64).unwrap();
+                assert!(g.wide_levels() > 2, "levels over many blocks: {}", g.wide_levels());
+                g.factorize(a.vals()).unwrap();
+                let mut x = rhs.clone();
+                g.solve(&mut x).unwrap();
+                let diff = x.iter().zip(&x1).fold(0.0f64, |m, (u, v)| m.max((u - v).abs())) / max;
+                assert!(diff < 1e-12, "blocks of {block}: the solution off the one-block one by {diff}");
+                let res = rel_residual(&dense, n, &x, &rhs);
+                assert!(res < 1e-10, "blocks of {block}: residual {res}");
+            }
+            let mut g32 = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &wide_trsv, wide(&*dev)).unwrap();
+            assert!(g32.wide_levels() > 2, "levels over many blocks: {}", g32.wide_levels());
             g32.factorize(a.vals()).unwrap();
             let mut x = rhs.clone();
             g32.solve(&mut x).unwrap();
@@ -1097,8 +1135,8 @@ mod tests {
         let order = nd_block_order(a.symbolic());
         let sp = SupernodalParams { relax: Some(vec![(320, 1.0)]), ..SupernodalParams::default() };
         let sn = SupernodalSymbolic::new(a.symbolic(), Some(&order), &sp).unwrap();
-        let wide = (0..sn.n_supernodes()).map(|s| sn.supernode_dims(s)).filter(|&(q, h)| q > 256 && h > q && q % plan::NB != 0).count();
-        assert!(wide >= 2, "wide supernodes with rows below: {wide}");
+        let wide_sn = (0..sn.n_supernodes()).map(|s| sn.supernode_dims(s)).filter(|&(q, h)| q > 256 && h > q && q % plan::NB != 0).count();
+        assert!(wide_sn >= 2, "wide supernodes with rows below: {wide_sn}");
         let mut cpu = vec![0.0f64; sn.factor_val_count()];
         let mut ctx = SupernodalContext::new();
         supernodal_factorize(&sn, &a, &mut cpu, &mut ctx, 1).unwrap();
@@ -1108,18 +1146,23 @@ mod tests {
         });
         let rows = [32, 64, 128].map(|r| GpuSupernodalParams { trsm_rows: Some(r), ..GpuSupernodalParams::default() });
         let unrolls = [false, true].map(|u| GpuSupernodalParams { potf2_unroll: Some(u), ..GpuSupernodalParams::default() });
+        let f64s = has_f64(&*dev, "the f64 factor");
         for params in blocks.chain(rows).chain(unrolls).chain(both_syrks()) {
-            let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
-            g.factorize(a.vals()).unwrap();
-            let err = factor_err(&sn, &g.factor_values().unwrap(), &cpu);
             let sizes = (params.syrk_block, params.syrk_tile, params.trsm_rows, params.potf2_unroll);
-            assert!(err < 1e-12, "factor err/max {err}, syrk block, syrk tile, trsm rows, potf2 unroll {sizes:?}");
-            let mut x = rhs.clone();
-            g.solve(&mut x).unwrap();
-            let res = rel_residual(&dense, sn.dim(), &x, &rhs);
-            assert!(res < 1e-10, "residual {res}");
-            let mut g32 = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
+            if f64s {
+                let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
+                g.factorize(a.vals()).unwrap();
+                let err = factor_err(&sn, &g.factor_values().unwrap(), &cpu);
+                assert!(err < 1e-12, "factor err/max {err}, syrk block, syrk tile, trsm rows, potf2 unroll {sizes:?}");
+                let mut x = rhs.clone();
+                g.solve(&mut x).unwrap();
+                let res = rel_residual(&dense, sn.dim(), &x, &rhs);
+                assert!(res < 1e-10, "residual {res}");
+            }
+            let mut g32 = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params, wide(&*dev)).unwrap();
             g32.factorize(a.vals()).unwrap();
+            let err = factor_err(&sn, &widen(&g32.factor_values().unwrap()), &cpu);
+            assert!(err < 1e-5, "f32 factor err/max {err}, syrk block, syrk tile, trsm rows, potf2 unroll {sizes:?}");
             let mut x = rhs.clone();
             g32.solve(&mut x).unwrap();
             let res = rel_residual(&dense, sn.dim(), &x, &rhs);
@@ -1141,7 +1184,7 @@ mod tests {
         let tiles = plan.inv_tiles();
         let dev = device();
         fn check<F: Scalar>(dev: &Arc<TestDevice>, sn: &SupernodalSymbolic, a: &Matrix, plan: &Plan, tiles: &[u32], tol: f64) {
-            let mut g = GpuSupernodal::<F, _>::new(dev, sn, a.symbolic(), &GpuSupernodalParams::default(), Wide::F64).unwrap();
+            let mut g = GpuSupernodal::<F, _>::new(dev, sn, a.symbolic(), &GpuSupernodalParams::default(), wide(&**dev)).unwrap();
             g.factorize(a.vals()).unwrap();
             let (l, inv) = (widen(&g.factor_values().unwrap()), widen(&g.inv_values().unwrap()));
             let mut partial = 0;
@@ -1168,7 +1211,9 @@ mod tests {
             assert!(partial > 0, "a tile narrower than 32 columns");
         }
         assert!(tiles.len() > 20, "inverted tiles: {}", tiles.len() / 2);
-        check::<f64>(&dev, &sn, &a, &plan, &tiles, 1e-12);
+        if has_f64(&*dev, "the f64 factor") {
+            check::<f64>(&dev, &sn, &a, &plan, &tiles, 1e-12);
+        }
         check::<f32>(&dev, &sn, &a, &plan, &tiles, 1e-4);
     }
 
@@ -1184,18 +1229,22 @@ mod tests {
         let small = |widest: usize| -> Vec<(usize, usize)> {
             (0..sn.n_supernodes()).map(|s| sn.supernode_dims(s)).filter(|&(q, _)| q <= widest).collect()
         };
-        for widest in [small_kernel_widest::<f64>(&dev), small_kernel_widest::<f32>(&dev)] {
+        let f64s = has_f64(&*dev, "the f64 factor");
+        let widths = if f64s { vec![small_kernel_widest::<f64>(&dev), small_kernel_widest::<f32>(&dev)] } else { vec![small_kernel_widest::<f32>(&dev)] };
+        for widest in widths {
             let small = small(widest);
             assert!(small.iter().any(|&(q, _)| q > 2 * plan::NB && q % plan::NB != 0), "a small supernode of three steps, the last narrower");
             assert!(small.iter().any(|&(q, h)| q > plan::NB && h > THREADS as usize), "a small supernode of rows past the first pass");
         }
         let mut cpu = vec![0.0f64; sn.factor_val_count()];
         supernodal_factorize(&sn, &a, &mut cpu, &mut SupernodalContext::new(), 1).unwrap();
-        let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &small_kernel_only(), Wide::F64).unwrap();
-        g.factorize(a.vals()).unwrap();
-        let err = factor_err(&sn, &g.factor_values().unwrap(), &cpu);
-        assert!(err < 1e-12, "f64 factor err/max {err}");
-        let mut g = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &small_kernel_only(), Wide::F64).unwrap();
+        if f64s {
+            let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &small_kernel_only(), Wide::F64).unwrap();
+            g.factorize(a.vals()).unwrap();
+            let err = factor_err(&sn, &g.factor_values().unwrap(), &cpu);
+            assert!(err < 1e-12, "f64 factor err/max {err}");
+        }
+        let mut g = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &small_kernel_only(), wide(&*dev)).unwrap();
         g.factorize(a.vals()).unwrap();
         let err = factor_err(&sn, &widen(&g.factor_values().unwrap()), &cpu);
         assert!(err < 1e-5, "f32 factor err/max {err}");
@@ -1253,17 +1302,24 @@ mod tests {
         let (q, _) = sn.supernode_dims(sn.n_supernodes() - 1);
         assert!(q > crate::plan::NB, "the root spans more than one panel step: {q} columns");
         let dev = device();
-        for params in [GpuSupernodalParams::default(), every_kernel_busy(), cut_updates(), small_kernel_only(), chains_everywhere()].into_iter().chain(both_syrks()).chain(both_big_updates()) {
-            let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, &asym, &params, Wide::F64).unwrap();
-            if params.chain_flops_f64 == f64::INFINITY {
-                assert!(matches!(g.steps.last(), Some(Step::Chain { .. })), "the bad root in a chain");
+        fn check<F: Scalar>(dev: &Arc<TestDevice>, sn: &SupernodalSymbolic, asym: &SymbolicSparseBlockColMat<SparseIndex>, a: &mut Matrix, base: usize, good: f64) {
+            let f64s = core::mem::size_of::<F>() == 8;
+            for params in [GpuSupernodalParams::default(), every_kernel_busy(), cut_updates(), small_kernel_only(), chains_everywhere()].into_iter().chain(both_syrks()).chain(both_big_updates()) {
+                let mut g = GpuSupernodal::<F, _>::new(dev, sn, asym, &params, wide(&**dev)).unwrap();
+                if (if f64s { params.chain_flops_f64 } else { params.chain_flops_f32 }) == f64::INFINITY {
+                    assert!(matches!(g.steps.last(), Some(Step::Chain { .. })), "the bad root in a chain");
+                }
+                assert!(matches!(g.factorize(a.vals()), Err(FactorizeError::NotPositiveDefinite)));
+                // the flag is cleared by the next factorization
+                a.vals_mut()[base] = good;
+                g.factorize(a.vals()).unwrap();
+                a.vals_mut()[base] = -1.0;
             }
-            assert!(matches!(g.factorize(a.vals()), Err(FactorizeError::NotPositiveDefinite)));
-            // the flag is cleared by the next factorization
-            a.vals_mut()[base] = good;
-            g.factorize(a.vals()).unwrap();
-            a.vals_mut()[base] = -1.0;
         }
+        if has_f64(&*dev, "the f64 factor") {
+            check::<f64>(&dev, &sn, &asym, &mut a, base, good);
+        }
+        check::<f32>(&dev, &sn, &asym, &mut a, base, good);
     }
 
     /// Values and right-hand sides in f32 go through the same kernels as
@@ -1272,21 +1328,30 @@ mod tests {
     fn f32_values_and_rhs_match_their_f64_twins() {
         let (a, _, rhs, sn) = setup(16);
         let dev = device();
-        let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &every_kernel_busy(), Wide::F64).unwrap();
-        let v32: Vec<f32> = a.vals().iter().map(|&v| v as f32).collect();
-        let v64: Vec<f64> = v32.iter().map(|&v| v as f64).collect();
-        g.factorize(&v64).unwrap();
-        let from64 = g.factor_values().unwrap();
-        g.factorize(&v32).unwrap();
-        let from32 = g.factor_values().unwrap();
-        // the tile updates add atomically, in no fixed order
-        assert!(factor_err(&sn, &from32, &from64) < 1e-12);
-        let mut x32: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
-        let mut x64: Vec<f64> = x32.iter().map(|&v| v as f64).collect();
-        g.solve(&mut x32).unwrap();
-        g.solve(&mut x64).unwrap();
-        for (a, b) in x32.iter().zip(&x64) {
-            assert!((*a as f64 - b).abs() <= 1e-6 * b.abs().max(1.0), "{a} against {b}");
+        // the factor f64, or f32 on a device without f64 (whose f64 values the host rounds)
+        fn check<F: Scalar>(dev: &Arc<TestDevice>, a: &Matrix, rhs: &[f64], sn: &SupernodalSymbolic, tol: f64) {
+            let mut g = GpuSupernodal::<F, _>::new(dev, sn, a.symbolic(), &every_kernel_busy(), wide(&**dev)).unwrap();
+            let v32: Vec<f32> = a.vals().iter().map(|&v| v as f32).collect();
+            let v64: Vec<f64> = v32.iter().map(|&v| v as f64).collect();
+            g.factorize(&v64).unwrap();
+            let from64 = widen(&g.factor_values().unwrap());
+            g.factorize(&v32).unwrap();
+            let from32 = widen(&g.factor_values().unwrap());
+            // the tile updates add atomically, in no fixed order
+            let err = factor_err(sn, &from32, &from64);
+            assert!(err < tol, "{}: factor err/max {err}", F::CPP);
+            let mut x32: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
+            let mut x64: Vec<f64> = x32.iter().map(|&v| v as f64).collect();
+            g.solve(&mut x32).unwrap();
+            g.solve(&mut x64).unwrap();
+            for (a, b) in x32.iter().zip(&x64) {
+                assert!((*a as f64 - b).abs() <= 1e-6 * b.abs().max(1.0), "{}: {a} against {b}", F::CPP);
+            }
+        }
+        if has_f64(&*dev, "the f64 factor") {
+            check::<f64>(&dev, &a, &rhs, &sn, 1e-12);
+        } else {
+            check::<f32>(&dev, &a, &rhs, &sn, 1e-6);
         }
     }
 
@@ -1297,7 +1362,9 @@ mod tests {
         let (a, dense, rhs, sn) = setup(16);
         let n = sn.dim();
         let dev = device();
-        let mut g = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &Default::default(), Wide::F64).unwrap();
+        // the values and the vectors on the device in the wide scalar W
+        let w = wide(&*dev);
+        let mut g = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &Default::default(), w).unwrap();
         g.factorize(a.vals()).unwrap();
         let from_host = widen(&g.factor_values().unwrap());
         let mut x_host = rhs.clone();
@@ -1308,7 +1375,7 @@ mod tests {
         let at_fail = (nvals * 8).next_multiple_of(256);
         let (at_gate, at_x) = (at_fail + 256, at_fail + 512);
         let mut block = dev.alloc(at_x + n * 8).unwrap();
-        dev.write(&mut block, 0, bytemuck::cast_slice(a.vals())).unwrap();
+        dev.write(&mut block, 0, &w.encode(a.vals())).unwrap();
         // a factor of other values first, so the comparison below sees the device path's work
         g.factorize(&vec![0.0f64; nvals]).unwrap_err();
         g.factorize_device((&block, 0), (&block, at_fail)).unwrap();
@@ -1317,25 +1384,32 @@ mod tests {
         assert_eq!(flag[0], 0, "no pivot failed");
         assert!(factor_err(&sn, &widen(&g.factor_values().unwrap()), &from_host) < 1e-6);
 
-        dev.write(&mut block, at_x, bytemuck::cast_slice(&rhs)).unwrap();
+        let read_x = |block: &<TestDevice as Device>::Block| {
+            let mut bytes = vec![0u8; n * 8];
+            dev.read(block, at_x, &mut bytes).unwrap();
+            let mut x = vec![0.0f64; n];
+            w.decode(&bytes, &mut x);
+            x
+        };
+        let rhs_w = w.encode(&rhs);
+        let mut rhs_back = vec![0.0f64; n];
+        w.decode(&rhs_w, &mut rhs_back);
+        dev.write(&mut block, at_x, &rhs_w).unwrap();
         dev.write(&mut block, at_gate, bytemuck::cast_slice(&[0u32])).unwrap();
         g.solve_device_if((&block, at_x), (&block, at_gate)).unwrap();
-        let mut x = vec![0.0f64; n];
-        dev.read(&block, at_x, bytemuck::cast_slice_mut(&mut x)).unwrap();
-        assert_eq!(x, rhs, "a closed gate leaves x alone");
+        assert_eq!(read_x(&block), rhs_back, "a closed gate leaves x alone");
 
         dev.write(&mut block, at_gate, bytemuck::cast_slice(&[1u32])).unwrap();
         g.solve_device_if((&block, at_x), (&block, at_gate)).unwrap();
-        dev.read(&block, at_x, bytemuck::cast_slice_mut(&mut x)).unwrap();
+        let x = read_x(&block);
         let res = rel_residual(&dense, n, &x, &rhs);
         assert!(res < 1e-4, "an open gate solves: residual {res}");
         let dx = x.iter().zip(&x_host).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
         assert!(dx < 1e-5, "the device solve against the host one: {dx}");
 
-        dev.write(&mut block, at_x, bytemuck::cast_slice(&rhs)).unwrap();
+        dev.write(&mut block, at_x, &rhs_w).unwrap();
         g.solve_device((&block, at_x)).unwrap();
-        dev.read(&block, at_x, bytemuck::cast_slice_mut(&mut x)).unwrap();
-        assert!(rel_residual(&dense, n, &x, &rhs) < 1e-4);
+        assert!(rel_residual(&dense, n, &read_x(&block), &rhs) < 1e-4);
     }
 
 }

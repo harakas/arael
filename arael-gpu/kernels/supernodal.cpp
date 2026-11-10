@@ -66,11 +66,14 @@ KERNEL_THREADS(SEED_LANES) void k_seed_f32(GLOBAL const u32* RESTRICT tiles, GLO
     if (t < ntiles) seed_tile_lanes<float>(tiles, vals, factor, t, thread_x());
 }
 
-// The seed from f64 values.
+// The seed from f64 values (a device without f64 seeds from f32 values the
+// host rounded).
+#if HAS_F64
 KERNEL_THREADS(SEED_LANES) void k_seed_f64(GLOBAL const u32* RESTRICT tiles, GLOBAL const double* RESTRICT vals, GLOBAL F* RESTRICT factor, u32 ntiles) {
     u32 t = block_x();
     if (t < ntiles) seed_tile_lanes<double>(tiles, vals, factor, t, thread_x());
 }
+#endif
 
 // The seed from values of the route's wide scalar (wide.h): S formed on the device.
 KERNEL_THREADS(SEED_LANES) void k_seed_wide(GLOBAL const u32* RESTRICT tiles, GLOBAL const W* RESTRICT vals, GLOBAL F* RESTRICT factor, u32 ntiles) {
@@ -293,14 +296,14 @@ DEVICE u32 step_width(u32 left) {
 
 // The row's first W columns shifted down one.
 template <u32 W>
-DEVICE_INLINE void shift_down(F (&a)[NB]) {
+DEVICE_INLINE void shift_down(THREAD F (&a)[NB]) {
 #pragma unroll
     for (u32 c = 1; c < W; c++) a[c - 1] = a[c];
 }
 
 // potf2_regs' pivots k while the columns left (nb - k) fit width W.
 template <u32 W, typename Out>
-DEVICE_INLINE void potf2_steps(F (&a)[NB], u32 lane, u32 nb, u32& k, F& dr, bool& bad, Out& out) {
+DEVICE_INLINE void potf2_steps(THREAD F (&a)[NB], u32 lane, u32 nb, THREAD u32& k, THREAD F& dr, THREAD bool& bad, THREAD Out& out) {
     for (; k < nb && step_width(nb - k) == W; k++) {
         F d = shfl(a[0], k);
         if (!(d > F(0))) {
@@ -335,7 +338,7 @@ DEVICE_INLINE void potf2_steps(F (&a)[NB], u32 lane, u32 nb, u32& k, F& dr, bool
 // its halves taken by turns, so one warp barrier a step) instead of a
 // shuffle per column. The multiply-adds are potf2_steps', in its order.
 template <typename Out>
-DEVICE_INLINE bool potf2_full(F (&a)[NB], u32 lane, F& dr, Out& out, SHARED_PTR F* col) {
+DEVICE_INLINE bool potf2_full(THREAD F (&a)[NB], u32 lane, THREAD F& dr, THREAD Out& out, SHARED_PTR F* col) {
     bool bad = false;
 #pragma unroll
     for (u32 k = 0; k < NB; k++) {
@@ -376,7 +379,7 @@ DEVICE_INLINE bool potf2_full(F (&a)[NB], u32 lane, F& dr, Out& out, SHARED_PTR 
 // whether a pivot was not positive; it continues with 1. `a` is undefined
 // after.
 template <typename Out>
-DEVICE_INLINE bool potf2_regs(F (&a)[NB], u32 lane, u32 nb, F& dr, Out& out, SHARED_PTR F* col) {
+DEVICE_INLINE bool potf2_regs(THREAD F (&a)[NB], u32 lane, u32 nb, THREAD F& dr, THREAD Out& out, SHARED_PTR F* col) {
     if (nb == NB && col != nullptr) return potf2_full(a, lane, dr, out, col);
     bool bad = false;
     u32 k = 0;
@@ -439,12 +442,12 @@ struct SmallOut {
 
 // The columns of k_small_factor's rows the plain loops below load first:
 // 8 in f32, 4 in f64, whose rows take twice the registers.
-constexpr u32 SMALL_KU = sizeof(F) == 4 ? 8 : 4;
+CONSTANT constexpr u32 SMALL_KU = sizeof(F) == 4 ? 8 : 4;
 
 // small_take's products, the loop over the row's nb columns W wide; L[r][k]
 // comes through a ring of SMALL_KU loads ahead (`lk`, loaded).
 template <u32 W>
-DEVICE_INLINE void small_take_cols(F (&v)[NB], F (&lk)[SMALL_KU], GLOBAL const F* factor, u32 panel, u32 h, SHARED_PTR const F* l, u32 q, u32 j, u32 nb, u32 r) {
+DEVICE_INLINE void small_take_cols(THREAD F (&v)[NB], THREAD F (&lk)[SMALL_KU], GLOBAL const F* factor, u32 panel, u32 h, SHARED_PTR const F* l, u32 q, u32 j, u32 nb, u32 r) {
     for (u32 k = 0; k < j; k++) {
         F x = lk[0];
 #pragma unroll
@@ -460,7 +463,7 @@ DEVICE_INLINE void small_take_cols(F (&v)[NB], F (&lk)[SMALL_KU], GLOBAL const F
 // k_small_factor's row r at the step at column j: its nb values less the
 // earlier columns' products, v[c] = A[r][j + c] - sum over k < j of
 // L[r][k] L[j + c][k], L's diagonal block (column-major, q rows) in `l`.
-DEVICE_INLINE void small_take(F (&v)[NB], GLOBAL const F* factor, u32 panel, u32 h, SHARED_PTR const F* l, u32 q, u32 j, u32 nb, u32 r) {
+DEVICE_INLINE void small_take(THREAD F (&v)[NB], GLOBAL const F* factor, u32 panel, u32 h, SHARED_PTR const F* l, u32 q, u32 j, u32 nb, u32 r) {
 #pragma unroll
     for (u32 c = 0; c < NB; c++) v[c] = c < nb ? factor[panel + (j + c) * h + r] : F(0);
     F lk[SMALL_KU];
@@ -476,7 +479,7 @@ DEVICE_INLINE void small_take(F (&v)[NB], GLOBAL const F* factor, u32 panel, u32
 
 // small_solve's columns k while the columns left (nb - k) fit width W.
 template <u32 W>
-DEVICE_INLINE void small_solve_steps(F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SHARED_PTR F* l, SHARED_PTR const F* l11, SHARED_PTR const F* d11, u32 q, u32 j, u32 nb, u32 r, u32& k) {
+DEVICE_INLINE void small_solve_steps(THREAD F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SHARED_PTR F* l, SHARED_PTR const F* l11, SHARED_PTR const F* d11, u32 q, u32 j, u32 nb, u32 r, THREAD u32& k) {
     for (; k < nb && step_width(nb - k) == W; k++) {
         F x = v[0] * d11[k];
         factor[panel + (j + k) * h + r] = x;
@@ -493,7 +496,7 @@ DEVICE_INLINE void small_solve_steps(F (&v)[NB], GLOBAL F* factor, u32 panel, u3
 // column by column (the tile column-major in `l11`, NB rows, the
 // reciprocals of its diagonal in `d11`) and stored; a row of the diagonal
 // block also into `l`.
-DEVICE_INLINE void small_solve(F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SHARED_PTR F* l, SHARED_PTR const F* l11, SHARED_PTR const F* d11, u32 q, u32 j, u32 nb, u32 r) {
+DEVICE_INLINE void small_solve(THREAD F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SHARED_PTR F* l, SHARED_PTR const F* l11, SHARED_PTR const F* d11, u32 q, u32 j, u32 nb, u32 r) {
     u32 k = 0;
     small_solve_steps<32>(v, factor, panel, h, l, l11, d11, q, j, nb, r, k);
     small_solve_steps<24>(v, factor, panel, h, l, l11, d11, q, j, nb, r, k);
@@ -737,7 +740,7 @@ KERNEL_THREADS(TRSM_ROWS) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npa
 // staged column 16 R values), acc[R r + c]. On a diagonal tile (DIAG) the
 // accumulators with r < c lie wholly above the diagonal, which the tile
 // does not write, and are skipped.
-template <u32 R, bool DIAG> DEVICE_INLINE void tile_slab(F (&acc)[R * R], SHARED_PTR const F* sa, SHARED_PTR const F* sb, u32 nk, u32 tx, u32 ty) {
+template <u32 R, bool DIAG> DEVICE_INLINE void tile_slab(THREAD F (&acc)[R * R], SHARED_PTR const F* sa, SHARED_PTR const F* sb, u32 nk, u32 tx, u32 ty) {
     for (u32 kk = 0; kk < nk; kk++) {
         F a[R];
         F b[R];
@@ -1093,7 +1096,7 @@ DEVICE_INLINE void tile_inv_apply(GLOBAL const F* xi, SHARED_PTR F* xs, u32 nb, 
 // The forward steps k of trsv_fwd_warp while the columns left (q - k) fit
 // width W: lane k's y_k = b_k / L_kk, the lanes below less L_rk y_k.
 template <u32 W>
-DEVICE_INLINE void trsv_fwd_steps(F (&a)[NB], F& b, F rd, u32 lane, u32 q, u32& k) {
+DEVICE_INLINE void trsv_fwd_steps(THREAD F (&a)[NB], THREAD F& b, F rd, u32 lane, u32 q, THREAD u32& k) {
     for (; k < q && step_width(q - k) == W; k++) {
         if (lane == k) b = b * rd;
         F y = shfl(b, k);
@@ -1123,7 +1126,7 @@ DEVICE_INLINE F trsv_fwd_warp(GLOBAL const F* factor, u32 panel, u32 h, u32 q, F
 // rows left fit width W: lane c's x_c = b_c / L_cc, the lanes above less
 // L_cr x_c.
 template <u32 W>
-DEVICE_INLINE void trsv_bwd_steps(F (&a)[NB], F& b, F rd, u32 lane, u32 q, u32& k) {
+DEVICE_INLINE void trsv_bwd_steps(THREAD F (&a)[NB], THREAD F& b, F rd, u32 lane, u32 q, THREAD u32& k) {
     for (; k < q && step_width(q - k) == W; k++) {
         u32 c = q - 1 - k;
         if (lane == c) b = b * rd;
@@ -1172,13 +1175,13 @@ DEVICE_INLINE F trsv_row_step(GLOBAL const F* factor, u32 panel, u32 h, u32 j0, 
 // from column jlo: the columns before js are solved and only taken off the
 // rows from js on (not off each other); from js on, each 32-column step's
 // diagonal tile is solved by the first warp as a product with its inverse
-// (`inv`, k_tile_inv) and taken off the rows after it, up to jend.
-DEVICE_INLINE void fwd_trsv_steps(GLOBAL const u32* head, GLOBAL const F* factor, GLOBAL const F* inv, SHARED_PTR F* xs, u32 jlo, u32 js, u32 jend) {
+// (`inv`, k_tile_inv) and taken off the rows after it, up to jend. `t` is
+// the thread.
+DEVICE_INLINE void fwd_trsv_steps(GLOBAL const u32* head, GLOBAL const F* factor, GLOBAL const F* inv, SHARED_PTR F* xs, u32 jlo, u32 js, u32 jend, u32 t) {
     u32 q = head[0];
     u32 h = head[1];
     u32 panel = head[3];
     u32 tile0 = head[5];
-    u32 t = thread_x();
     const u32 nt = THREADS;
     u32 lane = t % 32;
     for (u32 j0 = jlo; j0 < jend; j0 += 32) {
@@ -1195,14 +1198,13 @@ DEVICE_INLINE void fwd_trsv_steps(GLOBAL const u32* head, GLOBAL const F* factor
 // threads; a supernode of at most 32 columns by the first warp in
 // registers (trsv_fwd_warp), a wider one in 32-column steps
 // (fwd_trsv_steps). `xs`: q values (dynamic shared memory for the widest
-// supernode q of the launch).
-DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL const F* inv, GLOBAL F* x, SHARED_PTR F* xs) {
+// supernode q of the launch). `t` is the thread.
+DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL const F* inv, GLOBAL F* x, SHARED_PTR F* xs, u32 t) {
     GLOBAL const u32* head = plan + plan[H_SOLVE_HEAD] + SOLVE_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
     u32 col0 = head[2];
     u32 panel = head[3];
-    u32 t = thread_x();
     const u32 nt = THREADS;
     u32 lane = t % 32;
     if (q <= NB) {
@@ -1214,7 +1216,7 @@ DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* f
         return;
     }
     for (u32 c0 = t; c0 < q; c0 += nt) xs[c0] = x[col0 + c0];
-    fwd_trsv_steps(head, factor, inv, xs, 0, 0, q);
+    fwd_trsv_steps(head, factor, inv, xs, 0, 0, q, t);
     BARRIER();
     for (u32 c1 = t; c1 < q; c1 += nt) x[col0 + c1] = xs[c1];
 }
@@ -1223,14 +1225,14 @@ DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* f
 KERNEL_THREADS(THREADS) void k_fwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
     if (gate[0] == 0) return;
     DYNAMIC_SHARED(F, smem);
-    fwd_trsv_one(list[block_x()], plan, factor, inv, x, smem);
+    fwd_trsv_one(list[block_x()], plan, factor, inv, x, smem, thread_x());
 }
 
 // Backward solve, part one: x_s -= L_below^T x for the columns [c0, c1) of
 // supernode s by the block of THREADS threads; the rows' x gathered into
 // `xr` XR_CH at a time, a warp per column with the lanes over the rows. A
-// column's sums do not depend on the range it is in.
-DEVICE_INLINE void bwd_gemv_cols(u32 s, u32 c0, u32 c1, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* xr) {
+// column's sums do not depend on the range it is in. `t` is the thread.
+DEVICE_INLINE void bwd_gemv_cols(u32 s, u32 c0, u32 c1, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* xr, u32 t) {
     u32 o_row_sc = plan[H_ROW_SC];
     GLOBAL const u32* head = plan + plan[H_SOLVE_HEAD] + SOLVE_HEAD * s;
     u32 q = head[0];
@@ -1238,7 +1240,6 @@ DEVICE_INLINE void bwd_gemv_cols(u32 s, u32 c0, u32 c1, GLOBAL const u32* plan, 
     u32 col0 = head[2];
     u32 panel = head[3];
     u32 rsc = head[4];
-    u32 t = thread_x();
     const u32 nt = THREADS;
     u32 lane = t % 32;
     u32 warp = t / 32;
@@ -1257,15 +1258,15 @@ DEVICE_INLINE void bwd_gemv_cols(u32 s, u32 c0, u32 c1, GLOBAL const u32* plan, 
 }
 
 // The GEMV item at `it`, 3 words: its supernode and columns [c0, c1).
-DEVICE_INLINE void bwd_gemv_item(GLOBAL const u32* it, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* xr) {
-    bwd_gemv_cols(it[0], it[1], it[2], plan, factor, x, xr);
+DEVICE_INLINE void bwd_gemv_item(GLOBAL const u32* it, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* xr, u32 t) {
+    bwd_gemv_cols(it[0], it[1], it[2], plan, factor, x, xr, t);
 }
 
 // The backward GEMV, one block per item (bwd_gemv_item).
 KERNEL_THREADS(THREADS) void k_bwd_gemv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT x) {
     if (gate[0] == 0) return;
     SHARED F xr[XR_CH];
-    bwd_gemv_item(items + 3 * block_x(), plan, factor, x, xr);
+    bwd_gemv_item(items + 3 * block_x(), plan, factor, x, xr, thread_x());
 }
 
 // The transposed trsv of the supernode at `head` by the block over its
@@ -1273,13 +1274,13 @@ KERNEL_THREADS(THREADS) void k_bwd_gemv(GLOBAL const u32* RESTRICT gate, GLOBAL 
 // [cbegin, rend) from cbegin (the rows from cend on solved): 32-column
 // steps from the last, each step's columns taken the rows after the step
 // off (a warp per column), then its diagonal tile solved by the first warp
-// as a product with its inverse transposed (`inv`, k_tile_inv).
-DEVICE_INLINE void bwd_trsv_steps(GLOBAL const u32* head, GLOBAL const F* factor, GLOBAL const F* inv, SHARED_PTR F* xs, u32 cbegin, u32 cend, u32 rend) {
+// as a product with its inverse transposed (`inv`, k_tile_inv). `t` is the
+// thread.
+DEVICE_INLINE void bwd_trsv_steps(GLOBAL const u32* head, GLOBAL const F* factor, GLOBAL const F* inv, SHARED_PTR F* xs, u32 cbegin, u32 cend, u32 rend, u32 t) {
     u32 q = head[0];
     u32 h = head[1];
     u32 panel = head[3];
     u32 tile0 = head[5];
-    u32 t = thread_x();
     u32 lane = t % 32;
     u32 warp = t / 32;
     u32 nwarps = THREADS / 32;
@@ -1303,14 +1304,13 @@ DEVICE_INLINE void bwd_trsv_steps(GLOBAL const u32* head, GLOBAL const F* factor
 // Backward solve, part two: the transposed trsv of supernode s by the block
 // of THREADS threads; a supernode of at most 32 columns by the first warp
 // in registers (trsv_bwd_warp), a wider one in 32-column steps from the
-// last (bwd_trsv_steps). `xs` as fwd_trsv_one's.
-DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL const F* inv, GLOBAL F* x, SHARED_PTR F* xs) {
+// last (bwd_trsv_steps). `xs` and `t` as fwd_trsv_one's.
+DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL const F* inv, GLOBAL F* x, SHARED_PTR F* xs, u32 t) {
     GLOBAL const u32* head = plan + plan[H_SOLVE_HEAD] + SOLVE_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
     u32 col0 = head[2];
     u32 panel = head[3];
-    u32 t = thread_x();
     const u32 nt = THREADS;
     u32 lane = t % 32;
     if (q <= NB) {
@@ -1323,7 +1323,7 @@ DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* f
     }
     for (u32 c0 = t; c0 < q; c0 += nt) xs[c0] = x[col0 + c0];
     BARRIER();
-    bwd_trsv_steps(head, factor, inv, xs, 0, q, q);
+    bwd_trsv_steps(head, factor, inv, xs, 0, q, q, t);
     for (u32 c1 = t; c1 < q; c1 += nt) x[col0 + c1] = xs[c1];
 }
 
@@ -1332,7 +1332,7 @@ DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* f
 KERNEL_THREADS_REGS(THREADS) void k_bwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
     if (gate[0] == 0) return;
     DYNAMIC_SHARED(F, smem);
-    bwd_trsv_one(list[block_x()], plan, factor, inv, x, smem);
+    bwd_trsv_one(list[block_x()], plan, factor, inv, x, smem, thread_x());
 }
 
 #if TRSV_BLOCK % 32 != 0 || TRSV_BLOCK == 0
@@ -1366,7 +1366,7 @@ KERNEL_THREADS(THREADS) void k_fwd_trsv_wide(GLOBAL const u32* RESTRICT gate, GL
         u32 js = j * TRSV_BLOCK;
         u32 jend = min(js + TRSV_BLOCK, q);
         for (u32 c = t; c < jend - jlo; c += nt) xs[c] = x[col0 + jlo + c];
-        fwd_trsv_steps(head, factor, inv, xs, jlo, js, jend);
+        fwd_trsv_steps(head, factor, inv, xs, jlo, js, jend, t);
         BARRIER();
         for (u32 c = js - jlo + t; c < jend - jlo; c += nt) x[col0 + jlo + c] = xs[c];
     } else {
@@ -1411,7 +1411,7 @@ KERNEL_THREADS(THREADS) void k_bwd_trsv_wide(GLOBAL const u32* RESTRICT gate, GL
         u32 rend = min(cbegin + 2 * TRSV_BLOCK, q);
         for (u32 r = t; r < rend - cbegin; r += nt) xs[r] = x[col0 + cbegin + r];
         BARRIER();
-        bwd_trsv_steps(head, factor, inv, xs, cbegin, cend, rend);
+        bwd_trsv_steps(head, factor, inv, xs, cbegin, cend, rend, t);
         for (u32 r = t; r < cend - cbegin; r += nt) x[col0 + cbegin + r] = xs[r];
     } else {
         u32 r0 = (k + 1) * TRSV_BLOCK;
@@ -1443,7 +1443,7 @@ KERNEL_THREADS_REGS(THREADS) void k_fwd_chain(GLOBAL const u32* RESTRICT gate, G
         fwd_gather_rows(plan, plan + rec[0], rec[1], rec[1], factor, x, x, t, THREADS);
         // the gathers in; the previous trsv's reads of `smem` done
         BARRIER();
-        fwd_trsv_one(rec[2], plan, factor, inv, x, smem);
+        fwd_trsv_one(rec[2], plan, factor, inv, x, smem, t);
         // its x, read by the next level's gathers
         BARRIER();
     }
@@ -1455,6 +1455,7 @@ KERNEL_THREADS_REGS(THREADS) void k_bwd_chain(GLOBAL const u32* RESTRICT gate, G
     if (gate[0] == 0) return;
     SHARED F xr[XR_CH];
     DYNAMIC_SHARED(F, smem);
+    u32 t = thread_x();
     u32 lv = nlevels;
     while (lv > 0) {
         lv -= 1;
@@ -1464,11 +1465,11 @@ KERNEL_THREADS_REGS(THREADS) void k_bwd_chain(GLOBAL const u32* RESTRICT gate, G
         u32 ng = rec[4];
         if (ng > 0) {
             GLOBAL const u32* it = plan + rec[3];
-            bwd_gemv_cols(it[0], it[1], it[3 * (ng - 1) + 2], plan, factor, x, xr);
+            bwd_gemv_cols(it[0], it[1], it[3 * (ng - 1) + 2], plan, factor, x, xr, t);
         }
         // the GEMVs' x in; the previous trsv's reads of `smem` done
         BARRIER();
-        bwd_trsv_one(rec[2], plan, factor, inv, x, smem);
+        bwd_trsv_one(rec[2], plan, factor, inv, x, smem, t);
         // its x, read by the next (lower) level's GEMVs
         BARRIER();
     }

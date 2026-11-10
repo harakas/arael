@@ -844,7 +844,7 @@ fn cpp_kernels(
          KERNEL_THREADS(256) void __dk{cid}_gh(GLOBAL u8* RESTRICT B, u32 n) {{\n{}// the leaves the body reads\n{}\
          F rec[{recw}];\n#pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) rec[k] = (F)0.0f;\n// the body: the rows and their partials\n{gh_code}{costs}\
          // the record out\nGLOBAL F* out = COL_MUT(B, F, C{cid}_REC) + o * {recw}u;\n#pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) out[k] = rec[k];\n\
-         }}\ncost_partial(COL_MUT(B, W, C{cid}_PART), c);\n}}\n",
+         }}\nSHARED W arael_sh[256];\ncost_partial(COL_MUT(B, W, C{cid}_PART), c, arael_sh, thread_x(), block_x());\n}}\n",
         if rows == 1 { "" } else { "s" },
         prologue("B"),
         lets(gh_syms)?
@@ -854,7 +854,7 @@ fn cpp_kernels(
     let mut reduce = format!(
         "// C{cid}: its cost parts summed into the cost\n\
          KERNEL_THREADS(256) void __dk{cid}_csum(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT cost, u32 parts) {{\n\
-         GLOBAL const u64* L = (GLOBAL const u64*)B;\ncost_sum(COL(B, W, C{cid}_PART), parts, cost);\n}}\n"
+         GLOBAL const u64* L = (GLOBAL const u64*)B;\nSHARED W arael_sh[256];\ncost_sum(COL(B, W, C{cid}_PART), parts, cost, arael_sh, thread_x());\n}}\n"
     );
     for (i, (&n, &off)) in ns.iter().zip(&offs).enumerate() {
         reduce.push_str(&format!(
@@ -863,7 +863,7 @@ fn cpp_kernels(
              KERNEL_THREADS(256) void __dk{cid}_r{i}(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, GLOBAL W* RESTRICT g, u32 slots) {{\n\
              GLOBAL const u64* L = (GLOBAL const u64*)B;\n\
              reduce_entity<{n}u, {rows}u, {stride}u, {off}u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_OFF{i}), COL(B, u32, C{cid}_INST{i}), \
-             COL(B, u32, C{cid}_IDX{i}), COL(B, u32, C{cid}_TILE{i}), h, g, slots);\n}}\n"
+             COL(B, u32, C{cid}_IDX{i}), COL(B, u32, C{cid}_TILE{i}), h, g, slots, global_x());\n}}\n"
         ));
     }
     for (p, &(i, j)) in pairs.iter().enumerate() {
@@ -874,7 +874,7 @@ fn cpp_kernels(
              GLOBAL const u64* L = (GLOBAL const u64*)B;\n\
              reduce_cross<{ni}u, {nj}u, {rows}u, {stride}u, {oi}u, {oj}u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_XOFF{p}), COL(B, u32, C{cid}_XINST{p}), \
              COL(B, u32, C{cid}_S{i}), COL(B, u32, C{cid}_S{j}), COL(B, u32, C{cid}_IDX{i}), COL(B, u32, C{cid}_TILE{i}), \
-             COL(B, u32, C{cid}_IDX{j}), COL(B, u32, C{cid}_TILE{j}), COL(B, u32, C{cid}_TILEX{p}), h, slots);\n}}\n"
+             COL(B, u32, C{cid}_IDX{j}), COL(B, u32, C{cid}_TILE{j}), COL(B, u32, C{cid}_TILEX{p}), h, slots, global_x());\n}}\n"
         ));
     }
     // the cost: the rows alone, or rho of their squared norm
@@ -894,7 +894,7 @@ fn cpp_kernels(
     }
     let cost_kernel = format!(
         "// C{cid}'s cost alone, at a trial point: the rows without their partials\n\
-         KERNEL_THREADS(256) void __dk{cid}_cost(GLOBAL u8* RESTRICT B, u32 n) {{\n{}{}{cbody}}}\ncost_partial(COL_MUT(B, W, C{cid}_PART), c);\n}}\n",
+         KERNEL_THREADS(256) void __dk{cid}_cost(GLOBAL u8* RESTRICT B, u32 n) {{\n{}{}{cbody}}}\nSHARED W arael_sh[256];\ncost_partial(COL_MUT(B, W, C{cid}_PART), c, arael_sh, thread_x(), block_x());\n}}\n",
         prologue("B"),
         lets(cost_syms)?
     );

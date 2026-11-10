@@ -1,9 +1,38 @@
 //! Synthetic matrices for the tests: a grid graph of blocks of mixed width,
-//! random values, diagonal dominance, and a dense twin for residuals.
+//! random values, diagonal dominance, and a dense twin for residuals. And
+//! what a test runs in on its device: f64 and df32, or df32 alone on a
+//! device without f64 (Metal).
 
 use arael_faer::bsc::{SparseBlockColMat, SymbolicSparseBlockColMat};
 
 use crate::plan::SparseIndex;
+use crate::{Device, GpuPrecision, Wide};
+
+/// Whether `dev` computes in f64; without, it prints that `what` is
+/// skipped, so a test run says what it left out.
+pub fn has_f64<D: Device>(dev: &D, what: &str) -> bool {
+    let has = dev.arch().has_f64;
+    if !has {
+        eprintln!("{} has no f64: {what} skipped", dev.arch().name);
+    }
+    has
+}
+
+/// The wide scalar of a test about something else: f64, or df32 on a
+/// device without f64.
+pub fn wide<D: Device>(dev: &D) -> Wide {
+    if dev.arch().has_f64 { Wide::F64 } else { Wide::Df32 }
+}
+
+/// The wide scalars `dev` computes in.
+pub fn wides<D: Device>(dev: &D) -> Vec<Wide> {
+    if has_f64(dev, "Wide::F64") { vec![Wide::F64, Wide::Df32] } else { vec![Wide::Df32] }
+}
+
+/// The factor scalars `dev` computes in.
+pub fn precisions<D: Device>(dev: &D) -> Vec<GpuPrecision> {
+    if has_f64(dev, "the f64 factor") { vec![GpuPrecision::F64, GpuPrecision::F32] } else { vec![GpuPrecision::F32] }
+}
 
 pub struct Lcg(pub u64);
 

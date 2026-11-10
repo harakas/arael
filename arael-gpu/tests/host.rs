@@ -1,13 +1,15 @@
 //! Pinned host memory (CUDA, else HIP, else the CPU device): asynchronous
 //! copies from it land where they are aimed, and taking it to write again
 //! waits for the copies still reading it.
-#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
+#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple")))]
 
 #[cfg(feature = "cuda")]
 use arael_gpu::cuda::CudaDevice as Dev;
 #[cfg(all(feature = "hip", not(feature = "cuda")))]
 use arael_gpu::hip::HipDevice as Dev;
-#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip"))))]
+#[cfg(all(feature = "metal", target_vendor = "apple", not(any(feature = "cuda", feature = "hip"))))]
+use arael_gpu::metal::MetalDevice as Dev;
+#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip", all(feature = "metal", target_vendor = "apple")))))]
 use arael_gpu::cpu::CpuDevice as Dev;
 use arael_gpu::Device;
 

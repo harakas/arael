@@ -197,7 +197,7 @@ DEVICE W tile_fma(W v, bool on, W a, W c) {
 // predicates and all EW products issue). The loop indexes shared memory
 // only. An accumulator past the tile's n entries in every lane is skipped.
 template <u32 K>
-DEVICE_INLINE void tile_products(W* acc, const u32* ij, u32 n, u32 kn, u32 we, u32 cj, u32 ck, SHARED_PTR const W* ws, SHARED_PTR const W* cs) {
+DEVICE_INLINE void tile_products(THREAD W* acc, THREAD const u32* ij, u32 n, u32 kn, u32 we, u32 cj, u32 ck, SHARED_PTR const W* ws, SHARED_PTR const W* cs) {
 #pragma unroll
     for (u32 m = 0; m < ACC; m++) {
         if (GROUP_LANES * m < n) {
@@ -245,10 +245,10 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* 
     u32 l = lane / TILE_GROUPS;
     // the unit, and so its tile, uniform in the unit: the pair loop's
     // guards on the tile's size stay branches
-    u32 unit = uniform(thread_x() / TILE_LANES);
+    u32 unit = warp_uniform(thread_x() / TILE_LANES);
     GLOBAL const u32* item = plan + plan[SB_ITEMS] + (TILE_WARPS + 1) * block_x();
     bool split = item[0] != 0;
-    u32 t = uniform(item[1 + (split ? 0 : unit)]);
+    u32 t = warp_uniform(item[1 + (split ? 0 : unit)]);
     // a unit without a tile ends here; a split block has no idle unit, and
     // only it waits for the whole block
     if (t == NONE) return;
@@ -322,7 +322,7 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* 
             u32 x = shfl_xor(wu, o);
             wu = x > wu ? x : wu;
         }
-        wu = uniform(wu);
+        wu = warp_uniform(wu);
         // the unit's previous step's reads are done
         UNIT_BARRIER();
         // W_oa (row-major wr x we) and C_ob as H holds it (coupling(): row j
@@ -542,17 +542,16 @@ KERNEL_THREADS(THREADS) void k_copy_f64(GLOBAL const u32* RESTRICT gate, GLOBAL 
 }
 
 // The sum of squares of x[0..n) by one block of THREADS threads, returned to
-// every thread; `sh` is THREADS words of shared memory.
-DEVICE W block_sumsq(GLOBAL const W* x, u32 n, SHARED_PTR W* sh) {
-    u32 t = thread_x();
+// every thread; `sh` is THREADS words of shared memory, t the thread.
+DEVICE W block_sumsq(GLOBAL const W* x, u32 n, SHARED_PTR W* sh, u32 t) {
     W acc = 0.0f;
     for (u32 i = t; i < n; i += THREADS) acc = wide_fma(acc, x[i], x[i]);
     // a previous call's readers are done with the shared words first
     BARRIER();
     sh[t] = acc;
     BARRIER();
-    for (u32 half = THREADS / 2; half > 0; half /= 2) {
-        if (t < half) sh[t] += sh[t + half];
+    for (u32 span = THREADS / 2; span > 0; span /= 2) {
+        if (t < span) sh[t] += sh[t + span];
         BARRIER();
     }
     return sh[0];
@@ -563,8 +562,8 @@ DEVICE W block_sumsq(GLOBAL const W* x, u32 n, SHARED_PTR W* sh) {
 // a step is due.
 KERNEL_THREADS(THREADS) void k_refine_start(GLOBAL const W* RESTRICT b, GLOBAL const W* RESTRICT r, GLOBAL W* RESTRICT st, GLOBAL u32* RESTRICT flags, u32 n, W tol_rel) {
     SHARED W sh[THREADS];
-    W bn = sqrt(block_sumsq(b, n, sh));
-    W rn = sqrt(block_sumsq(r, n, sh));
+    W bn = sqrt(block_sumsq(b, n, sh, thread_x()));
+    W rn = sqrt(block_sumsq(r, n, sh, thread_x()));
     if (thread_x() == 0) {
         W tol = tol_rel * bn;
         st[R_BNORM] = bn;
@@ -595,7 +594,7 @@ KERNEL_THREADS(THREADS) void k_refine_judge(GLOBAL const W* RESTRICT r, GLOBAL W
     // every thread reads the flag before the first barrier, thread 0 writes
     // it after the last
     if (flags[F_ACTIVE] == 0) return;
-    W next = sqrt(block_sumsq(r, n, sh));
+    W next = sqrt(block_sumsq(r, n, sh, thread_x()));
     if (thread_x() == 0) {
         flags[F_STEPS] += 1;
         if (next >= st[R_RNORM]) {

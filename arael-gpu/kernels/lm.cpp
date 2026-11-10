@@ -17,15 +17,14 @@ template <int OP> DEVICE W combine(W a, W b) {
 }
 
 // `v` combined over the block by OP, the result in every thread; `sh` is
-// THREADS words of shared memory.
-template <int OP> DEVICE W block_reduce(W v, SHARED_PTR W* sh) {
-    u32 t = thread_x();
+// THREADS words of shared memory, t the thread.
+template <int OP> DEVICE W block_reduce(W v, SHARED_PTR W* sh, u32 t) {
     // a previous call's readers are done with the shared words first
     BARRIER();
     sh[t] = v;
     BARRIER();
-    for (u32 half = THREADS / 2; half > 0; half /= 2) {
-        if (t < half) sh[t] = combine<OP>(sh[t], sh[t + half]);
+    for (u32 span = THREADS / 2; span > 0; span /= 2) {
+        if (t < span) sh[t] = combine<OP>(sh[t], sh[t + span]);
         BARRIER();
     }
     return sh[0];
@@ -71,9 +70,9 @@ KERNEL_THREADS(THREADS) void k_lin_pass(GLOBAL const W* RESTRICT g, GLOBAL const
             fault = wide_u32(4u * i + kind);
         }
     }
-    gm = block_reduce<OP_MAX>(gm, sh);
-    gs = block_reduce<OP_MAX>(gs, sh);
-    fault = block_reduce<OP_MIN>(fault, sh);
+    gm = block_reduce<OP_MAX>(gm, sh, thread_x());
+    gs = block_reduce<OP_MAX>(gs, sh, thread_x());
+    fault = block_reduce<OP_MIN>(fault, sh, thread_x());
     if (thread_x() == 0) {
         u32 c = block_x() * LIN_PARTIALS;
         partials[c] = gm;
@@ -106,9 +105,9 @@ KERNEL_THREADS(THREADS) void k_attempt_pass(GLOBAL const W* RESTRICT x, GLOBAL c
         t2 = t * t;
         pr = d * (g[i] + lambda[0] * diag[i] * d);
     }
-    s2 = block_reduce<OP_SUM>(s2, sh);
-    t2 = block_reduce<OP_SUM>(t2, sh);
-    pr = block_reduce<OP_SUM>(pr, sh);
+    s2 = block_reduce<OP_SUM>(s2, sh, thread_x());
+    t2 = block_reduce<OP_SUM>(t2, sh, thread_x());
+    pr = block_reduce<OP_SUM>(pr, sh, thread_x());
     if (thread_x() == 0) {
         u32 c = block_x() * ATTEMPT_PARTIALS;
         partials[c] = s2;
@@ -118,19 +117,19 @@ KERNEL_THREADS(THREADS) void k_attempt_pass(GLOBAL const W* RESTRICT x, GLOBAL c
 }
 
 // Entry k of the partials of `blocks` blocks (PER a block) folded by OP over
-// the threads of one block, the result in every thread.
-template <int OP, u32 PER, u32 K> DEVICE W fold_partials(GLOBAL const W* partials, u32 blocks, SHARED_PTR W* sh) {
+// the threads of one block (t the thread), the result in every thread.
+template <int OP, u32 PER, u32 K> DEVICE W fold_partials(GLOBAL const W* partials, u32 blocks, SHARED_PTR W* sh, u32 t) {
     W acc = OP == OP_MIN ? NO_FAULT : W(0.0f);
-    for (u32 c = thread_x(); c < blocks; c += THREADS) acc = combine<OP>(acc, partials[c * PER + K]);
-    return block_reduce<OP>(acc, sh);
+    for (u32 c = t; c < blocks; c += THREADS) acc = combine<OP>(acc, partials[c * PER + K]);
+    return block_reduce<OP>(acc, sh, t);
 }
 
 // k_lin_pass's partials folded into the scalars, one block.
 KERNEL_THREADS(THREADS) void k_combine_lin(GLOBAL const W* RESTRICT partials, u32 blocks, GLOBAL W* RESTRICT out) {
     SHARED W sh[THREADS];
-    W gm = fold_partials<OP_MAX, LIN_PARTIALS, 0>(partials, blocks, sh);
-    W gs = fold_partials<OP_MAX, LIN_PARTIALS, 1>(partials, blocks, sh);
-    W fault = fold_partials<OP_MIN, LIN_PARTIALS, 2>(partials, blocks, sh);
+    W gm = fold_partials<OP_MAX, LIN_PARTIALS, 0>(partials, blocks, sh, thread_x());
+    W gs = fold_partials<OP_MAX, LIN_PARTIALS, 1>(partials, blocks, sh, thread_x());
+    W fault = fold_partials<OP_MIN, LIN_PARTIALS, 2>(partials, blocks, sh, thread_x());
     if (thread_x() == 0) {
         out[S_GRAD_MAX] = gm;
         out[S_GRAD_SCALED] = gs;
@@ -142,9 +141,9 @@ KERNEL_THREADS(THREADS) void k_combine_lin(GLOBAL const W* RESTRICT partials, u3
 // predicted reduction is half its sum.
 KERNEL_THREADS(THREADS) void k_combine_attempt(GLOBAL const W* RESTRICT partials, u32 blocks, GLOBAL W* RESTRICT out) {
     SHARED W sh[THREADS];
-    W s2 = fold_partials<OP_SUM, ATTEMPT_PARTIALS, 0>(partials, blocks, sh);
-    W t2 = fold_partials<OP_SUM, ATTEMPT_PARTIALS, 1>(partials, blocks, sh);
-    W pr = fold_partials<OP_SUM, ATTEMPT_PARTIALS, 2>(partials, blocks, sh);
+    W s2 = fold_partials<OP_SUM, ATTEMPT_PARTIALS, 0>(partials, blocks, sh, thread_x());
+    W t2 = fold_partials<OP_SUM, ATTEMPT_PARTIALS, 1>(partials, blocks, sh, thread_x());
+    W pr = fold_partials<OP_SUM, ATTEMPT_PARTIALS, 2>(partials, blocks, sh, thread_x());
     if (thread_x() == 0) {
         out[S_STEP2] = s2;
         out[S_TRY2] = t2;

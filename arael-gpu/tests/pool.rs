@@ -1,7 +1,7 @@
 //! The device's pool (CUDA, else HIP, else the CPU device): a dropped block
 //! is handed out again, zeroed, a fresh one has room for a quarter more, so
 //! solves of a slightly changed structure allocate nothing new.
-#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
+#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple")))]
 
 use std::sync::Arc;
 
@@ -11,10 +11,12 @@ use arael_faer::supernodal::{SupernodalParams, SupernodalSymbolic, nd_block_orde
 use arael_gpu::cuda::CudaDevice as Dev;
 #[cfg(all(feature = "hip", not(feature = "cuda")))]
 use arael_gpu::hip::HipDevice as Dev;
-#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip"))))]
+#[cfg(all(feature = "metal", target_vendor = "apple", not(any(feature = "cuda", feature = "hip"))))]
+use arael_gpu::metal::MetalDevice as Dev;
+#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip", all(feature = "metal", target_vendor = "apple")))))]
 use arael_gpu::cpu::CpuDevice as Dev;
 use arael_gpu::test_util::{ba_like, rel_residual};
-use arael_gpu::{Device, GpuFactor, GpuPrecision, GpuSchur, Wide};
+use arael_gpu::{Device, GpuFactor, GpuPrecision, GpuSchur};
 
 #[test]
 fn dropped_blocks_are_reused_zeroed_and_with_room_to_grow() {
@@ -61,8 +63,9 @@ fn solves_of_slightly_changed_structures_allocate_nothing() {
         let order = nd_block_order(&sym.s);
         let sn = SupernodalSymbolic::new(&sym.s, Some(&order), &SupernodalParams::default()).unwrap();
         let n = h.symbolic().ncols();
-        let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), Wide::F64).unwrap();
-        let mut f = GpuFactor::new(&dev, GpuPrecision::F32, &sn, &sym.s, &Default::default(), Wide::F64).unwrap();
+        let wide = arael_gpu::test_util::wide(&*dev);
+        let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+        let mut f = GpuFactor::new(&dev, GpuPrecision::F32, &sn, &sym.s, &Default::default(), wide).unwrap();
         let mut delta = vec![0.0f64; n];
         for _ in 0..3 {
             g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut delta).unwrap();

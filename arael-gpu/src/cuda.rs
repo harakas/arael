@@ -199,6 +199,7 @@ impl CudaDevice {
                 as u32,
             multiprocessors: attr(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)? as u32,
             has_f64: true,
+            flushes_subnormals: false,
             integrated: attr(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_INTEGRATED)? != 0,
         };
         Ok(CudaDevice {

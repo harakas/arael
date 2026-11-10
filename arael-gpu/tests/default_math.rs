@@ -4,8 +4,9 @@
 //! term, and a product rounded on its own (an `fma(a, b, 0)` pin or
 //! `mul_rn`) is not fused into the add that consumes it. Contraction itself
 //! stays on, as NVRTC's and hipRTC's defaults. On CUDA (feature `cuda`),
-//! else on HIP (`hip`), else on the CPU device (`cpu`).
-#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
+//! else on HIP (`hip`), else on Metal (`metal`), else on the CPU device
+//! (`cpu`).
+#![cfg(any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple")))]
 
 use arael_gpu::{Arg, Device, Launch};
 
@@ -13,7 +14,9 @@ use arael_gpu::{Arg, Device, Launch};
 type Dev = arael_gpu::cuda::CudaDevice;
 #[cfg(all(feature = "hip", not(feature = "cuda")))]
 type Dev = arael_gpu::hip::HipDevice;
-#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip"))))]
+#[cfg(all(feature = "metal", target_vendor = "apple", not(any(feature = "cuda", feature = "hip"))))]
+type Dev = arael_gpu::metal::MetalDevice;
+#[cfg(all(feature = "cpu", not(any(feature = "cuda", feature = "hip", all(feature = "metal", target_vendor = "apple")))))]
 type Dev = arael_gpu::cpu::CpuDevice;
 
 const SOURCE: &str = r#"
@@ -31,7 +34,7 @@ KERNEL void default_math(GLOBAL const float* in, GLOBAL float* out) {
     out[3] = (a - (s - b_virtual)) + (b - b_virtual);
 
     // quick_two_sum of a product pinned with fma(x, x, 0) and a smaller value.
-    float p = fmaf(x, in[4], 0.0f);
+    float p = fma(x, in[4], 0.0f);
     float sum = p + e;
     out[4] = e - (sum - p);
 
@@ -86,6 +89,35 @@ fn kernels_keep_default_math() {
     assert_eq!(actual[4], quick_two_sum_error, "quick_two_sum after an fma(x, x, 0) pin");
     assert_eq!(actual[5], quick_two_sum_error, "quick_two_sum with mul_rn and add_rn");
     assert_eq!(actual[6], e - (fused_sum - p), "an unpinned product is contracted, the compilers' default");
+}
+
+/// `Arch::flushes_subnormals` is what the device does: a product, a sum and
+/// a subnormal input's copy through arithmetic, each subnormal on the host.
+#[test]
+fn the_arch_says_whether_subnormals_flush() {
+    const FLUSH: &str = r#"
+KERNEL void flush(GLOBAL const float* in, GLOBAL float* out) {
+    if (global_x() != 0) return;
+    out[0] = mul_rn(in[0], in[1]);
+    out[1] = sub_rn(in[2], in[3]);
+    out[2] = mul_rn(in[4], in[5]);
+    out[3] = add_rn(in[4], in[6]);
+}
+"#;
+    let dev = Dev::new(0).unwrap();
+    let kernel = dev.compile(FLUSH, "", "flush").unwrap();
+    let tiny = f32::MIN_POSITIVE;
+    let input = [tiny, 0.25, tiny * 1.5, tiny, tiny / 8.0, 1.0, 0.0];
+    let host = [input[0] * input[1], input[2] - input[3], input[4] * input[5], input[4] + input[6]];
+    assert!(host.iter().all(|v| v.is_subnormal()), "the host's results are subnormal: {host:?}");
+    let mut inp = dev.alloc(4 * input.len()).unwrap();
+    dev.write(&mut inp, 0, bytemuck::cast_slice(&input)).unwrap();
+    let out = dev.alloc(4 * 4).unwrap();
+    dev.launch(&kernel, Launch::linear(1, 32), &[Arg::Block(&inp, 0), Arg::Block(&out, 0)]).unwrap();
+    let mut actual = [0f32; 4];
+    dev.read(&out, 0, bytemuck::cast_slice_mut(&mut actual)).unwrap();
+    let want = if dev.arch().flushes_subnormals { [0.0; 4] } else { host };
+    assert_eq!(actual, want, "{}: flushes_subnormals is {}", dev.arch().name, dev.arch().flushes_subnormals);
 }
 
 #[test]

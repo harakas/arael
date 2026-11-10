@@ -1107,7 +1107,7 @@ mod tests {
 
     /// A device of `multiprocessors` with `warp` lanes, integrated or discrete.
     fn arch(multiprocessors: u32, warp: u32, integrated: bool) -> crate::Arch {
-        crate::Arch { name: String::new(), target: String::new(), warp, shared_bytes: 49152, multiprocessors, has_f64: true, integrated }
+        crate::Arch { name: String::new(), target: String::new(), warp, shared_bytes: 49152, multiprocessors, has_f64: true, flushes_subnormals: false, integrated }
     }
 
     /// A discrete device of `multiprocessors` with 32-lane warps.

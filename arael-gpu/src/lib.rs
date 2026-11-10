@@ -40,8 +40,10 @@ pub mod cpu;
 #[doc(hidden)]
 pub mod fault;
 pub mod lm;
+#[cfg(all(feature = "metal", target_vendor = "apple"))]
+pub mod metal;
 pub mod plan;
-#[cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
+#[cfg(any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple")))]
 mod pool;
 pub mod schur;
 pub mod supernodal;
@@ -60,14 +62,17 @@ pub use schur::{GpuSchur, GpuSchurError, GpuSchurParams, GraphKey, RefineStats};
 pub use supernodal::{FactorizeError, GpuFactor, GpuSupernodal};
 
 /// The device this crate's tests run on: CUDA when its runtime is built
-/// (feature `cuda`), else HIP (`hip`), else the CPU (`cpu`).
+/// (feature `cuda`), else HIP (`hip`), else Metal (`metal`), else the CPU
+/// (`cpu`).
 #[cfg(all(test, feature = "cuda"))]
 pub(crate) type TestDevice = cuda::CudaDevice;
 #[cfg(all(test, feature = "hip", not(feature = "cuda")))]
 pub(crate) type TestDevice = hip::HipDevice;
-#[cfg(all(test, feature = "cpu", not(any(feature = "cuda", feature = "hip"))))]
+#[cfg(all(test, feature = "metal", target_vendor = "apple", not(any(feature = "cuda", feature = "hip"))))]
+pub(crate) type TestDevice = metal::MetalDevice;
+#[cfg(all(test, feature = "cpu", not(any(feature = "cuda", feature = "hip", all(feature = "metal", target_vendor = "apple")))))]
 pub(crate) type TestDevice = cpu::CpuDevice;
-#[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu")))]
+#[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple"))))]
 pub(crate) type TestBlock = <TestDevice as Device>::Block;
 
 /// The header in front of every kernel source: what differs between targets.
@@ -226,6 +231,10 @@ pub struct Arch {
     pub multiprocessors: u32,
     /// Whether the device computes in f64.
     pub has_f64: bool,
+    /// Whether its f32 arithmetic flushes subnormals to zero (Metal, in
+    /// safe math too): a df32 below about 1e-31, or whose low part is
+    /// subnormal, keeps no low part there.
+    pub flushes_subnormals: bool,
     /// Whether the device shares the host's memory: an integrated GPU, or
     /// the CPU device.
     pub integrated: bool,
@@ -434,6 +443,15 @@ pub trait Device: Send + Sync {
 
     /// Queues `graph`'s launches, in their recorded order.
     fn replay(&self, graph: &Self::Graph) -> Result<(), GpuError>;
+}
+
+/// [`GpuError::Unavailable`] when `uses_f64` and the device has no f64
+/// (Metal): `what` names what needs it.
+pub(crate) fn check_f64(arch: &Arch, uses_f64: bool, what: &str) -> Result<(), GpuError> {
+    if uses_f64 && !arch.has_f64 {
+        return Err(GpuError::Unavailable(format!("{} has no f64, which {what} needs", arch.name)));
+    }
+    Ok(())
 }
 
 /// `#define NAME VALUEu` for each pair, for a kernel source's constants.

@@ -24,27 +24,35 @@
 #ifdef ARAEL_WIDE_DF32
 
 // a + b as the sum and its exact rounding error (Knuth).
-DEVICE void two_sum(float a, float b, float& s, float& e) {
+DEVICE void two_sum(float a, float b, THREAD float& s, THREAD float& e) {
     s = add_rn(a, b);
     float bb = sub_rn(s, a);
     e = add_rn(sub_rn(a, sub_rn(s, bb)), sub_rn(b, bb));
 }
 
 // a + b as the sum and its error, for |a| >= |b| or a == 0.
-DEVICE void quick_two_sum(float a, float b, float& s, float& e) {
+DEVICE void quick_two_sum(float a, float b, THREAD float& s, THREAD float& e) {
     s = add_rn(a, b);
     e = sub_rn(b, sub_rn(s, a));
 }
 
 // a * b as the product and its exact rounding error.
-DEVICE void two_prod(float a, float b, float& p, float& e) {
+DEVICE void two_prod(float a, float b, THREAD float& p, THREAD float& e) {
     p = mul_rn(a, b);
-    e = fmaf(a, b, -p);
+    e = fma(a, b, -p);
 }
 
 struct df32 {
     float hi, lo;
+#if ARAEL_METAL
+    // Metal constructs and converts an object in its address space: a
+    // df32 in shared or global memory needs members of that space.
+    df32() thread = default;
+    df32() threadgroup = default;
+    df32() device = default;
+#else
     df32() = default;
+#endif
     // the parts as they are: a constant's split, or a normalized pair
     DEVICE constexpr df32(float h, float l) : hi(h), lo(l) {}
     DEVICE df32(float x) : hi(x), lo(0.0f) {}
@@ -55,7 +63,14 @@ struct df32 {
     }
     DEVICE explicit operator double() const { return (double)hi + (double)lo; }
 #endif
+#if ARAEL_METAL
+    DEVICE explicit operator float() const thread { return add_rn(hi, lo); }
+    DEVICE explicit operator float() const threadgroup { return add_rn(hi, lo); }
+    DEVICE explicit operator float() const device { return add_rn(hi, lo); }
+    DEVICE explicit operator float() const constant { return add_rn(hi, lo); }
+#else
     DEVICE explicit operator float() const { return add_rn(hi, lo); }
+#endif
 };
 
 // A normalized (hi, lo); a non-finite hi carries no trailing part.
@@ -122,10 +137,20 @@ DEVICE df32 operator/(df32 a, df32 b) {
     return df32(s, e) + df32(q3);
 }
 
-DEVICE df32& operator+=(df32& a, df32 b) { a = a + b; return a; }
-DEVICE df32& operator-=(df32& a, df32 b) { a = a - b; return a; }
-DEVICE df32& operator*=(df32& a, df32 b) { a = a * b; return a; }
-DEVICE df32& operator/=(df32& a, df32 b) { a = a / b; return a; }
+// The compound assignments, on Metal for a df32 in each address space.
+#define ARAEL_DF32_ASSIGN(SPACE)                                                      \
+    DEVICE SPACE df32& operator+=(SPACE df32& a, df32 b) { a = a + b; return a; } \
+    DEVICE SPACE df32& operator-=(SPACE df32& a, df32 b) { a = a - b; return a; } \
+    DEVICE SPACE df32& operator*=(SPACE df32& a, df32 b) { a = a * b; return a; } \
+    DEVICE SPACE df32& operator/=(SPACE df32& a, df32 b) { a = a / b; return a; }
+#if ARAEL_METAL
+ARAEL_DF32_ASSIGN(thread)
+ARAEL_DF32_ASSIGN(threadgroup)
+ARAEL_DF32_ASSIGN(device)
+#else
+ARAEL_DF32_ASSIGN()
+#endif
+#undef ARAEL_DF32_ASSIGN
 
 // Ordered by hi, then lo; anything with a NaN is unordered.
 DEVICE bool operator<(df32 a, df32 b) { return a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo); }
@@ -141,8 +166,8 @@ DEVICE df32 fabs(df32 a) { return a.hi < 0.0f ? -a : a; }
 
 // Karp's trick: one correction of an f32 square root.
 DEVICE df32 sqrt(df32 a) {
-    if (a.hi <= 0.0f || !isfinite(a.hi)) return df32(sqrtf(a.hi));
-    float x = 1.0f / sqrtf(a.hi);
+    if (a.hi <= 0.0f || !isfinite(a.hi)) return df32(sqrt(a.hi));
+    float x = 1.0f / sqrt(a.hi);
     float ax = mul_rn(a.hi, x);
     float diff = (a - df32_sqr(df32(ax))).hi;
     float hi, lo;
@@ -193,7 +218,7 @@ DEVICE WidePair wide_sin_cos(df32 x) {
         float nan = sub_rn(x.hi, x.hi);
         return WidePair{df32(nan), df32(nan)};
     }
-    float k = roundf(mul_rn(x.hi, 6.366197467e-01f));
+    float k = round(mul_rn(x.hi, 6.366197467e-01f));
     // x - k pi/2, both products exact
     float p1, e1, p2, e2;
     two_prod(1.570796371e+00f, k, p1, e1);
@@ -203,7 +228,7 @@ DEVICE WidePair wide_sin_cos(df32 x) {
     df32 c = df32_cos_taylor(r);
     // the quadrant, k mod 4: exact for the integer k at any magnitude (an
     // integer conversion of k overflows past 2^63)
-    float m = fmodf(k, 4.0f);
+    float m = fmod(k, 4.0f);
     int q = (int)(m < 0.0f ? add_rn(m, 4.0f) : m);
     if (q == 0) return WidePair{s, c};
     if (q == 1) return WidePair{c, -s};
@@ -248,7 +273,7 @@ DEVICE df32 wide_fma(df32 acc, double x, double y) { return wide_fma(acc, df32(x
 // v exactly: the f32 nearest it and what that left, |lo| <= 256.
 DEVICE df32 wide_u32(u32 v) {
     float hi = (float)v;
-    return df32(hi, (float)((long long)v - (long long)hi));
+    return df32(hi, (float)((i64)v - (i64)hi));
 }
 
 typedef df32 W;
