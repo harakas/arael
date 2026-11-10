@@ -93,6 +93,38 @@ fn python_interface_solves_on_metal() {
     assert!((metal - cpu).abs() <= 1e-9 * cpu.abs().max(1e-12), "Metal's refined solve ends at {metal}, the CPU's at {cpu}");
 }
 
+/// The vendored math types pass by value through C both ways, the small
+/// ones too (a struct of up to four floats travels in registers on arm64,
+/// where ctypes passes a struct holding an array wrongly).
+#[test]
+fn vendored_math_types_cross_c_by_value() {
+    let ws: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let have = |p: &str| Command::new(p).arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status().map(|s| s.success()).unwrap_or(false);
+    if !have("python3") || !have("cc") {
+        eprintln!("by value: no python3 or cc found, skipping");
+        return;
+    }
+    let lib = Path::new(env!("CARGO_TARGET_TMPDIR")).join("libbyvalue.so");
+    let status = Command::new("cc")
+        .args(["-O1", "-shared", "-fPIC", "-o"])
+        .arg(&lib)
+        .arg(ws.join("runner/tests/byvalue.c"))
+        .status().expect("cc spawn");
+    assert!(status.success(), "byvalue.c build failed");
+    let out = Command::new("python3")
+        .arg(ws.join("runner/tests/byvalue_main.py"))
+        .arg(&lib)
+        .output().expect("python spawn");
+    assert!(out.status.success(), "python run failed: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(text.lines().count(), 7, "{text}");
+    let bad: Vec<&str> = text.lines().filter(|l| !l.ends_with(" ok")).collect();
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
 /// The vendored column transport on its own: every input shape the
 /// vectorized calls accept and every refusal, no cdylib involved.
 #[test]

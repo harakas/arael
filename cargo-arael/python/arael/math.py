@@ -5,6 +5,12 @@
 # with R = R(z)R(y)R(x), quaternion scalar part first. Constructors
 # accept any length-matching sequence. Arithmetic runs in Python
 # floats (f64) and rounds through the storage type on construction.
+#
+# Every struct holds named fields, never an array: ctypes (Python 3.9's,
+# at least) passes a struct holding an array wrongly by value on arm64,
+# where a struct of up to four floats or doubles travels in registers (a
+# vectnd(4) or a matrix2d read back as garbage). `e` and `rows` are views
+# of the fields as an array.
 
 import ctypes
 import math as _pm
@@ -132,7 +138,10 @@ vect3d.cast = lambda self: vect3f(self.x, self.y, self.z)
 
 def _make_matrix2(name, vec):
     class matrix2(ctypes.Structure):
-        _fields_ = [("rows", vec * 2)]
+        _fields_ = [("r0", vec), ("r1", vec)]
+
+        @property
+        def rows(self): return (vec * 2).from_buffer(self)
 
         def __init__(self, rows=None):
             super().__init__()
@@ -226,7 +235,10 @@ def _make_matrix2(name, vec):
 
 def _make_matrix3(name, vec):
     class matrix3(ctypes.Structure):
-        _fields_ = [("rows", vec * 3)]
+        _fields_ = [("r0", vec), ("r1", vec), ("r2", vec)]
+
+        @property
+        def rows(self): return (vec * 3).from_buffer(self)
 
         def __init__(self, rows=None):
             super().__init__()
@@ -665,14 +677,18 @@ matrix3d.null_space = _null_space(matrix3d)
 
 # N-dimensional vect/matrix: cached ctypes classes per (scalar, dims),
 # mirroring arael's vect<T, N> / matrix<T, R, C> (layout: e[N] /
-# rows[R][C]). Constructors accept a length-matching sequence (rows for
-# matrices); values iterate as plain floats / row tuples.
+# rows[R][C], as named fields). Constructors accept a length-matching
+# sequence (rows for matrices); values iterate as plain floats / row
+# tuples.
 _ndim_cache = {}
 
 
 def _make_vectn(ct, n, name):
     class vectn(ctypes.Structure):
-        _fields_ = [("e", ct * n)]
+        _fields_ = [("e%d" % i, ct) for i in range(n)]
+
+        @property
+        def e(self): return (ct * n).from_buffer(self)
 
         def __init__(self, vals=None):
             super().__init__()
@@ -708,7 +724,10 @@ def _make_matrixn(ct, r, c, name):
     row = vectn_class(ct, c)
 
     class matrixn(ctypes.Structure):
-        _fields_ = [("rows", row * r)]
+        _fields_ = [("r%d" % i, row) for i in range(r)]
+
+        @property
+        def rows(self): return (row * r).from_buffer(self)
 
         def __init__(self, vals=None):
             super().__init__()
