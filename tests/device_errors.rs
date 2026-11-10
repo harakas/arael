@@ -223,13 +223,21 @@ where
         let operations = fault::disarm();
         assert!(operations > 0, "{route}: device operations counted");
         let mut with_partial = 0;
+        // runs that ended before their operation k: an f32 solve whose
+        // factor adds atomically takes one iteration more or less from run
+        // to run, and its operations with it
+        let mut short = 0;
         for k in 1..=operations {
             let mut w = make();
             fault::arm(k);
             let r = solve(&mut w, &options);
-            fault::disarm();
+            let ran = fault::disarm();
             let failure = match r {
-                Ok(_) => panic!("{route}: operation {k} of {operations} failed, the solve succeeded"),
+                Ok(_) if ran < k => {
+                    short += 1;
+                    continue;
+                }
+                Ok(_) => panic!("{route}: operation {k} of {ran} failed, the solve succeeded"),
                 Err(f) => f,
             };
             let SolveFailureKind::Device(d) = &failure.kind else {
@@ -249,7 +257,7 @@ where
         }
         // failures in the setup (no partial result) and in the loop (one)
         assert!(with_partial > 0 && with_partial < operations, "{route}: {with_partial} of {operations} failures with a partial result");
-        eprintln!("{route}: {operations} device operations, each failure reported, {with_partial} with a partial result");
+        eprintln!("{route}: {operations} device operations, each failure reported, {with_partial} with a partial result, {short} runs ended before theirs");
     }
 }
 
