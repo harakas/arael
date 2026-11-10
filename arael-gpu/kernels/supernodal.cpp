@@ -749,6 +749,74 @@ template <u32 R, bool DIAG> DEVICE_INLINE void tile_slab(THREAD F (&acc)[R * R],
     }
 }
 
+// TILE_MMA: Metal's f32 tile products (k_syrk, k_big_pair) run on SIMD-group
+// matrices, 8 x 8 blocks the hardware multiplies and accumulates
+// (simdgroup_multiply_accumulate), instead of each thread's 16 R x 16 R
+// share in scalar multiply-adds (tile_slab).
+#if ARAEL_METAL && SCALAR_BYTES == 4
+#define TILE_MMA 1
+#else
+#define TILE_MMA 0
+#endif
+
+#if TILE_MMA
+#if THREADS != 256
+#error "supernodal.cpp: the SIMD-group tiles take 8 SIMD groups a block"
+#endif
+// A T x T tile (T 32 or 64) in 8 x 8 blocks over a block's 8 SIMD groups:
+// group sg takes MMA_R(T) block rows from (sg % 4) MMA_R(T) and MMA_C(T)
+// block columns from (sg / 4) MMA_C(T).
+#define MMA_R(T) ((T) / 32)
+#define MMA_C(T) ((T) / 16)
+
+template <u32 T> DEVICE_INLINE void mma_zero(THREAD simdgroup_float8x8 (&c)[MMA_R(T)][MMA_C(T)]) {
+#pragma unroll
+    for (u32 r = 0; r < MMA_R(T); r++) {
+#pragma unroll
+        for (u32 cc = 0; cc < MMA_C(T); cc++) c[r][cc] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+    }
+}
+
+// tile_slab on SIMD-group matrices: one slab of nk staged columns into group
+// sg's blocks, C[i][j] += A[i][k] B[j][k] with A's column k at sa[k T] and
+// B's at sb[k T] (each T values); the staged columns past nk, to the next
+// multiple of 8, are zeros. On a diagonal tile (DIAG) the blocks wholly
+// above the diagonal, which the tile does not write, are skipped.
+template <u32 T, bool DIAG>
+DEVICE_INLINE void mma_slab(THREAD simdgroup_float8x8 (&c)[MMA_R(T)][MMA_C(T)], SHARED_PTR const F* sa, SHARED_PTR const F* sb, u32 nk, u32 sg) {
+    u32 bi = (sg % 4) * MMA_R(T);
+    u32 bj = (sg / 4) * MMA_C(T);
+    for (u32 k0 = 0; k0 < nk; k0 += 8) {
+        simdgroup_float8x8 a[MMA_R(T)];
+        simdgroup_float8x8 b[MMA_C(T)];
+        // A's block (i, k) is stored k-major: loaded transposed
+#pragma unroll
+        for (u32 r = 0; r < MMA_R(T); r++) simdgroup_load(a[r], sa + k0 * T + (bi + r) * 8, T, ulong2(0, 0), true);
+#pragma unroll
+        for (u32 cc = 0; cc < MMA_C(T); cc++) simdgroup_load(b[cc], sb + k0 * T + (bj + cc) * 8, T);
+#pragma unroll
+        for (u32 r = 0; r < MMA_R(T); r++) {
+#pragma unroll
+            for (u32 cc = 0; cc < MMA_C(T); cc++) {
+                if (!DIAG || bj + cc <= bi + r) simdgroup_multiply_accumulate(c[r][cc], a[r], b[cc], c[r][cc]);
+            }
+        }
+    }
+}
+
+// Group sg's blocks into `cs` transposed, C[i][j] at cs[j T + i], so
+// neighbouring threads read neighbouring rows of a column.
+template <u32 T> DEVICE_INLINE void mma_store(THREAD simdgroup_float8x8 (&c)[MMA_R(T)][MMA_C(T)], SHARED_PTR F* cs, u32 sg) {
+    u32 bi = (sg % 4) * MMA_R(T);
+    u32 bj = (sg / 4) * MMA_C(T);
+#pragma unroll
+    for (u32 r = 0; r < MMA_R(T); r++) {
+#pragma unroll
+        for (u32 cc = 0; cc < MMA_C(T); cc++) simdgroup_store(c[r][cc], cs + (bj + cc) * 8 * T + (bi + r) * 8, T, ulong2(0, 0), true);
+    }
+}
+#endif
+
 // Panel step, part three: the update of the trailing lower trapezoid by
 // the solved columns [k0, k1), k1 = min(k0 + kn, q), over rows [k1, h) and
 // columns [k1, c1), c1 = min(cend, q), in SYRK_TB x SYRK_TB tiles
@@ -760,7 +828,9 @@ template <u32 R, bool DIAG> DEVICE_INLINE void tile_slab(THREAD F (&acc)[R * R],
 // read and written once per update; the loop's trip count is constant, so
 // with SYRK_BLOCK = NB it is a single pass. A thread takes the
 // rows tx + 16 r and columns ty + 16 c, so neighbouring threads read and
-// write neighbouring rows. The block index walks the panels' tile counts.
+// write neighbouring rows; with TILE_MMA the SIMD groups take the tile's
+// 8 x 8 blocks, and its products reach the threads through shared memory.
+// The block index walks the panels' tile counts.
 // The block of a panel's tile (0, 0), which alone writes the next diagonal
 // tile (at k1, SYRK_TB >= NB), then factors it (potf2_warp). In f64 with
 // POTF2_UNROLL the kernel is held to two blocks a multiprocessor:
@@ -773,8 +843,15 @@ template <u32 R, bool DIAG> DEVICE_INLINE void tile_slab(THREAD F (&acc)[R * R],
 #define SYRK_ENTRY KERNEL_THREADS(THREADS)
 #endif
 SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u32 kn, u32 cend, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+#if TILE_MMA
+    // the slabs, then the tile's products (SYRK_TB^2 <= 2 NB SYRK_TB values)
+    SHARED F sm[2 * NB * SYRK_TB];
+    SHARED_PTR F* sa = sm;
+    SHARED_PTR F* sb = sm + NB * SYRK_TB;
+#else
     SHARED F sa[NB * SYRK_TB];
     SHARED F sb[NB * SYRK_TB];
+#endif
     u32 o_dims = plan[H_DIMS];
     u32 o_val_ptr = plan[H_VAL_PTR];
     u32 idx = block_x();
@@ -820,11 +897,17 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
     u32 panel = plan[o_val_ptr + s];
     u32 t = thread_x();
     const u32 nt = THREADS;
+#if TILE_MMA
+    u32 sg = t / 32;
+    simdgroup_float8x8 acc[MMA_R(SYRK_TB)][MMA_C(SYRK_TB)];
+    mma_zero<SYRK_TB>(acc);
+#else
     u32 tx = t % 16;
     u32 ty = t / 16;
     F acc[SYRK_R * SYRK_R];
 #pragma unroll
     for (u32 z = 0; z < SYRK_R * SYRK_R; z++) acc[z] = F(0);
+#endif
     for (u32 sl = 0; sl < SYRK_BLOCK / NB; sl++) {
         u32 kb = k0 + sl * NB;
         if (kb >= k1) break;
@@ -843,12 +926,31 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
         }
         BARRIER();
         // the branch is uniform: a block's tile is diagonal or not
+#if TILE_MMA
+        if (ti == tj) {
+            mma_slab<SYRK_TB, true>(acc, sa, sb, nk, sg);
+        } else {
+            mma_slab<SYRK_TB, false>(acc, sa, sb, nk, sg);
+        }
+#else
         if (ti == tj) {
             tile_slab<SYRK_R, true>(acc, sa, sb, nk, tx, ty);
         } else {
             tile_slab<SYRK_R, false>(acc, sa, sb, nk, tx, ty);
         }
+#endif
     }
+#if TILE_MMA
+    // every group's reads of the slabs done: the products take their place
+    BARRIER();
+    mma_store<SYRK_TB>(acc, sm, sg);
+    BARRIER();
+    for (u32 e = t; e < SYRK_TB * SYRK_TB; e += nt) {
+        u32 jj = e / SYRK_TB;
+        u32 i = e - jj * SYRK_TB;
+        if (i < nrows && jj < ncols && row0 + i >= col0 + jj) factor[panel + (col0 + jj) * h + row0 + i] -= sm[e];
+    }
+#else
 #pragma unroll
     for (u32 r = 0; r < SYRK_R; r++) {
 #pragma unroll
@@ -858,6 +960,7 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
             if (i < nrows && jj < ncols && row0 + i >= col0 + jj) factor[panel + (col0 + jj) * h + row0 + i] -= acc[r * SYRK_R + c];
         }
     }
+#endif
     if (ti == 0 && tj == 0) {
         // the block's writes seen by its first warp, and its reads of `sa`
         // done (potf2_warp's column)
@@ -879,11 +982,21 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
 // ty + 16 c, the last slab to the k range's end); then each element at or
 // below the pair's diagonal (pair row i >= column j) is subtracted from
 // the target through the pair's maps, atomically, as other items reach
-// the same element. A warp's atomics take 16 consecutive pair rows, mostly
-// consecutive target rows.
+// the same element. A warp's atomics take 16 consecutive pair rows (with
+// TILE_MMA, from shared memory, 32), mostly consecutive target rows.
+#if TILE_MMA && 2 * TK > TB
+#error "supernodal.cpp: k_big_pair's products take the place of its two slabs"
+#endif
 KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor) {
+#if TILE_MMA
+    // the slabs, then the tile's products
+    SHARED F sm[TB * TB];
+    SHARED_PTR F* sa = sm;
+    SHARED_PTR F* sb = sm + TK * TB;
+#else
     SHARED F sa[TK * TB];
     SHARED F sb[TK * TB];
+#endif
     GLOBAL const u32* it = items + PAIR_TILE * block_x();
     u32 s = it[0];
     u32 pi = it[1];
@@ -901,11 +1014,17 @@ KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL
     u32 k_end = ke == 0 ? plan[o_dims + 2 * d] : ke;
     u32 t = thread_x();
     const u32 nt = THREADS;
+#if TILE_MMA
+    u32 sg = t / 32;
+    simdgroup_float8x8 acc[MMA_R(TB)][MMA_C(TB)];
+    mma_zero<TB>(acc);
+#else
     u32 tx = t % 16;
     u32 ty = t / 16;
     F acc[(TB / 16) * (TB / 16)];
 #pragma unroll
     for (u32 z = 0; z < (TB / 16) * (TB / 16); z++) acc[z] = F(0);
+#endif
     for (u32 k0 = kb; k0 < k_end; k0 += TK) {
         u32 nk = min(k_end - k0, TK);
         // the previous slab's reads are done
@@ -922,16 +1041,35 @@ KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL
         }
         BARRIER();
         // the branch is uniform: a block's tile is diagonal or not
+#if TILE_MMA
+        if (i0 == j0) {
+            mma_slab<TB, true>(acc, sa, sb, nk, sg);
+        } else {
+            mma_slab<TB, false>(acc, sa, sb, nk, sg);
+        }
+#else
         if (i0 == j0) {
             tile_slab<TB / 16, true>(acc, sa, sb, nk, tx, ty);
         } else {
             tile_slab<TB / 16, false>(acc, sa, sb, nk, tx, ty);
         }
+#endif
     }
     u32 rm = plan[H_RMAP] + plan[plan[H_PR_RMAP] + pi] + i0;
     u32 cm = plan[H_CMAP] + plan[plan[H_PR_CMAP] + pi] + j0;
     u32 panel = plan[o_val_ptr + s];
     u32 h = plan[o_dims + 2 * s + 1];
+#if TILE_MMA
+    // every group's reads of the slabs done: the products take their place
+    BARRIER();
+    mma_store<TB>(acc, sm, sg);
+    BARRIER();
+    for (u32 e = t; e < TB * TB; e += nt) {
+        u32 j = e / TB;
+        u32 i = e - j * TB;
+        if (i < nr && j < nc && i0 + i >= j0 + j) atomic_add(&factor[panel + plan[cm + j] * h + plan[rm + i]], -sm[e]);
+    }
+#else
 #pragma unroll
     for (u32 r = 0; r < TB / 16; r++) {
 #pragma unroll
@@ -941,6 +1079,7 @@ KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL
             if (i < nr && j < nc && i0 + i >= j0 + j) atomic_add(&factor[panel + plan[cm + j] * h + plan[rm + i]], -acc[r * (TB / 16) + c]);
         }
     }
+#endif
 }
 
 // Forward solve, part one: the gather of `n` mid rows from `rows` (their

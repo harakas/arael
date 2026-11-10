@@ -1002,17 +1002,29 @@ mod tests {
         }
     }
 
+    /// An f32 factor is the CPU's to single precision under every kernel
+    /// route (on Metal, the tiles of `k_syrk` and `k_big_pair` on SIMD-group
+    /// matrices), solves to single precision, and refines.
     #[test]
     fn f32_factor_solves_to_single_precision_and_refines() {
         let (a, dense, rhs, sn) = setup(24);
         let n = sn.dim();
+        let mut cpu = vec![0.0f64; sn.factor_val_count()];
+        supernodal_factorize(&sn, &a, &mut cpu, &mut SupernodalContext::new(), 1).unwrap();
         let dev = device();
+        // the pair tiles run: diagonal ones, others, and some cut along k
+        let pairs = plan::build_levels(&Plan::new(&sn, a.symbolic()), &both_big_updates()[1], dev.arch(), 4);
+        let tiles: Vec<&[u32]> = pairs.iter().flat_map(|w| w.pair_tiles.chunks(plan::PAIR_TILE)).collect();
+        assert!(tiles.iter().any(|it| it[2] == it[3]) && tiles.iter().any(|it| it[2] != it[3]), "diagonal and other pair tiles");
+        assert!(tiles.iter().any(|it| it[7] != 0), "a pair tile cut along k");
         for params in [GpuSupernodalParams::default(), every_kernel_busy(), cut_updates(), small_kernel_only(), chains_everywhere()].into_iter().chain(both_syrks()).chain(both_big_updates()) {
             let mut g = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params, wide(&*dev)).unwrap();
             if params.chain_flops_f32 == f64::INFINITY {
                 assert!(g.chained_levels() > 0 && g.chained_levels() == g.path_levels(), "the levels of one small supernode in chains");
             }
             g.factorize(a.vals()).unwrap();
+            let err = factor_err(&sn, &widen(&g.factor_values().unwrap()), &cpu);
+            assert!(err < 1e-5, "f32 factor err/max {err}, {params:?}");
             let mut x = rhs.clone();
             g.solve(&mut x).unwrap();
             let res0 = rel_residual(&dense, n, &x, &rhs);
