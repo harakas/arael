@@ -342,11 +342,18 @@ fn main() {
     let bench_dir = std::env::current_dir().unwrap();
     let only = std::env::var("BAL_ONLY").ok();
     // BAL_SYSTEMS=<comma-separated substrings> runs only the matching rows (e.g.
-    // BAL_SYSTEMS=schur). Unset runs everything. A filtered run validates only
-    // against whatever ran -- for iterating, not publishing.
+    // BAL_SYSTEMS=schur); a pattern ending in `$` matches a whole label
+    // (BAL_SYSTEMS='arael LM f32 schur$' leaves out the schur-cg rows). Unset
+    // runs everything. A filtered run validates only against whatever ran --
+    // for iterating, not publishing.
     let systems = std::env::var("BAL_SYSTEMS").ok();
     let want = |label: &str| -> bool {
-        systems.as_deref().is_none_or(|f| f.split(',').any(|pat| label.contains(pat.trim())))
+        systems.as_deref().is_none_or(|f| {
+            f.split(',').any(|pat| match pat.trim().strip_suffix('$') {
+                Some(whole) => label == whole,
+                None => label.contains(pat.trim()),
+            })
+        })
     };
     if systems.is_some() {
         eprintln!("BAL_SYSTEMS={} -- partial run, cross-system validation is not meaningful",

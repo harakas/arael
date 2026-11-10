@@ -12,9 +12,10 @@ publish = false
 # WARNING: cholmod-gpl links CHOLMOD's GPL-licensed Supernodal module; the
 # resulting binary is subject to the GPL.
 cholmod-gpl = ["arael/cholmod-gpl"]
-# The supernodal block route on a GPU (ARAEL_GPU=cuda, hip).
+# The supernodal block route on a GPU (ARAEL_GPU=cuda, hip, metal).
 gpu-cuda = ["arael/gpu-cuda", "bench-harness/gpu-cuda"]
 gpu-hip = ["arael/gpu-hip", "bench-harness/gpu-hip"]
+gpu-metal = ["arael/gpu-metal", "bench-harness/gpu-metal"]
 
 [dependencies]
 arael = { path = "../..", features = ["threads"] }
