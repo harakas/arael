@@ -446,6 +446,7 @@ impl MetalDevice {
             let queue = device.newCommandQueue().ok_or_else(|| GpuError::Driver("no command queue".into()))?;
             let arch = Arch {
                 name,
+                vendor: crate::Vendor::Apple,
                 target: format!("apple{family}"),
                 // checked against each pipeline's execution width
                 warp: 32,
@@ -861,6 +862,7 @@ mod tests {
         let dev = MetalDevice::new(0).unwrap();
         let a = dev.arch();
         assert!(a.target.starts_with("apple"), "{a:?}");
+        assert_eq!(a.vendor, crate::Vendor::Apple);
         assert_eq!(a.warp, 32);
         assert!(!a.has_f64);
         assert!(a.multiprocessors >= 7, "{a:?}");

@@ -188,18 +188,25 @@ pub struct GpuSupernodalParams {
 }
 
 impl GpuSupernodalParams {
-    /// [`syrk_block`](Self::syrk_block) on the device `arch`, unset: 128 on
-    /// an integrated GPU or the CPU device, [`NB`] on a discrete GPU.
-    /// Measured on bundle adjustment and SLAM reduced systems: blocks of 128
-    /// are faster on AMD integrated GPUs, whose memory bandwidth bounds the
-    /// update, and slower on an NVIDIA discrete GPU, where the update's
-    /// launches are bound by latency. Discrete AMD GPUs are not measured.
+    /// [`syrk_block`](Self::syrk_block) on the device `arch`, unset: 256 on
+    /// an Apple GPU, 128 on another integrated GPU or the CPU device, [`NB`]
+    /// on a discrete GPU. Measured on bundle adjustment and SLAM reduced
+    /// systems: blocks of 128 are faster on AMD integrated GPUs, whose memory
+    /// bandwidth bounds the update, and slower on an NVIDIA discrete GPU,
+    /// where the update's launches are bound by latency; on an Apple M4 Pro,
+    /// whose tiles multiply on SIMD-group matrices, blocks of 256 are faster
+    /// on the large bundle adjustment systems and the same on small ones.
+    /// Discrete AMD GPUs are not measured.
     ///
     /// ```ignore
     /// let block = GpuSupernodalParams::default().syrk_block_on(dev.arch());
     /// ```
     pub fn syrk_block_on(&self, arch: &crate::Arch) -> u32 {
-        self.syrk_block.unwrap_or(if arch.integrated { 128 } else { NB as u32 })
+        self.syrk_block.unwrap_or(match arch.vendor {
+            crate::Vendor::Apple => 256,
+            _ if arch.integrated => 128,
+            _ => NB as u32,
+        })
     }
 
     /// [`trsm_rows`](Self::trsm_rows) on the device `arch`, unset: 64 on an
@@ -1105,9 +1112,11 @@ mod tests {
         (p, sn, asym)
     }
 
-    /// A device of `multiprocessors` with `warp` lanes, integrated or discrete.
+    /// A device of `multiprocessors` with `warp` lanes, integrated (an AMD
+    /// one) or discrete (an NVIDIA one).
     fn arch(multiprocessors: u32, warp: u32, integrated: bool) -> crate::Arch {
-        crate::Arch { name: String::new(), target: String::new(), warp, shared_bytes: 49152, multiprocessors, has_f64: true, flushes_subnormals: false, integrated }
+        let vendor = if integrated { crate::Vendor::Amd } else { crate::Vendor::Nvidia };
+        crate::Arch { name: String::new(), vendor, target: String::new(), warp, shared_bytes: 49152, multiprocessors, has_f64: true, flushes_subnormals: false, integrated }
     }
 
     /// A discrete device of `multiprocessors` with 32-lane warps.
@@ -1516,17 +1525,19 @@ mod tests {
         assert!(!cs.is_empty() && solve_chains(&lw, 0.0).is_empty());
     }
 
-    /// Unset, the trailing update takes blocks of 128 columns on an
-    /// integrated device and of NB on a discrete one; set, the blocks are
-    /// what it says on every device.
+    /// Unset, the trailing update takes blocks of 256 columns on an Apple
+    /// GPU, of 128 on another integrated device and of NB on a discrete
+    /// one; set, the blocks are what it says on every device.
     #[test]
     fn the_syrk_block_is_the_devices_unless_set() {
         let arch = |integrated| arch(2, 32, integrated);
+        let apple = crate::Arch { vendor: crate::Vendor::Apple, ..arch(true) };
         let unset = GpuSupernodalParams::default();
+        assert_eq!(unset.syrk_block_on(&apple), 256);
         assert_eq!(unset.syrk_block_on(&arch(true)), 128);
         assert_eq!(unset.syrk_block_on(&arch(false)), NB as u32);
-        let set = GpuSupernodalParams { syrk_block: Some(256), ..unset };
-        assert_eq!((set.syrk_block_on(&arch(true)), set.syrk_block_on(&arch(false))), (256, 256));
+        let set = GpuSupernodalParams { syrk_block: Some(64), ..unset };
+        assert_eq!([&apple, &arch(true), &arch(false)].map(|a| set.syrk_block_on(a)), [64; 3]);
     }
 
     /// Unset, `k_trsm` takes blocks of 64 rows on an integrated device and

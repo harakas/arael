@@ -215,11 +215,24 @@ impl Scalar for f64 {
     }
 }
 
+/// Who makes a device: the kernel sizes a device takes by default are the
+/// ones measured on its vendor's GPUs ([`GpuSupernodalParams`]'s `*_on`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Vendor {
+    Nvidia,
+    Amd,
+    Apple,
+    /// The CPU device.
+    Cpu,
+}
+
 /// What a device's kernels are specialised on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Arch {
     /// The device's name, as its driver reports it.
     pub name: String,
+    pub vendor: Vendor,
     /// The compiler's target, e.g. `sm_89` or `gfx1030`.
     pub target: String,
     /// Threads that run in lockstep: a CUDA warp, a HIP wavefront, a Metal SIMD group.

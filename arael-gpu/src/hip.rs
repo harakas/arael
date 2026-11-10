@@ -459,6 +459,7 @@ impl HipDevice {
             let target = gcn.split(':').next().unwrap_or(&gcn).to_string();
             let arch = Arch {
                 name: field(&prop.name),
+                vendor: crate::Vendor::Amd,
                 target,
                 warp: prop.warpSize as u32,
                 shared_bytes: prop.sharedMemPerBlock as u32,

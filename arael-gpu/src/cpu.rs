@@ -312,6 +312,7 @@ impl CpuDevice {
         Ok(CpuDevice {
             arch: Arch {
                 name: "CPU".into(),
+                vendor: crate::Vendor::Cpu,
                 target: "host".into(),
                 warp: 32,
                 shared_bytes: 64 * 1024,

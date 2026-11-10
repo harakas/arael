@@ -193,6 +193,7 @@ impl CudaDevice {
         let attr = |a| ctx.attribute(a).map_err(driver);
         let arch = Arch {
             name: ctx.name().map_err(driver)?,
+            vendor: crate::Vendor::Nvidia,
             target: format!("sm_{major}{minor}"),
             warp: attr(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_WARP_SIZE)? as u32,
             shared_bytes: attr(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)?
