@@ -48,6 +48,22 @@ typedef long long i64;
 #error "arael_gpu.h: the device's lockstep width is not a whole number of 32-lane warps"
 #endif
 
+// UNROLL_32(i, body): `body` 32 times, each a block of its own in which `i`
+// is a constant, 0 to 31. For a loop indexing a per-thread array, which
+// stays in registers only when every index into it is a constant: Metal's
+// compiler leaves big `#pragma unroll` nests rolled, and the array then
+// lives in memory. The body may hold another UNROLL_32, not a preprocessor
+// directive.
+//
+//     UNROLL_32(k, v[k] *= d[k]; UNROLL_32(c, if (c > k) v[c] -= v[k] * l[k * 32 + c];))
+#define ARAEL_UNROLL_4(i, b, ...)                                                                                          \
+    { const u32 i = (b) + 0u; __VA_ARGS__ } { const u32 i = (b) + 1u; __VA_ARGS__ } { const u32 i = (b) + 2u; __VA_ARGS__ } \
+    { const u32 i = (b) + 3u; __VA_ARGS__ }
+#define UNROLL_32(i, ...)                                                                                                \
+    ARAEL_UNROLL_4(i, 0u, __VA_ARGS__) ARAEL_UNROLL_4(i, 4u, __VA_ARGS__) ARAEL_UNROLL_4(i, 8u, __VA_ARGS__)               \
+    ARAEL_UNROLL_4(i, 12u, __VA_ARGS__) ARAEL_UNROLL_4(i, 16u, __VA_ARGS__) ARAEL_UNROLL_4(i, 20u, __VA_ARGS__)            \
+    ARAEL_UNROLL_4(i, 24u, __VA_ARGS__) ARAEL_UNROLL_4(i, 28u, __VA_ARGS__)
+
 #if ARAEL_CUDA || ARAEL_HIP
 
 // An entry point keeps its name, so the runtime finds it in the module.

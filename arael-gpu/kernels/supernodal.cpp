@@ -702,26 +702,17 @@ KERNEL_THREADS(TRSM_ROWS) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npa
     BARRIER();
     u32 i = j + nb + idx * TRSM_ROWS + t;
     if (i < h) {
-        // The loops run to the constant NB and skip the columns past nb, so
-        // they unroll fully, every index into v is a constant and the row
-        // stays in registers. With nb as the bound, v went to local memory
-        // and each step of the solve waited on a load.
+        // Unrolled to the constant NB, skipping the columns past nb, so every
+        // index into v is a constant and the row stays in registers;
+        // otherwise v goes to memory and each step of the solve waits on a
+        // load. (The columns past nb hold zeros and stay zero.)
         F v[NB];
-#pragma unroll
-        for (u32 c = 0; c < NB; c++) v[c] = c < nb ? factor[panel + (j + c) * h + i] : F(0);
-#pragma unroll
-        for (u32 k = 0; k < NB; k++) {
-            if (k < nb) {
-                v[k] *= dinv[k];
-                // the columns past nb hold zeros and stay zero
-#pragma unroll
-                for (u32 c = k + 1; c < NB; c++) v[c] -= v[k] * lc[k * NB + c];
-            }
-        }
-#pragma unroll
-        for (u32 c = 0; c < NB; c++) {
-            if (c < nb) factor[panel + (j + c) * h + i] = v[c];
-        }
+        UNROLL_32(c, v[c] = c < nb ? factor[panel + (j + c) * h + i] : F(0);)
+        UNROLL_32(k, if (k < nb) {
+            v[k] *= dinv[k];
+            UNROLL_32(c, if (c > k) v[c] -= v[k] * lc[k * NB + c];)
+        })
+        UNROLL_32(c, if (c < nb) factor[panel + (j + c) * h + i] = v[c];)
     }
 }
 
@@ -1053,17 +1044,13 @@ KERNEL_THREADS(32) void k_tile_inv(GLOBAL const u32* RESTRICT plan, GLOBAL const
     u32 lane = thread_x();
     for (u32 k = 0; k < 32; k++) ls[k * 33 + lane] = (k < nb && lane < nb && lane >= k) ? factor[panel + (j0 + k) * h + j0 + lane] : F(0);
     WARP_BARRIER();
+    // unrolled, so b stays in registers
     F b[32];
-#pragma unroll
-    for (u32 r = 0; r < 32; r++) b[r] = (r == lane && lane < nb) ? F(1) : F(0);
-#pragma unroll
-    for (u32 k = 0; k < 32; k++) {
-        if (k < nb) {
-            b[k] = b[k] / ls[k * 33 + k];
-#pragma unroll
-            for (u32 r = k + 1; r < 32; r++) b[r] -= ls[k * 33 + r] * b[k];
-        }
-    }
+    UNROLL_32(r, b[r] = (r == lane && lane < nb) ? F(1) : F(0);)
+    UNROLL_32(k, if (k < nb) {
+        b[k] = b[k] / ls[k * 33 + k];
+        UNROLL_32(r, if (r > k) b[r] -= ls[k * 33 + r] * b[k];)
+    })
     // every lane's reads of L done
     WARP_BARRIER();
 #pragma unroll
