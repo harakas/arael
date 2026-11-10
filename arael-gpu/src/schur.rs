@@ -71,7 +71,12 @@ pub(crate) const SHEADER: usize = 32;
 
 /// How [`GpuSchur`] cuts the forming of S (`k_schur_tiles`), whose
 /// lockstep units (the device's lockstep width of threads each) take a tile
-/// of S each. The defaults are the measured ones.
+/// of S each. The defaults are the measured ones, lowered where the
+/// kernel's shared memory would not fit the device ([`Arch::shared_bytes`]:
+/// units per block first, then lane groups); a value set here that does
+/// not fit is [`GpuError::Limit`].
+///
+/// [`Arch::shared_bytes`]: crate::Arch::shared_bytes
 #[derive(Clone, Copy, Debug)]
 pub struct GpuSchurParams {
     /// Units per block; `None` takes the device's choice
@@ -581,11 +586,12 @@ pub struct GpuSchur<D: Device> {
     ne: u32,
     no: u32,
     /// Threads per unit of `k_schur_tiles`, its units per block, its lane
-    /// groups per unit, and its blocks.
+    /// groups per unit, its blocks and its shared memory in bytes.
     lanes: u32,
     tile_warps: u32,
     tile_groups: u32,
     tile_blocks: u32,
+    tile_shared: u32,
     /// Threads per observer in `k_schur_w`.
     w_rows: u32,
     nk: u32,
@@ -637,10 +643,11 @@ impl<D: Device> GpuSchur<D> {
         let w_rows = p.kw_cap as u32;
         // a unit wider than the device's lockstep width takes a block alone:
         // its barrier is the block's
-        let tile_warps = if lanes == dev.arch().warp { params.tile_warps_on(dev.arch()) } else { 1 };
-        assert!(tile_warps >= 1, "tile_warps {tile_warps} is at least 1");
-        let tile_groups = params.tile_groups.unwrap_or_else(|| tile_groups(&p.words, p.nt as usize, lanes));
-        assert!(matches!(tile_groups, 1 | 2 | 4 | 8), "tile_groups {tile_groups} is 1, 2, 4 or 8");
+        let warps = if lanes == dev.arch().warp { params.tile_warps_on(dev.arch()) } else { 1 };
+        let groups = params.tile_groups.unwrap_or_else(|| tile_groups(&p.words, p.nt as usize, lanes));
+        let widths = TileWidths { kw_cap: p.kw_cap, ew_cap: p.ew_cap, kw_max: p.kw_max, ew_max: p.ew_max, lanes };
+        let set = (params.tile_warps.is_some() && lanes == dev.arch().warp, params.tile_groups.is_some());
+        let (tile_warps, tile_groups, tile_shared) = fit_tiles(&widths, (warps, groups), set, dev.arch().shared_bytes)?;
         let defines = format!("{}{}", wide.defines(), defines(&p, lanes, tile_warps, tile_groups));
         let (kt_ptr_words, kt_words) = tiles_by_kept_block(&p);
         let mut pk = Packer { words: p.words };
@@ -696,6 +703,7 @@ impl<D: Device> GpuSchur<D> {
             tile_warps,
             tile_groups,
             tile_blocks,
+            tile_shared,
             w_rows,
             nk: p.nk,
             n: p.n,
@@ -710,9 +718,17 @@ impl<D: Device> GpuSchur<D> {
     }
 
     /// The lane groups per unit of the forming of S
-    /// ([`GpuSchurParams::tile_groups`]), as given or as the plan chose.
+    /// ([`GpuSchurParams::tile_groups`]), as given or as the plan chose,
+    /// lowered to fit the device's shared memory.
     pub fn tile_groups(&self) -> u32 {
         self.tile_groups
+    }
+
+    /// The units per block of the forming of S
+    /// ([`GpuSchurParams::tile_warps`]), as given or the device's, lowered
+    /// to fit its shared memory.
+    pub fn tile_warps(&self) -> u32 {
+        self.tile_warps
     }
 
     /// The device the reduction runs on; its factor runs there too.
@@ -812,10 +828,15 @@ impl<D: Device> GpuSchur<D> {
 
     /// `kernel` over `blocks` blocks of `threads`; nothing when there are no blocks.
     fn run(&self, kernel: &D::Kernel, blocks: u32, threads: u32, args: &[Arg<'_, D::Block>]) -> Result<(), GpuError> {
+        self.run_shared(kernel, blocks, threads, 0, args)
+    }
+
+    /// [`run`](Self::run) with `shared_bytes` of dynamic shared memory a block.
+    fn run_shared(&self, kernel: &D::Kernel, blocks: u32, threads: u32, shared_bytes: u32, args: &[Arg<'_, D::Block>]) -> Result<(), GpuError> {
         if blocks == 0 {
             return Ok(());
         }
-        self.dev.launch(kernel, Launch { grid: [blocks, 1, 1], block: [threads, 1, 1], shared_bytes: 0 }, args)
+        self.dev.launch(kernel, Launch { grid: [blocks, 1, 1], block: [threads, 1, 1], shared_bytes }, args)
     }
 
     /// Zero the flags and launch the reduction, from the uploaded values.
@@ -826,7 +847,7 @@ impl<D: Device> GpuSchur<D> {
         let elim = [plan, w(s.h), w(s.rhs), w(s.dinv), w(s.z), w(self.flag_at(F_ELIM)), Arg::U32(self.ne)];
         self.run(&self.k.elim, self.ne.div_ceil(THREADS), THREADS, &elim)?;
         self.run(&self.k.w, (self.no * self.w_rows).div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.dinv), w(s.w), Arg::U32(self.no)])?;
-        self.run(&self.k.tiles, self.tile_blocks, self.lanes * self.tile_warps, &[plan, w(s.h), w(s.w), w(s.s)])?;
+        self.run_shared(&self.k.tiles, self.tile_blocks, self.lanes * self.tile_warps, self.tile_shared, &[plan, w(s.h), w(s.w), w(s.s)])?;
         self.run(&self.k.rhs, self.nk, PLANE, &[plan, w(s.h), w(s.rhs), w(s.z), w(s.rhs_kept)])
     }
 
@@ -1065,6 +1086,58 @@ fn tile_acc(kw_max: usize, lanes: u32, groups: u32) -> usize {
     (kw_max * kw_max).div_ceil((lanes / groups) as usize)
 }
 
+/// The block widths `k_schur_tiles` is compiled for: the kept and the
+/// eliminated blocks' rounded up (`KW`, `EW`), the widest of each, and a
+/// unit's lanes.
+struct TileWidths {
+    kw_cap: usize,
+    ew_cap: usize,
+    kw_max: usize,
+    ew_max: usize,
+    lanes: u32,
+}
+
+/// `k_schur_tiles`' shared memory a block, in bytes, at `warps` units of
+/// `groups` lane groups: the groups' W_oa and C_ob (`KW x EW` each) and the
+/// units' sums of a split tile, all in W (8 bytes, f64 or df32).
+///
+/// Kept blocks of 9 columns, eliminated of 3 (`KW` 16, `EW` 4), on 32
+/// lanes, 1 unit of 1 group: 8 (2 x 64 + 3 x 32) = 1792.
+fn tiles_shared_bytes(w: &TileWidths, warps: u32, groups: u32) -> usize {
+    let unit = 2 * groups as usize * w.kw_cap * w.ew_cap + tile_acc(w.kw_max, w.lanes, groups) * (w.lanes / groups) as usize;
+    8 * warps as usize * unit
+}
+
+/// The units per block and lane groups of `k_schur_tiles` that fit
+/// `limit` bytes of shared memory, and its bytes: `want` lowered, the units
+/// first, then the groups (halved, staying 1, 2, 4 or 8), where it is the
+/// default; [`GpuError::Limit`] where a value set (`set`: the units', the
+/// groups') does not fit, or one unit of one group does not.
+fn fit_tiles(w: &TileWidths, want: (u32, u32), set: (bool, bool), limit: u32) -> Result<(u32, u32, u32), GpuError> {
+    let (mut warps, mut groups) = want;
+    assert!(warps >= 1, "tile_warps {warps} is at least 1");
+    assert!(matches!(groups, 1 | 2 | 4 | 8), "tile_groups {groups} is 1, 2, 4 or 8");
+    let fits = |warps, groups| tiles_shared_bytes(w, warps, groups) <= limit as usize;
+    while !fits(warps, groups) && !set.0 && warps > 1 {
+        warps -= 1;
+    }
+    while !fits(warps, groups) && !set.1 && groups > 1 {
+        groups /= 2;
+    }
+    let bytes = tiles_shared_bytes(w, warps, groups);
+    if bytes > limit as usize {
+        let what = match set {
+            (true, _) | (_, true) => format!("GpuSchurParams' tile_warps {warps} and tile_groups {groups}"),
+            _ => "one unit of one lane group".to_string(),
+        };
+        return Err(GpuError::Limit(format!(
+            "the forming of S (k_schur_tiles) takes {bytes} bytes of shared memory for kept blocks of {} and eliminated blocks of {} columns at {what}, the device {limit}",
+            w.kw_max, w.ew_max
+        )));
+    }
+    Ok((warps, groups, bytes as u32))
+}
+
 /// [`tile_groups`] picks two lane groups per unit when they issue fewer
 /// products than one by more than this share.
 const TWO_GROUPS_SAVING: f64 = 0.1;
@@ -1163,7 +1236,7 @@ mod tests {
     use super::*;
     use crate::GpuPrecision;
     use crate::TestDevice;
-    use crate::test_util::{ba_like, precisions, rel_residual, wides};
+    use crate::test_util::{ba_like, precisions, rel_residual, wide, wides};
     use arael_faer::schur::{SchurContext, schur_reduce, schur_symbolic};
     use arael_faer::supernodal::{SupernodalParams, SupernodalSymbolic, nd_block_order};
 
@@ -1207,6 +1280,98 @@ mod tests {
     fn the_reduction_matches_the_cpu() {
         for wide in wides(&*device()) {
             the_reduction_matches_the_cpu_in(wide);
+        }
+    }
+
+    /// The forming of S fits the shared memory: its default units per block
+    /// lowered first, then its lane groups; a value set that does not fit,
+    /// or one unit of one group that does not, is a limit error.
+    #[test]
+    fn the_tiles_fit_the_shared_memory_or_say_why_not() {
+        let ba = TileWidths { kw_cap: 16, ew_cap: 4, kw_max: 9, ew_max: 3, lanes: 32 };
+        assert_eq!(tiles_shared_bytes(&ba, 1, 1), 1792);
+        let b = |w: &TileWidths, warps, groups| tiles_shared_bytes(w, warps, groups) as u32;
+        assert_eq!(fit_tiles(&ba, (4, 2), (false, false), 32 * 1024).unwrap(), (4, 2, b(&ba, 4, 2)), "fits as wanted");
+        // kept blocks of 20 columns, eliminated of 32: a unit of two groups
+        // over 32 KB, of one under it
+        let wide = TileWidths { kw_cap: 32, ew_cap: 32, kw_max: 20, ew_max: 20, lanes: 32 };
+        assert!(b(&wide, 1, 2) > 32 * 1024 && b(&wide, 1, 1) < 32 * 1024);
+        assert_eq!(fit_tiles(&wide, (4, 2), (false, false), 32 * 1024).unwrap(), (1, 1, b(&wide, 1, 1)), "units, then groups");
+        assert_eq!(fit_tiles(&wide, (4, 2), (false, false), 48 * 1024).unwrap(), (1, 2, b(&wide, 1, 2)), "units alone");
+        assert_eq!(fit_tiles(&wide, (2, 2), (false, false), 100 * 1024).unwrap(), (2, 2, b(&wide, 2, 2)));
+        // set values are not lowered
+        let e = fit_tiles(&wide, (4, 2), (true, false), 48 * 1024).unwrap_err();
+        assert!(matches!(&e, GpuError::Limit(m) if m.contains("tile_warps 4 and tile_groups 1")), "{e}");
+        let e = fit_tiles(&wide, (4, 2), (false, true), 32 * 1024).unwrap_err();
+        assert!(matches!(&e, GpuError::Limit(m) if m.contains("tile_warps 1 and tile_groups 2")), "{e}");
+        // blocks of 40 columns: one unit of one group over 64 KB
+        let widest = TileWidths { kw_cap: 64, ew_cap: 64, kw_max: 40, ew_max: 40, lanes: 32 };
+        let e = fit_tiles(&widest, (1, 1), (false, false), 64 * 1024).unwrap_err();
+        assert!(
+            matches!(&e, GpuError::Limit(m) if m.contains("one unit of one lane group") && m.contains("kept blocks of 40 and eliminated blocks of 40 columns")),
+            "{e}"
+        );
+    }
+
+    /// A checkerboard grid of `k x k` blocks (`k` odd), the even blocks `ew`
+    /// columns wide and eliminated, the odd ones `kw` wide and kept: no two
+    /// eliminated blocks touch.
+    fn checkerboard(k: usize, ew: usize, kw: usize) -> (Matrix, Vec<f64>, SchurSymbolic<SparseIndex>) {
+        assert!(k % 2 == 1, "an odd side keeps the block index's parity the cell's");
+        let (h, _, rhs) = crate::test_util::grid_spd(k, &[ew, kw], 7);
+        let elim: Vec<usize> = (0..k * k).step_by(2).collect();
+        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
+        (h, rhs, sym)
+    }
+
+    /// Kept blocks of 20 columns against eliminated ones of 10 (`KW` 32,
+    /// `EW` 16) reduce as the CPU does, in the shared memory the device
+    /// has; units per block set past it are a limit error.
+    #[test]
+    fn wide_blocks_reduce_in_the_shared_memory_the_device_has() {
+        let (h, rhs, sym) = checkerboard(5, 10, 20);
+        let mut s_cpu = sym.alloc_s::<f64>();
+        let mut rhs_cpu = vec![0.0f64; sym.kept_size()];
+        schur_reduce(&sym, &h, &rhs, &mut SchurContext::new(), &mut s_cpu, &mut rhs_cpu).unwrap();
+        let dev = device();
+        let limit = dev.arch().shared_bytes;
+        for wide in wides(&*dev) {
+            let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+            assert!(g.tile_shared <= limit, "{} bytes, the device {limit}", g.tile_shared);
+            g.reduce(h.vals(), &rhs).unwrap();
+            let es = err_max(&g.download().unwrap().0, s_cpu.vals());
+            assert!(es < 1e-12, "{wide:?}, {} units of {} groups: S err/max {es}", g.tile_warps(), g.tile_groups());
+        }
+        let w = TileWidths { kw_cap: 32, ew_cap: 16, kw_max: 20, ew_max: 10, lanes: dev.arch().warp.max(PLANE) };
+        if w.lanes == dev.arch().warp {
+            let warps = limit / tiles_shared_bytes(&w, 1, 1) as u32 + 1;
+            let params = GpuSchurParams { tile_warps: Some(warps), tile_groups: Some(1), ..Default::default() };
+            let e = GpuSchur::with_params(&dev, &sym, h.symbolic(), wide(&*dev), &params).err().expect("a limit error");
+            assert!(matches!(&e, GpuError::Limit(m) if m.contains(&format!("tile_warps {warps}"))), "{e}");
+        }
+    }
+
+    /// Blocks of 40 columns (`KW` and `EW` 64): one unit of one group takes
+    /// 78336 bytes, a limit error on a device with less shared memory (a
+    /// Metal GPU, the CPU device), else a reduction as the CPU's.
+    #[test]
+    fn the_widest_blocks_reduce_or_are_a_limit_error() {
+        let (h, rhs, sym) = checkerboard(3, 40, 40);
+        let dev = device();
+        let w = TileWidths { kw_cap: 64, ew_cap: 64, kw_max: 40, ew_max: 40, lanes: dev.arch().warp.max(PLANE) };
+        let need = tiles_shared_bytes(&w, 1, 1);
+        match GpuSchur::new(&dev, &sym, h.symbolic(), wide(&*dev)) {
+            Err(GpuError::Limit(m)) => assert!(need > dev.arch().shared_bytes as usize, "{m}"),
+            Err(e) => panic!("{e}"),
+            Ok(mut g) => {
+                assert!(need <= dev.arch().shared_bytes as usize);
+                let mut s_cpu = sym.alloc_s::<f64>();
+                let mut rhs_cpu = vec![0.0f64; sym.kept_size()];
+                schur_reduce(&sym, &h, &rhs, &mut SchurContext::new(), &mut s_cpu, &mut rhs_cpu).unwrap();
+                g.reduce(h.vals(), &rhs).unwrap();
+                let es = err_max(&g.download().unwrap().0, s_cpu.vals());
+                assert!(es < 1e-12, "S err/max {es}");
+            }
         }
     }
 

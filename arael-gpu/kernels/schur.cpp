@@ -235,9 +235,11 @@ DEVICE_INLINE void tile_products(THREAD W* acc, THREAD const u32* ij, u32 n, u32
 #define TILES_ENTRY KERNEL_THREADS(TILE_LANES * TILE_WARPS)
 #endif
 TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const W* RESTRICT w, GLOBAL W* RESTRICT s) {
-    SHARED W ws_all[TILE_WARPS * TILE_GROUPS * KW * EW];
-    SHARED W cs_all[TILE_WARPS * TILE_GROUPS * KW * EW];
-    SHARED W red[TILE_WARPS * ACC * GROUP_LANES];
+    // the launch's shared memory (schur.rs, tiles_shared_bytes): the groups'
+    // W_oa, their C_ob, the units' sums of a split tile
+    DYNAMIC_SHARED(W, ws_all);
+    SHARED_PTR W* cs_all = ws_all + TILE_WARPS * TILE_GROUPS * KW * EW;
+    SHARED_PTR W* red = cs_all + TILE_WARPS * TILE_GROUPS * KW * EW;
     u32 lane = thread_x() % TILE_LANES;
     // the groups interleaved, so each 32-lane warp holds all of them and
     // their sums are shuffles
