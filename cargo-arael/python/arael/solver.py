@@ -248,14 +248,28 @@ class GpuBackend(enum.IntEnum):
     HIP = 2
     # The CPU running the GPU kernels, for tests without a GPU.
     CPU = 3
+    # Apple silicon through Metal: no f64, so df32 wide values and the f32
+    # factor (an f64 model needs mixed_precision).
+    METAL = 4
+
+    @property
+    def has_f64(self):
+        """Whether the runtime's devices compute in f64: every one but
+        Metal.
+
+            if not opts.gpu.has_f64: opts.mixed_precision = True
+        """
+        return self != GpuBackend.METAL
 
 
 class GpuWide(enum.IntEnum):
     """What the GPU keeps and sums its wide values in
     (SparseOptions.gpu_wide): f64, or df32 (two floats, about 48 bits,
-    f32 arithmetic only: for cards whose f64 is slow)."""
+    f32 arithmetic only: for cards whose f64 is slow), or the device's
+    default (df32 on Metal, else f64)."""
     F64 = 0
     DF32 = 1
+    DEFAULT = 2
 
 
 class GpuStaging(enum.IntEnum):
@@ -314,12 +328,13 @@ class SparseOptions(ctypes.Structure):
         # reduced route the device also reduces, and with gpu_assembly
         # (on by default) assembles and runs the LM loop when the model
         # has a device form. Needs the capi built with the matching
-        # feature (gpu-cuda, gpu-hip, gpu-cpu); without it the solve fails with
-        # SolverUnavailable.
+        # feature (gpu-cuda, gpu-hip, gpu-metal, gpu-cpu); without it the
+        # solve fails with SolverUnavailable.
         ("_gpu", ctypes.c_uint32),
         ("gpu_index", ctypes.c_uint32),
         ("gpu_assembly", ctypes.c_bool),
-        # The GPU's wide values (GpuWide).
+        # The GPU's wide values (GpuWide); DEFAULT, the device's own,
+        # unless set.
         ("_gpu_wide", ctypes.c_uint32),
         # Where the device assembly's image is staged (GpuStaging).
         ("_gpu_staging", ctypes.c_uint32),

@@ -293,14 +293,23 @@ enum class GpuBackend : uint32_t {
     Hip = 2,
     /// The CPU running the GPU kernels, for tests without a GPU.
     Cpu = 3,
+    /// Apple silicon through Metal: no f64, so df32 wide values and the
+    /// f32 factor (an f64 model needs mixed_precision).
+    Metal = 4,
 };
+
+/// Whether `b`'s devices compute in f64: every runtime but Metal.
+///
+///     if (!arael::has_f64(opts.gpu)) opts.mixed_precision = true;
+constexpr bool has_f64(GpuBackend b) { return b != GpuBackend::Metal; }
 
 /// What the GPU keeps and sums its wide values in (SparseOptionsT::gpu_wide):
 /// f64, or df32 (two floats, about 48 bits, f32 arithmetic only: for cards
-/// whose f64 is slow).
+/// whose f64 is slow), or the device's default (df32 on Metal, else f64).
 enum class GpuWide : uint32_t {
     F64 = 0,
     Df32 = 1,
+    Default = 2,
 };
 
 /// Where the device assembly writes its image of the model before copying
@@ -367,7 +376,8 @@ struct SparseOptionsT {
     GpuBackend gpu;
     uint32_t gpu_index;
     bool gpu_assembly;
-    /// The GPU's wide values (Rust's GpuDevice::with_wide).
+    /// The GPU's wide values (Rust's GpuDevice::with_wide); Default, the
+    /// device's own, unless set.
     GpuWide gpu_wide;
     /// Where the device assembly's image is staged (Rust's
     /// GpuDevice::with_staging).

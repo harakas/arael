@@ -230,6 +230,18 @@ try:
     pi("gpu_kind", -99)
 except AraelError as e:
     pi("gpu_kind", e.failure.kind if e.failure else -99)
+# Metal the same; its devices have no f64.
+f31 = fit.Fit()
+fill(f31)
+so31 = fit.SparseOptions()
+so31.gpu = fit.GpuBackend.METAL
+try:
+    f31.solve_sparse(cfg, so31)
+    pi("gpu_kind_metal", -99)
+except AraelError as e:
+    pi("gpu_kind_metal", e.failure.kind if e.failure else -99)
+pi("has_f64_metal", 1 if fit.GpuBackend.METAL.has_f64 else 0)
+pi("has_f64_cuda", 1 if fit.GpuBackend.CUDA.has_f64 else 0)
 
 f11 = fit.Fit()
 fill(f11)

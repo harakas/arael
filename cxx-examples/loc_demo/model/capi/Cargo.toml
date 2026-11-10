@@ -12,7 +12,8 @@ loc-demo = { path = ".." }
 arael = { path = "../../../.." }
 
 [features]
-# The GPU routes of SparseOptions::gpu, on CUDA, HIP or the CPU device.
+# The GPU routes of SparseOptions::gpu, on CUDA, HIP, Metal or the CPU device.
 gpu-cuda = ["arael/gpu-cuda"]
 gpu-hip = ["arael/gpu-hip"]
+gpu-metal = ["arael/gpu-metal"]
 gpu-cpu = ["arael/gpu-cpu"]

@@ -497,15 +497,17 @@ pub struct CSparseOptions {
     /// Relative residual the refinement stops at, under mixed_precision.
     pub refine_tol: f64,
     /// The GPU the block supernodal route runs on: 0 none, 1 CUDA, 2 HIP,
-    /// 3 the CPU device (the process's shared state of device gpu_index).
-    /// A capi built without the matching `gpu-cuda` / `gpu-hip` /
-    /// `gpu-cpu` feature fails the solve with SolverUnavailable.
+    /// 3 the CPU device, 4 Metal (the process's shared state of device
+    /// gpu_index). A capi built without the matching `gpu-cuda` /
+    /// `gpu-hip` / `gpu-cpu` / `gpu-metal` feature fails the solve with
+    /// SolverUnavailable.
     pub gpu: u32,
     pub gpu_index: u32,
     /// On the reduced GPU route, assemble on the device too when the model
     /// has a device form (on by default).
     pub gpu_assembly: bool,
-    /// The GPU's wide values (GpuWide): 0 f64, 1 df32.
+    /// The GPU's wide values (GpuWide): 0 f64, 1 df32, 2 the device's
+    /// default (df32 on Metal, else f64; the default).
     pub gpu_wide: u32,
     /// Where the device assembly's image is staged (GpuStaging): 0 pinned,
     /// 1 pageable.
@@ -572,11 +574,12 @@ impl CSparseOptions {
                 3 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Cpu, self.gpu_index as usize)),
                 4 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Metal, self.gpu_index as usize)),
                 t => panic!("unknown gpu tag {t}"),
-            }.map(|g| g.with_wide(match self.gpu_wide {
-                0 => arael::simple_lm::GpuWide::F64,
-                1 => arael::simple_lm::GpuWide::Df32,
+            }.map(|g| match self.gpu_wide {
+                0 => g.with_wide(arael::simple_lm::GpuWide::F64),
+                1 => g.with_wide(arael::simple_lm::GpuWide::Df32),
+                2 => g,
                 t => panic!("unknown gpu_wide tag {t}"),
-            }).with_staging(match self.gpu_staging {
+            }.with_staging(match self.gpu_staging {
                 0 => arael::simple_lm::GpuStaging::Pinned,
                 1 => arael::simple_lm::GpuStaging::Pageable,
                 t => panic!("unknown gpu_staging tag {t}"),
@@ -656,7 +659,8 @@ pub unsafe extern "C" fn fit_sparse_options(out: *mut CSparseOptions) {
         gpu_index: d.gpu.as_ref().map_or(0, |g| g.index as u32),
         gpu_assembly: d.gpu_assembly,
         gpu_wide: match d.gpu.as_ref().map(|g| g.wide()) {
-            None | Some(arael::simple_lm::GpuWide::F64) => 0,
+            None => 2,
+            Some(arael::simple_lm::GpuWide::F64) => 0,
             Some(arael::simple_lm::GpuWide::Df32) => 1,
         },
         gpu_staging: match d.gpu.as_ref().map(|g| g.staging()) {

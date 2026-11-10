@@ -315,9 +315,13 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("so_gpu"), 0.0);
         assert_eq!(g("so_gpu_index"), 0.0);
         assert_eq!(g("so_gpu_assembly"), d.gpu_assembly as u8 as f64);
-        assert_eq!(g("so_gpu_wide"), 0.0);
+        // GpuWide::Default: the device's own
+        assert_eq!(g("so_gpu_wide"), 2.0);
         // the fixture's interface is built without a GPU runtime
         assert_eq!(g("gpu_kind"), 8.0);
+        assert_eq!(g("gpu_kind_metal"), 8.0);
+        assert_eq!(g("has_f64_metal"), arael::simple_lm::GpuBackend::Metal.has_f64() as u8 as f64);
+        assert_eq!(g("has_f64_cuda"), arael::simple_lm::GpuBackend::Cuda.has_f64() as u8 as f64);
 
         let mut f11 = Fit::default();
         fill(&mut f11);

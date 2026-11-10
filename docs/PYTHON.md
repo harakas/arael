@@ -394,13 +394,17 @@ fields and pass it to `solve_sparse`: `schur` (`SchurPolicy`),
 `max_refinements` and `refine_tol` (an f32 factor refined against the
 f64 matrix; the plan's `f32_factor`, `refinements` and
 `refinement_shortfalls` report it), and the GPU: `gpu` (`GpuBackend`
-NONE / CUDA / HIP / CPU, the last the CPU running the GPU kernels) with `gpu_index`, `gpu_assembly`, `gpu_wide`
-(`GpuWide` F64 / DF32) and `gpu_staging` (`GpuStaging` PINNED /
-PAGEABLE), as in the C++
-interface (docs/CXX.md); the cdylib must then be built with the
+NONE / CUDA / HIP / CPU / METAL; CPU is the CPU running the GPU kernels)
+with `gpu_index`, `gpu_assembly`, `gpu_wide` (`GpuWide` F64 / DF32 /
+DEFAULT, the default: the device's own, df32 on Metal, else f64) and
+`gpu_staging` (`GpuStaging` PINNED / PAGEABLE), as in the C++ interface
+(docs/CXX.md). Metal has no f64 (`GpuBackend.METAL.has_f64` is false):
+an f64 model on it needs `mixed_precision`, and `GpuWide.F64` fails the
+solve with `SolverUnavailable`. The cdylib must be built with the
 runtime's feature (`cargo build --release -p <crate>-capi --features
-gpu-cuda`), or the solve fails with `SolverUnavailable`. An enum setter
-rejects a value outside the enum with `ValueError`.
+gpu-cuda`, `gpu-hip`, `gpu-metal` or `gpu-cpu`), or the solve fails with
+`SolverUnavailable`. An enum setter rejects a value outside the enum with
+`ValueError`.
 
 ```python
 so = fit.SparseOptions()
@@ -408,6 +412,9 @@ so.schur = fit.SchurPolicy.FORCE
 so.ordering = fit.FaerOrdering.AMD
 r = f.solve_sparse(cfg, so)
 r.plan                       # the SchurPlan the backend used; None for dense and band solves
+
+so.gpu = fit.GpuBackend.METAL               # cdylib built with --features gpu-metal
+so.mixed_precision = not so.gpu.has_f64     # an f64 model needs it there
 ```
 
 `LmSession(opts=None)` keeps the sparsity analysis (pattern,

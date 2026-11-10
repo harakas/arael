@@ -232,6 +232,15 @@ int main() {
     so30.gpu = GpuBackend::Cuda;
     SolveResult r30 = f30.solve_sparse(cfg, so30);
     pi("gpu_kind", r30.is_err() ? long(r30.error().failure.kind) : -99);
+    // Metal the same; its devices have no f64.
+    Fit f31;
+    fill(f31);
+    SparseOptions so31;
+    so31.gpu = GpuBackend::Metal;
+    SolveResult r31 = f31.solve_sparse(cfg, so31);
+    pi("gpu_kind_metal", r31.is_err() ? long(r31.error().failure.kind) : -99);
+    pi("has_f64_metal", arael::has_f64(GpuBackend::Metal) ? 1 : 0);
+    pi("has_f64_cuda", arael::has_f64(GpuBackend::Cuda) ? 1 : 0);
 
     Fit f11;
     fill(f11);

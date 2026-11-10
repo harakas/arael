@@ -19,13 +19,13 @@ set(_arael_cargo_target "${CMAKE_CURRENT_BINARY_DIR}/cargo")
 set(_arael_capi_lib "${_arael_cargo_target}/release/libcxx_fit_capi.a")
 
 # The GPU runtime the interface is built with, for SparseOptions::gpu:
-# cuda, hip, cpu (the CPU device), or empty for none.
-set(ARAEL_GPU "" CACHE STRING "GPU runtime of the arael interface: cuda, hip, cpu or empty")
+# cuda, hip, metal, cpu (the CPU device), or empty for none.
+set(ARAEL_GPU "" CACHE STRING "GPU runtime of the arael interface: cuda, hip, metal, cpu or empty")
 set(_arael_features "")
-if(ARAEL_GPU STREQUAL "cuda" OR ARAEL_GPU STREQUAL "hip" OR ARAEL_GPU STREQUAL "cpu")
+if(ARAEL_GPU STREQUAL "cuda" OR ARAEL_GPU STREQUAL "hip" OR ARAEL_GPU STREQUAL "metal" OR ARAEL_GPU STREQUAL "cpu")
   set(_arael_features --features gpu-${ARAEL_GPU})
 elseif(NOT ARAEL_GPU STREQUAL "")
-  message(FATAL_ERROR "ARAEL_GPU is '${ARAEL_GPU}': cuda, hip, cpu or empty")
+  message(FATAL_ERROR "ARAEL_GPU is '${ARAEL_GPU}': cuda, hip, metal, cpu or empty")
 endif()
 
 add_custom_target(cxx_fit_capi_build
