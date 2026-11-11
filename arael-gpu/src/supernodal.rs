@@ -282,7 +282,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             small_q -= 1;
         }
         let params = &GpuSupernodalParams { small_q: small_q as u32, ..*params };
-        let syrk_block = params.syrk_block_on(dev.arch());
+        let syrk_block = params.syrk_block_on(dev.arch(), fs);
         assert!(syrk_block as usize >= NB && (syrk_block as usize).is_multiple_of(NB), "syrk_block {syrk_block} is a multiple of {NB}");
         let trsm_rows = params.trsm_rows_on(dev.arch());
         assert!(trsm_rows as usize >= NB && (NB * NB).is_multiple_of(trsm_rows as usize), "trsm_rows {trsm_rows} is at least {NB} and divides {NB} * {NB}");

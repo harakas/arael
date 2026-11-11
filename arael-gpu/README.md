@@ -150,13 +150,14 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
 - `syrk_block`: the columns per block of the panel steps' trailing update,
   a multiple of 32. In blocks of 32 every 32-column step updates
   everything past it; in wider blocks the trailing part is read and
-  written once per block. Unset, 256 on an Apple GPU, 128 on another
-  integrated GPU (and the CPU device) and 32 on a discrete one: on bundle
-  adjustment and SLAM reduced systems blocks of 128 are faster on AMD
-  integrated GPUs, whose memory bandwidth bounds the update, and slower on
-  an NVIDIA discrete GPU; on an Apple M4 Pro blocks of 256 are faster on
-  the large bundle adjustment systems and the same on small ones.
-  Discrete AMD GPUs are not measured.
+  written once per block. Unset, 256 on an Apple GPU; on another
+  integrated GPU (and the CPU device) 256 for an `f32` factor and 128 for
+  an `f64` one; 32 on a discrete one. On bundle adjustment and SLAM
+  reduced systems wide blocks are faster on AMD integrated GPUs, whose
+  memory bandwidth bounds the update (256 against 128: `f32` 0.4 to 3%
+  faster, `f64` the same), and slower on an NVIDIA discrete GPU; on an
+  Apple M4 Pro blocks of 256 are faster on the large bundle adjustment
+  systems and the same on small ones. Discrete AMD GPUs are not measured.
 - `syrk_tile`: the rows and columns of the panel steps' trailing update
   tiles, 32 or 64, a block each. The block of a step's first tile also
   factors the next diagonal tile, so smaller tiles shorten each step and

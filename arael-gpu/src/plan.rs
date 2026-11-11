@@ -208,22 +208,25 @@ pub struct GpuSupernodalParams {
 }
 
 impl GpuSupernodalParams {
-    /// [`syrk_block`](Self::syrk_block) on the device `arch`, unset: 256 on
-    /// an Apple GPU, 128 on another integrated GPU or the CPU device, [`NB`]
-    /// on a discrete GPU. Measured on bundle adjustment and SLAM reduced
-    /// systems: blocks of 128 are faster on AMD integrated GPUs, whose memory
-    /// bandwidth bounds the update, and slower on an NVIDIA discrete GPU,
-    /// where the update's launches are bound by latency; on an Apple M4 Pro,
-    /// whose tiles multiply on SIMD-group matrices, blocks of 256 are faster
-    /// on the large bundle adjustment systems and the same on small ones.
-    /// Discrete AMD GPUs are not measured.
+    /// [`syrk_block`](Self::syrk_block) on the device `arch` for a factor of
+    /// `fs`-byte scalars, unset: 256 on an Apple GPU; on another integrated
+    /// GPU or the CPU device 256 for an f32 factor, 128 for an f64 one;
+    /// [`NB`] on a discrete GPU. Measured on bundle adjustment and SLAM
+    /// reduced systems: wide blocks are faster on AMD integrated GPUs, whose
+    /// memory bandwidth bounds the update (256 against 128: f32 0.4 to 3%
+    /// faster, f64 the same), and slower on an NVIDIA discrete GPU, where the
+    /// update's launches are bound by latency; on an Apple M4 Pro, whose
+    /// tiles multiply on SIMD-group matrices, blocks of 256 are faster on the
+    /// large bundle adjustment systems and the same on small ones. Discrete
+    /// AMD GPUs are not measured.
     ///
     /// ```ignore
-    /// let block = GpuSupernodalParams::default().syrk_block_on(dev.arch());
+    /// let block = GpuSupernodalParams::default().syrk_block_on(dev.arch(), 4);
     /// ```
-    pub fn syrk_block_on(&self, arch: &crate::Arch) -> u32 {
+    pub fn syrk_block_on(&self, arch: &crate::Arch, fs: usize) -> u32 {
         self.syrk_block.unwrap_or(match arch.vendor {
             crate::Vendor::Apple => 256,
+            _ if arch.integrated && fs == 4 => 256,
             _ if arch.integrated => 128,
             _ => NB as u32,
         })
@@ -721,7 +724,7 @@ const MIN_ITEM_WORK: f64 = (TB * TB * TK * 2) as f64;
 /// blocks, with the sizes of `kn` that the device chooses (the panel steps'
 /// `syrk_block`, `syrk_tile` and `trsm_rows`, the solve's `gemv_work`).
 pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, arch: &crate::Arch, fs: usize) -> Vec<LevelWork> {
-    let syrk_block = kn.syrk_block_on(arch) as usize;
+    let syrk_block = kn.syrk_block_on(arch, fs) as usize;
     let syrk_tile = kn.syrk_tile_on(arch, fs);
     let trsm_rows = kn.trsm_rows_on(arch);
     let gemv_work = kn.gemv_work_on(arch);
@@ -1605,18 +1608,19 @@ mod tests {
     }
 
     /// Unset, the trailing update takes blocks of 256 columns on an Apple
-    /// GPU, of 128 on another integrated device and of NB on a discrete
-    /// one; set, the blocks are what it says on every device.
+    /// GPU, on another integrated device 256 for an f32 factor and 128 for
+    /// an f64 one, and NB on a discrete one; set, the blocks are what it
+    /// says on every device.
     #[test]
     fn the_syrk_block_is_the_devices_unless_set() {
         let arch = |integrated| arch(2, 32, integrated);
         let apple = crate::Arch { vendor: crate::Vendor::Apple, ..arch(true) };
         let unset = GpuSupernodalParams::default();
-        assert_eq!(unset.syrk_block_on(&apple), 256);
-        assert_eq!(unset.syrk_block_on(&arch(true)), 128);
-        assert_eq!(unset.syrk_block_on(&arch(false)), NB as u32);
+        assert_eq!([4, 8].map(|fs| unset.syrk_block_on(&apple, fs)), [256, 256]);
+        assert_eq!([4, 8].map(|fs| unset.syrk_block_on(&arch(true), fs)), [256, 128]);
+        assert_eq!([4, 8].map(|fs| unset.syrk_block_on(&arch(false), fs)), [NB as u32; 2]);
         let set = GpuSupernodalParams { syrk_block: Some(64), ..unset };
-        assert_eq!([&apple, &arch(true), &arch(false)].map(|a| set.syrk_block_on(a)), [64; 3]);
+        assert_eq!([&apple, &arch(true), &arch(false)].map(|a| set.syrk_block_on(a, 4)), [64; 3]);
     }
 
     /// Unset, `k_trsm` takes blocks of 64 rows on an integrated device and
