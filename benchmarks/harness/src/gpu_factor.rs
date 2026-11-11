@@ -13,8 +13,8 @@
 //! GPU_CHAIN_FLOPS_F32, GPU_CHAIN_FLOPS_F64, GPU_CHAIN_ITEMS,
 //! GPU_SOLVE_CHAIN_WORK, GPU_GATHER_WORK, GPU_GEMV_WORK, GPU_BLOCKS_PER_SM,
 //! GPU_SYRK_BLOCK, GPU_SYRK_TILE, GPU_TRSM_ROWS, GPU_POTF2_UNROLL (0 or 1),
-//! GPU_TRSV_WIDE, GPU_TRSV_BLOCK and GPU_PAIR_TILES (0 or 1) override the
-//! device's `GpuSupernodalParams`;
+//! GPU_TRSV_WIDE, GPU_TRSV_BLOCK, GPU_PAIR_TILES (0 or 1) and GPU_LOOKAHEAD
+//! (0 or 1) override the device's `GpuSupernodalParams`;
 //! GPU_CHECK_FACTOR=1 compares the f64 factor with the CPU's, supernode by
 //! supernode, and checks 50 more factorizations;
 //! GPU_ORDER picks the elimination order, `amd` (the default) or `nd`
@@ -121,6 +121,9 @@ fn params() -> GpuSupernodalParams {
     }
     if let Some(v) = var("GPU_PAIR_TILES") {
         p.pair_tiles = Some(v != 0.0);
+    }
+    if let Some(v) = var("GPU_LOOKAHEAD") {
+        p.lookahead = Some(v != 0.0);
     }
     p
 }

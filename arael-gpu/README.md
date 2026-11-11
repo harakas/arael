@@ -202,6 +202,13 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
   both precisions, an NVIDIA discrete GPU 5 to 32% faster in `f64`, but
   up to 6% slower in `f32`, where the multiply-adds are cheap and the
   atomic adds are the cost. Discrete AMD GPUs are not measured.
+- `lookahead`: whether the panel steps look ahead. A block's last step
+  updates the next block's columns first; the rest of its update then runs
+  on the main stream while the next block's steps run on the side stream,
+  so their chain of small launches overlaps it. Unset, off: slower on an
+  Apple M4 Pro, where the two queues' synchronization costs more than the
+  overlap gains. NVIDIA and AMD GPUs, whose side stream runs at the highest
+  priority, are not measured.
 
 `GpuSchurParams` (`GpuSchur::with_params`), for the forming of S, which
 takes a tile of S per lockstep unit (a warp or a wavefront):

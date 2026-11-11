@@ -52,6 +52,20 @@ pub fn syrk_update(step: usize, block: usize) -> (u32, u32, u32) {
         ((step * NB) as u32, NB as u32, ((b + 1) * block) as u32)
     }
 }
+
+/// The column where a lookahead splits panel step `step`'s update (blocks
+/// of `block` columns): a block's last step updates the next block first,
+/// up to this column, and the rest from it on, alongside the next block's
+/// steps; `None` for a step inside its block.
+///
+/// ```ignore
+/// assert_eq!(lookahead_split(7, 128), Some(384)); // the block [128, 256)'s last step
+/// assert_eq!(lookahead_split(5, 128), None);
+/// ```
+pub fn lookahead_split(step: usize, block: usize) -> Option<u32> {
+    let (k0, kn, cend) = syrk_update(step, block);
+    (cend == u32::MAX).then_some(k0 + kn + block as u32)
+}
 /// Rows of x staged per pass of the backward GEMV.
 pub const XR_CH: usize = 1024;
 
@@ -185,6 +199,12 @@ pub struct GpuSupernodalParams {
     /// rectangles several pairs put in one target tile, summed in shared
     /// memory). `None` takes the device's choice ([`Self::pair_tiles_on`]).
     pub pair_tiles: Option<bool>,
+    /// Whether the panel steps look ahead: a block's last step updates the
+    /// next block's columns first, and the rest of its update runs on the
+    /// main stream while the next block's steps run on the side stream
+    /// ([`crate::Lane`]), so their chain of small launches overlaps it.
+    /// `None` takes the device's choice ([`Self::lookahead_on`]).
+    pub lookahead: Option<bool>,
 }
 
 impl GpuSupernodalParams {
@@ -309,6 +329,22 @@ impl GpuSupernodalParams {
     pub fn pair_tiles_on(&self, arch: &crate::Arch, fs: usize) -> bool {
         self.pair_tiles.unwrap_or(arch.integrated || fs == 8)
     }
+
+    /// [`lookahead`](Self::lookahead) on the device `arch`, unset: off.
+    /// Measured on an Apple M4 Pro: slower on bundle adjustment reduced
+    /// systems, as the two queues' synchronization costs more than the
+    /// overlap gains (Metal has no queue priorities, so the side's small
+    /// launches wait for the update's blocks to leave). NVIDIA and AMD GPUs,
+    /// whose side stream runs at the highest priority, are not measured; the
+    /// CPU device has one stream.
+    ///
+    /// ```ignore
+    /// let lookahead = GpuSupernodalParams::default().lookahead_on(dev.arch());
+    /// ```
+    pub fn lookahead_on(&self, arch: &crate::Arch) -> bool {
+        let _ = arch;
+        self.lookahead.unwrap_or(false)
+    }
 }
 
 impl Default for GpuSupernodalParams {
@@ -334,6 +370,7 @@ impl Default for GpuSupernodalParams {
             trsv_wide: None,
             trsv_block: None,
             pair_tiles: None,
+            lookahead: None,
         }
     }
 }
@@ -623,6 +660,12 @@ pub(crate) struct LevelWork {
     /// them (the syrk's for [`build_levels`]' blocks, [`syrk_update`]).
     pub trsm_grid: Vec<u32>,
     pub syrk_grid: Vec<u32>,
+    /// Per panel step, with a lookahead ([`GpuSupernodalParams::lookahead`]),
+    /// the syrk's grid split at [`lookahead_split`]: the next block's
+    /// columns and the rest; both 0 at a step inside its block or without a
+    /// lookahead.
+    pub syrk_near_grid: Vec<u32>,
+    pub syrk_far_grid: Vec<u32>,
     /// The level's supernodes whose triangular solves run on one block each
     /// (`k_fwd_trsv`, `k_bwd_trsv`).
     pub narrow: Vec<u32>,
@@ -835,26 +878,43 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, arch: &crate::Arc
         wide_trsv(w, p, wide, trsv_block);
     }
     // the panel steps' grid sizes
+    let lookahead = kn.lookahead_on(arch);
     for w in &mut lw {
         let mut j = 0u32;
         while j < w.maxq_big {
-            let (k0, kn, cend) = syrk_update(j as usize / NB, syrk_block);
-            let (mut tg, mut sg) = (0u32, 0u32);
-            for &s in &w.big_targets {
-                let (q, h) = (p.dims[2 * s as usize], p.dims[2 * s as usize + 1]);
-                if k0 < q {
-                    let (k1, c1) = ((k0 + kn).min(q), cend.min(q));
-                    if k1 < c1 {
-                        sg += (h - k1).div_ceil(syrk_tile) * (c1 - k1).div_ceil(syrk_tile);
+            let step = j as usize / NB;
+            let (k0, kn, cend) = syrk_update(step, syrk_block);
+            // k_syrk's tiles of the update of columns [k1, cend) from cbeg on
+            let syrk_tiles = |cend: u32, cbeg: u32| -> u32 {
+                let mut tiles = 0;
+                for &s in &w.big_targets {
+                    let (q, h) = (p.dims[2 * s as usize], p.dims[2 * s as usize + 1]);
+                    if k0 < q {
+                        let (k1, c1) = ((k0 + kn).min(q), cend.min(q));
+                        let cs = k1.max(cbeg);
+                        if cs < c1 {
+                            tiles += (h - cs).div_ceil(syrk_tile) * (c1 - cs).div_ceil(syrk_tile);
+                        }
                     }
                 }
+                tiles
+            };
+            let (near, far) = match lookahead_split(step, syrk_block) {
+                Some(split) if lookahead => (syrk_tiles(split, 0), syrk_tiles(u32::MAX, split)),
+                _ => (0, 0),
+            };
+            let mut tg = 0u32;
+            for &s in &w.big_targets {
+                let (q, h) = (p.dims[2 * s as usize], p.dims[2 * s as usize + 1]);
                 if j < q {
                     let nb = (NB as u32).min(q - j);
                     tg += (h - j - nb).div_ceil(trsm_rows);
                 }
             }
+            w.syrk_grid.push(syrk_tiles(cend, 0));
+            w.syrk_near_grid.push(near);
+            w.syrk_far_grid.push(far);
             w.trsm_grid.push(tg);
-            w.syrk_grid.push(sg);
             j += NB as u32;
         }
     }
@@ -1283,6 +1343,7 @@ mod tests {
             trsv_wide: None,
             trsv_block: None,
             pair_tiles: Some(false),
+            lookahead: None,
         }
     }
 
@@ -1523,6 +1584,20 @@ mod tests {
             assert_eq!(cs.iter().any(|c| c.contains(&l)), fits, "level {l}");
         }
         assert!(!cs.is_empty() && solve_chains(&lw, 0.0).is_empty());
+    }
+
+    /// A lookahead splits a block's last update at the end of the next
+    /// block, and no step inside a block; unset, it is off.
+    #[test]
+    fn the_lookahead_splits_a_blocks_last_update() {
+        assert_eq!(lookahead_split(7, 128), Some(384));
+        assert_eq!(lookahead_split(5, 128), None);
+        // in blocks of NB every step is its block's last
+        assert_eq!(lookahead_split(3, NB), Some(160));
+        let arch = |integrated| arch(2, 32, integrated);
+        assert!(!GpuSupernodalParams::default().lookahead_on(&arch(true)));
+        assert!(!GpuSupernodalParams::default().lookahead_on(&arch(false)));
+        assert!(GpuSupernodalParams { lookahead: Some(true), ..Default::default() }.lookahead_on(&arch(false)));
     }
 
     /// Unset, the trailing update takes blocks of 256 columns on an Apple

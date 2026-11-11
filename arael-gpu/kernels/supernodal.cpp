@@ -849,7 +849,10 @@ template <u32 T> DEVICE_INLINE void mma_store(THREAD simdgroup_float8x8 (&c)[MMA
 // (plan::syrk_update picks k0, kn and cend per step for blocks of
 // SYRK_BLOCK columns: a step inside a block updates the rest of its block,
 // the block's last step everything past it); tiles above the diagonal are
-// skipped and the straddling tile clipped. The columns stream through
+// skipped and the straddling tile clipped. From `cbeg` on (the rest of a
+// lookahead's update, the next block's columns updated before it) the
+// update covers rows and columns [max(k1, cbeg), ...) only, and factors no
+// diagonal tile. The columns stream through
 // shared memory NB at a time into the tile's accumulators, so a tile is
 // read and written once per update; the loop's trip count is constant, so
 // with SYRK_BLOCK = NB it is a single pass. A thread takes the
@@ -868,7 +871,7 @@ template <u32 T> DEVICE_INLINE void mma_store(THREAD simdgroup_float8x8 (&c)[MMA
 #else
 #define SYRK_ENTRY KERNEL_THREADS(THREADS)
 #endif
-SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u32 kn, u32 cend, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u32 kn, u32 cend, u32 cbeg, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
 #if TILE_MMA
     // the slabs, then the tile's products (SYRK_TB^2 <= 2 NB SYRK_TB values)
     SHARED F sm[2 * NB * SYRK_TB];
@@ -888,6 +891,8 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
     u32 h = 0;
     u32 k1 = 0;
     u32 c1 = 0;
+    // the first row and column updated
+    u32 cs = 0;
     u32 nct = 0;
     while (p < npanels && !found) {
         s = panels[p];
@@ -898,9 +903,10 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
         if (k0 < q) {
             k1 = min(k0 + kn, q);
             c1 = min(cend, q);
-            if (k1 < c1) {
-                rows = h - k1;
-                cols = c1 - k1;
+            cs = max(k1, cbeg);
+            if (cs < c1) {
+                rows = h - cs;
+                cols = c1 - cs;
             }
         }
         nct = (cols + SYRK_TB - 1) / SYRK_TB;
@@ -916,8 +922,8 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
     u32 ti = idx / nct;
     u32 tj = idx - ti * nct;
     if (ti < tj) return;
-    u32 row0 = k1 + ti * SYRK_TB;
-    u32 col0 = k1 + tj * SYRK_TB;
+    u32 row0 = cs + ti * SYRK_TB;
+    u32 col0 = cs + tj * SYRK_TB;
     u32 nrows = min(h - row0, SYRK_TB);
     u32 ncols = min(c1 - col0, SYRK_TB);
     u32 panel = plan[o_val_ptr + s];
@@ -1002,7 +1008,8 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
         }
     }
 #endif
-    if (ti == 0 && tj == 0) {
+    // the uniform branch: tile (0, 0) at k1 is the next diagonal tile
+    if (ti == 0 && tj == 0 && cs == k1) {
         // the block's writes seen by its first warp, and its reads of `sa`
         // done (potf2_warp's column)
         BARRIER();

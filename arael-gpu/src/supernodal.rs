@@ -12,7 +12,7 @@ use arael_faer::schur::SchurReal;
 use arael_faer::supernodal::SupernodalSymbolic;
 
 use crate::plan::{self, GpuSupernodalParams, NB, Plan, SparseIndex, build_levels};
-use crate::{Arg, Device, GpuError, Launch, Scalar, WIDE, Wide, is_f64, scalar_bytes};
+use crate::{Arg, Device, GpuError, Lane, Launch, Scalar, WIDE, Wide, is_f64, scalar_bytes};
 
 /// Arrays packed into one block, each starting on a 256-byte boundary.
 #[derive(Default)]
@@ -135,9 +135,12 @@ struct Level {
     small_threads: u32,
     big: usize,
     n_big: u32,
-    /// Per panel step, the grid sizes of `k_trsm` and `k_syrk`.
+    /// Per panel step, the grid sizes of `k_trsm` and `k_syrk`, and of the
+    /// `k_syrk` split by a lookahead (plan's `syrk_near_grid`).
     trsm_grid: Vec<u32>,
     syrk_grid: Vec<u32>,
+    syrk_near_grid: Vec<u32>,
+    syrk_far_grid: Vec<u32>,
     /// The level's supernodes (for tests).
     #[cfg(test)]
     n_all: u32,
@@ -344,6 +347,8 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 n_big: w.big_targets.len() as u32,
                 trsm_grid: w.trsm_grid,
                 syrk_grid: w.syrk_grid,
+                syrk_near_grid: w.syrk_near_grid,
+                syrk_far_grid: w.syrk_far_grid,
                 #[cfg(test)]
                 n_all: w.level_sn.len() as u32,
                 trsv_shared: trsv_shared as u32,
@@ -527,18 +532,51 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             if !l.trsm_grid.is_empty() {
                 self.run(&self.k.potf2, l.n_big, NB as u32, 0, &[list(l.big), plan, factor, fail])?;
             }
-            for (step, (&tg, &sg)) in l.trsm_grid.iter().zip(&l.syrk_grid).enumerate() {
-                let j = Arg::U32((step * NB) as u32);
-                let args = [list(l.big), Arg::U32(l.n_big), j, plan, factor];
-                if tg > 0 {
-                    self.run(&self.k.trsm, tg, self.trsm_rows, 0, &args)?;
-                }
-                if sg > 0 {
+            // With a lookahead, a block's last step updates the next block's
+            // columns, forks, and updates the rest on the main stream while
+            // the next block's steps run on the side stream; they write the
+            // next block's columns only, the rest the columns past them. The
+            // join comes before the next block's last update, and after a
+            // failure while forked, so the next work does not run alongside
+            // the side's.
+            let mut lane = Lane::Main;
+            let stepped = (|| -> Result<(), GpuError> {
+                for (step, (&tg, &sg)) in l.trsm_grid.iter().zip(&l.syrk_grid).enumerate() {
+                    let j = Arg::U32((step * NB) as u32);
+                    let args = [list(l.big), Arg::U32(l.n_big), j, plan, factor];
+                    if tg > 0 {
+                        self.run_on(lane, &self.k.trsm, tg, self.trsm_rows, 0, &args)?;
+                    }
                     let (k0, kn, cend) = plan::syrk_update(step, self.syrk_block as usize);
-                    let args = [list(l.big), Arg::U32(l.n_big), Arg::U32(k0), Arg::U32(kn), Arg::U32(cend), plan, factor, fail];
-                    self.run(&self.k.syrk, sg, THREADS, 0, &args)?;
+                    // the update of columns [k1, cend) from cbeg on
+                    let syrk = |lane: Lane, grid: u32, cend: u32, cbeg: u32| -> Result<(), GpuError> {
+                        if grid == 0 {
+                            return Ok(());
+                        }
+                        let args = [list(l.big), Arg::U32(l.n_big), Arg::U32(k0), Arg::U32(kn), Arg::U32(cend), Arg::U32(cbeg), plan, factor, fail];
+                        self.run_on(lane, &self.k.syrk, grid, THREADS, 0, &args)
+                    };
+                    if cend == u32::MAX {
+                        if lane == Lane::Side {
+                            self.dev.join()?;
+                            lane = Lane::Main;
+                        }
+                        if l.syrk_far_grid[step] > 0 {
+                            let split = plan::lookahead_split(step, self.syrk_block as usize).expect("a block's last step splits");
+                            syrk(Lane::Main, l.syrk_near_grid[step], split, 0)?;
+                            self.dev.fork()?;
+                            lane = Lane::Side;
+                            syrk(Lane::Main, l.syrk_far_grid[step], u32::MAX, split)?;
+                            continue;
+                        }
+                    }
+                    syrk(lane, sg, cend, 0)?;
                 }
-            }
+                Ok(())
+            })();
+            let joined = if lane == Lane::Side { self.dev.join() } else { Ok(()) };
+            // the steps' error first: the join's, if any, follows from it
+            stepped.and(joined)?;
         }
         // the solve's inverted diagonal tiles
         if self.n_inv > 0 {
@@ -677,8 +715,12 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     }
 
     fn run(&self, kernel: &D::Kernel, blocks: u32, threads: u32, shared_bytes: u32, args: &[Arg<'_, D::Block>]) -> Result<(), GpuError> {
+        self.run_on(Lane::Main, kernel, blocks, threads, shared_bytes, args)
+    }
+
+    fn run_on(&self, lane: Lane, kernel: &D::Kernel, blocks: u32, threads: u32, shared_bytes: u32, args: &[Arg<'_, D::Block>]) -> Result<(), GpuError> {
         let launch = Launch { grid: [blocks, 1, 1], block: [threads, 1, 1], shared_bytes };
-        self.dev.launch(kernel, launch, args)
+        self.dev.launch_on(lane, kernel, launch, args)
     }
 }
 
@@ -885,6 +927,7 @@ mod tests {
             trsv_wide: None,
             trsv_block: None,
             pair_tiles: None,
+            lookahead: None,
         }
     }
 
@@ -1138,9 +1181,9 @@ mod tests {
     /// Supernodes wider than two blocks of 128 columns, with rows below them
     /// and widths no multiple of NB: the factor of `k_syrk` in tiles of 32
     /// and 64, each in blocks of NB, 64, 128 and 256 columns
-    /// (`plan::syrk_update`), and of `k_trsm` in blocks of 32, 64 and 128
-    /// rows is the CPU's, in f64, and an f32 factor solves to single
-    /// precision.
+    /// (`plan::syrk_update`), with the lookahead and without, and of
+    /// `k_trsm` in blocks of 32, 64 and 128 rows is the CPU's, in f64, and
+    /// an f32 factor solves to single precision.
     #[test]
     fn wide_supernodes_with_rows_below_factor_as_on_the_cpu() {
         let (a, dense, rhs) = grid_spd(24, &[3, 6], 11);
@@ -1154,13 +1197,22 @@ mod tests {
         supernodal_factorize(&sn, &a, &mut cpu, &mut ctx, 1).unwrap();
         let dev = device();
         let blocks = [32, 64].into_iter().flat_map(|t| {
-            [NB as u32, 64, 128, 256].map(|b| GpuSupernodalParams { syrk_block: Some(b), syrk_tile: Some(t), ..GpuSupernodalParams::default() })
+            [NB as u32, 64, 128, 256].into_iter().flat_map(move |b| {
+                [false, true].map(|la| GpuSupernodalParams { syrk_block: Some(b), syrk_tile: Some(t), lookahead: Some(la), ..GpuSupernodalParams::default() })
+            })
         });
         let rows = [32, 64, 128].map(|r| GpuSupernodalParams { trsm_rows: Some(r), ..GpuSupernodalParams::default() });
         let unrolls = [false, true].map(|u| GpuSupernodalParams { potf2_unroll: Some(u), ..GpuSupernodalParams::default() });
         let f64s = has_f64(&*dev, "the f64 factor");
         for params in blocks.chain(rows).chain(unrolls).chain(both_syrks()) {
-            let sizes = (params.syrk_block, params.syrk_tile, params.trsm_rows, params.potf2_unroll);
+            let sizes = (params.syrk_block, params.syrk_tile, params.trsm_rows, params.potf2_unroll, params.lookahead);
+            let widest = (0..sn.n_supernodes()).map(|s| sn.supernode_dims(s).0).max().unwrap();
+            if params.lookahead == Some(true) && widest > 2 * params.syrk_block.unwrap() as usize {
+                // the lookahead splits some block's last update: there are
+                // columns past the next block
+                let g = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params, wide(&*dev)).unwrap();
+                assert!(g.levels.iter().any(|l| l.syrk_far_grid.iter().any(|&n| n > 0)), "no update split by the lookahead, {sizes:?}");
+            }
             if f64s {
                 let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
                 g.factorize(a.vals()).unwrap();
