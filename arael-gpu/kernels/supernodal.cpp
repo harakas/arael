@@ -804,6 +804,32 @@ DEVICE_INLINE void mma_slab(THREAD simdgroup_float8x8 (&c)[MMA_R(T)][MMA_C(T)], 
     }
 }
 
+// The slab of KS columns at `col` (column stride ld) a thread loads for
+// mma_put, KS T / THREADS values of each side: rows ra + i of A for i < na
+// and rb + i of B for i < nb, columns k < nk; zeros elsewhere. Loaded into
+// registers while the slab before is multiplied, so the loads' latency
+// hides behind its products.
+template <u32 T, u32 KS>
+DEVICE_INLINE void mma_fetch(THREAD F (&va)[KS * T / THREADS], THREAD F (&vb)[KS * T / THREADS], GLOBAL const F* factor, u32 col, u32 ld, u32 ra, u32 rb, u32 nk, u32 na, u32 nb, u32 t) {
+#pragma unroll
+    for (u32 u = 0; u < KS * T / THREADS; u++) {
+        u32 e = t + u * THREADS;
+        u32 k = e / T;
+        u32 i = e - k * T;
+        va[u] = k < nk && i < na ? factor[col + k * ld + ra + i] : F(0);
+        vb[u] = k < nk && i < nb ? factor[col + k * ld + rb + i] : F(0);
+    }
+}
+
+// mma_fetch's values into the slabs, column k of A at sa[k T], of B at sb[k T].
+template <u32 T, u32 KS> DEVICE_INLINE void mma_put(THREAD F (&va)[KS * T / THREADS], THREAD F (&vb)[KS * T / THREADS], SHARED_PTR F* sa, SHARED_PTR F* sb, u32 t) {
+#pragma unroll
+    for (u32 u = 0; u < KS * T / THREADS; u++) {
+        sa[t + u * THREADS] = va[u];
+        sb[t + u * THREADS] = vb[u];
+    }
+}
+
 // Group sg's blocks into `cs` transposed, C[i][j] at cs[j T + i], so
 // neighbouring threads read neighbouring rows of a column.
 template <u32 T> DEVICE_INLINE void mma_store(THREAD simdgroup_float8x8 (&c)[MMA_R(T)][MMA_C(T)], SHARED_PTR F* cs, u32 sg) {
@@ -901,13 +927,35 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
     u32 sg = t / 32;
     simdgroup_float8x8 acc[MMA_R(SYRK_TB)][MMA_C(SYRK_TB)];
     mma_zero<SYRK_TB>(acc);
+    // the slabs of [k0, k1), NB columns each; the next one's loads in
+    // flight while one is multiplied
+    u32 nsl = min((k1 - k0 + NB - 1) / NB, SYRK_BLOCK / NB);
+    F va[NB * SYRK_TB / THREADS];
+    F vb[NB * SYRK_TB / THREADS];
+    mma_fetch<SYRK_TB, NB>(va, vb, factor, panel + k0 * h, h, row0, col0, min(k1 - k0, NB), nrows, ncols, t);
+    for (u32 sl = 0; sl < nsl; sl++) {
+        u32 nk = min(k1 - k0 - sl * NB, NB);
+        // the previous slab's reads are done
+        if (sl > 0) BARRIER();
+        mma_put<SYRK_TB, NB>(va, vb, sa, sb, t);
+        BARRIER();
+        if (sl + 1 < nsl) {
+            u32 kb = k0 + (sl + 1) * NB;
+            mma_fetch<SYRK_TB, NB>(va, vb, factor, panel + kb * h, h, row0, col0, min(k1 - kb, NB), nrows, ncols, t);
+        }
+        // the branch is uniform: a block's tile is diagonal or not
+        if (ti == tj) {
+            mma_slab<SYRK_TB, true>(acc, sa, sb, nk, sg);
+        } else {
+            mma_slab<SYRK_TB, false>(acc, sa, sb, nk, sg);
+        }
+    }
 #else
     u32 tx = t % 16;
     u32 ty = t / 16;
     F acc[SYRK_R * SYRK_R];
 #pragma unroll
     for (u32 z = 0; z < SYRK_R * SYRK_R; z++) acc[z] = F(0);
-#endif
     for (u32 sl = 0; sl < SYRK_BLOCK / NB; sl++) {
         u32 kb = k0 + sl * NB;
         if (kb >= k1) break;
@@ -926,20 +974,13 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
         }
         BARRIER();
         // the branch is uniform: a block's tile is diagonal or not
-#if TILE_MMA
-        if (ti == tj) {
-            mma_slab<SYRK_TB, true>(acc, sa, sb, nk, sg);
-        } else {
-            mma_slab<SYRK_TB, false>(acc, sa, sb, nk, sg);
-        }
-#else
         if (ti == tj) {
             tile_slab<SYRK_R, true>(acc, sa, sb, nk, tx, ty);
         } else {
             tile_slab<SYRK_R, false>(acc, sa, sb, nk, tx, ty);
         }
-#endif
     }
+#endif
 #if TILE_MMA
     // every group's reads of the slabs done: the products take their place
     BARRIER();
@@ -984,15 +1025,20 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
 // the target through the pair's maps, atomically, as other items reach
 // the same element. A warp's atomics take 16 consecutive pair rows (with
 // TILE_MMA, from shared memory, 32), mostly consecutive target rows.
-#if TILE_MMA && 2 * TK > TB
+#if TILE_MMA
+// k_big_pair's slab width with TILE_MMA: its two slabs fill the shared
+// memory the tile's products take after them.
+#define PAIR_KS 32u
+#if 2 * PAIR_KS > TB
 #error "supernodal.cpp: k_big_pair's products take the place of its two slabs"
+#endif
 #endif
 KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor) {
 #if TILE_MMA
     // the slabs, then the tile's products
     SHARED F sm[TB * TB];
     SHARED_PTR F* sa = sm;
-    SHARED_PTR F* sb = sm + TK * TB;
+    SHARED_PTR F* sb = sm + PAIR_KS * TB;
 #else
     SHARED F sa[TK * TB];
     SHARED F sb[TK * TB];
@@ -1018,13 +1064,31 @@ KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL
     u32 sg = t / 32;
     simdgroup_float8x8 acc[MMA_R(TB)][MMA_C(TB)];
     mma_zero<TB>(acc);
+    // the slabs of [kb, k_end), PAIR_KS columns each; the next one's loads
+    // in flight while one is multiplied
+    F va[PAIR_KS * TB / THREADS];
+    F vb[PAIR_KS * TB / THREADS];
+    mma_fetch<TB, PAIR_KS>(va, vb, factor, dp + kb * dh, dh, i0, j0, min(k_end - kb, PAIR_KS), nr, nc, t);
+    for (u32 k0 = kb; k0 < k_end; k0 += PAIR_KS) {
+        u32 nk = min(k_end - k0, PAIR_KS);
+        // the previous slab's reads are done
+        if (k0 > kb) BARRIER();
+        mma_put<TB, PAIR_KS>(va, vb, sa, sb, t);
+        BARRIER();
+        if (k0 + PAIR_KS < k_end) mma_fetch<TB, PAIR_KS>(va, vb, factor, dp + (k0 + PAIR_KS) * dh, dh, i0, j0, min(k_end - k0 - PAIR_KS, PAIR_KS), nr, nc, t);
+        // the branch is uniform: a block's tile is diagonal or not
+        if (i0 == j0) {
+            mma_slab<TB, true>(acc, sa, sb, nk, sg);
+        } else {
+            mma_slab<TB, false>(acc, sa, sb, nk, sg);
+        }
+    }
 #else
     u32 tx = t % 16;
     u32 ty = t / 16;
     F acc[(TB / 16) * (TB / 16)];
 #pragma unroll
     for (u32 z = 0; z < (TB / 16) * (TB / 16); z++) acc[z] = F(0);
-#endif
     for (u32 k0 = kb; k0 < k_end; k0 += TK) {
         u32 nk = min(k_end - k0, TK);
         // the previous slab's reads are done
@@ -1041,20 +1105,13 @@ KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL
         }
         BARRIER();
         // the branch is uniform: a block's tile is diagonal or not
-#if TILE_MMA
-        if (i0 == j0) {
-            mma_slab<TB, true>(acc, sa, sb, nk, sg);
-        } else {
-            mma_slab<TB, false>(acc, sa, sb, nk, sg);
-        }
-#else
         if (i0 == j0) {
             tile_slab<TB / 16, true>(acc, sa, sb, nk, tx, ty);
         } else {
             tile_slab<TB / 16, false>(acc, sa, sb, nk, tx, ty);
         }
-#endif
     }
+#endif
     u32 rm = plan[H_RMAP] + plan[plan[H_PR_RMAP] + pi] + i0;
     u32 cm = plan[H_CMAP] + plan[plan[H_PR_CMAP] + pi] + j0;
     u32 panel = plan[o_val_ptr + s];
