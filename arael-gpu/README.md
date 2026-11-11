@@ -44,6 +44,22 @@ slightly larger or smaller one allocates nothing (`Device::allocations`,
 `Device::reserved_bytes`). Separate devices run on separate streams, so
 solves on several threads, a device each, run at the same time.
 
+A device also has a side stream (`Lane::Side`): launches queued on it
+between `Device::fork` and `Device::join` run alongside the main stream's.
+A fork orders the side's launches after the main stream's work so far, a
+join the main stream's next work after the side's; reads and writes follow
+the main stream. On CUDA and HIP the side stream runs at the highest
+priority; on Metal it is a second queue; the CPU device runs its launches
+in order.
+
+```rust,ignore
+dev.launch(&update_next, launch, &args)?;
+dev.fork()?;
+dev.launch(&update_rest, big, &args)?;
+dev.launch_on(Lane::Side, &factor_next, small, &args)?; // alongside update_rest
+dev.join()?;
+```
+
 The refinement decides on the device whether the next step is due; the
 steps launched after it has converged do nothing. The first `solve` with a
 factor and a refinement setting runs its kernels and then captures them as

@@ -3,7 +3,7 @@
 
 use crate::disk::DiskCache;
 use crate::pool::{Pool, capacity};
-use crate::{Arch, Arg, Device, GpuError, Launch, MAX_ARGS};
+use crate::{Arch, Arg, Device, GpuError, Lane, Launch, MAX_ARGS};
 use cudarc::driver::sys::{self, CUdevice_attribute, CUfunction_attribute};
 use cudarc::driver::{CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, result};
 use cudarc::nvrtc::{self, Ptx};
@@ -11,10 +11,20 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// One CUDA device and a stream of its own.
+/// One CUDA device and a stream of its own, and a side stream
+/// ([`Device::launch_on`]).
 pub struct CudaDevice {
     ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
+    /// At the device's highest priority, so its blocks start as soon as the
+    /// main stream's leave room.
+    side: Arc<CudaStream>,
+    /// Recorded on the main stream and waited for by the side at a fork.
+    fork_event: CudaEvent,
+    /// Recorded on the side stream and waited for by the main at a join.
+    join_event: CudaEvent,
+    /// The side stream's forks open.
+    forks: crate::Forks,
     arch: Arch,
     /// Compiled modules by their full source.
     modules: Mutex<HashMap<String, Arc<CudaModule>>>,
@@ -189,6 +199,11 @@ impl CudaDevice {
         // cudarc records on every buffer use.
         unsafe { ctx.disable_event_tracking() };
         let stream = ctx.new_stream().map_err(driver)?;
+        ctx.bind_to_thread().map_err(driver)?;
+        let (_, highest) = result::stream::get_priority_range().map_err(driver)?;
+        let side = ctx.new_stream_with_priority(highest).map_err(driver)?;
+        let fork_event = ctx.new_event(None).map_err(driver)?;
+        let join_event = ctx.new_event(None).map_err(driver)?;
         let (major, minor) = ctx.compute_capability().map_err(driver)?;
         let attr = |a| ctx.attribute(a).map_err(driver);
         let arch = Arch {
@@ -206,6 +221,10 @@ impl CudaDevice {
         Ok(CudaDevice {
             ctx,
             stream,
+            side,
+            fork_event,
+            join_event,
+            forks: crate::Forks::default(),
             arch,
             modules: Mutex::new(HashMap::new()),
             capturing: AtomicBool::new(false),
@@ -522,7 +541,16 @@ impl Device for CudaDevice {
     }
 
     fn launch(&self, kernel: &CudaKernel, launch: Launch, args: &[Arg<'_, CudaBlock>]) -> Result<(), GpuError> {
+        self.launch_on(Lane::Main, kernel, launch, args)
+    }
+
+    fn launch_on(&self, lane: Lane, kernel: &CudaKernel, launch: Launch, args: &[Arg<'_, CudaBlock>]) -> Result<(), GpuError> {
         crate::fault::check("launch")?;
+        self.forks.check(lane);
+        let stream = match lane {
+            Lane::Main => &self.stream,
+            Lane::Side => &self.side,
+        };
         assert!(args.len() <= MAX_ARGS, "a launch takes at most {MAX_ARGS} arguments");
         // Each argument's value in a slot of its own, the driver reading as
         // many bytes from the slot as the kernel's parameter has (the low
@@ -557,28 +585,52 @@ impl Device for CudaDevice {
                 (gx, gy, gz),
                 (bx, by, bz),
                 launch.shared_bytes,
-                self.stream.cu_stream(),
+                stream.cu_stream(),
                 &mut params[..args.len()],
             )
         }
         .map_err(driver)
     }
 
+    /// The side stream waits for an event recorded on the main one; in a
+    /// capture, the wait brings the side stream into it.
+    fn fork(&self) -> Result<(), GpuError> {
+        crate::fault::check("fork")?;
+        self.fork_event.record(&self.stream).map_err(driver)?;
+        self.side.wait(&self.fork_event).map_err(driver)?;
+        self.forks.fork();
+        Ok(())
+    }
+
+    /// The main stream waits for an event recorded on the side one; in a
+    /// capture, the wait joins the side stream back.
+    fn join(&self) -> Result<(), GpuError> {
+        crate::fault::check("join")?;
+        self.forks.join();
+        self.join_event.record(&self.side).map_err(driver)?;
+        self.stream.wait(&self.join_event).map_err(driver)
+    }
+
     fn sync(&self) -> Result<(), GpuError> {
         crate::fault::check("sync")?;
         self.not_capturing("a wait")?;
-        self.stream.synchronize().map_err(driver)
+        self.stream.synchronize().map_err(driver)?;
+        self.side.synchronize().map_err(driver)
     }
 
     /// Stream capture in thread-local mode, instantiated and uploaded: the
     /// capture forbids nothing on other threads.
     fn capture(&self, record: impl FnOnce() -> Result<(), GpuError>) -> Result<CudaGraph, GpuError> {
         crate::fault::check("capture")?;
+        let forks = self.forks.open();
         let open = OpenCapture::begin(self)?;
         let recorded = record();
+        // ours first: CUDA's own error for a fork not joined says less
+        let joined = self.forks.check_capture(forks);
         let graph = open.end();
         // the recording's error first: it is why the capture broke, if it did
         recorded?;
+        joined?;
         let graph = graph?;
         if graph.0.is_null() {
             return Err(GpuError::Capture("the capture recorded nothing".into()));

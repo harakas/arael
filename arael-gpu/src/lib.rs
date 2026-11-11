@@ -339,12 +339,63 @@ impl Launch {
     }
 }
 
+/// The stream a launch is queued on ([`Device::launch_on`]): the device's
+/// own, or the side stream, whose work overlaps it between a
+/// [`Device::fork`] and the [`Device::join`] after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lane {
+    Main,
+    Side,
+}
+
+/// The side stream's forks open on a device ([`Device::fork`]), for the
+/// checks every runtime makes on them.
+#[derive(Debug, Default)]
+pub(crate) struct Forks(core::sync::atomic::AtomicUsize);
+
+impl Forks {
+    /// Forks open.
+    pub(crate) fn open(&self) -> usize {
+        self.0.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn fork(&self) {
+        self.0.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Panics without an open fork.
+    pub(crate) fn join(&self) {
+        if self.0.fetch_sub(1, core::sync::atomic::Ordering::AcqRel) == 0 {
+            self.0.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+            panic!("a join without a fork");
+        }
+    }
+
+    /// Panics for a side launch without an open fork.
+    pub(crate) fn check(&self, lane: Lane) {
+        assert!(lane == Lane::Main || self.open() > 0, "a side launch outside a fork and its join");
+    }
+
+    /// [`GpuError::Capture`] when the forks open differ from `at_begin`, the
+    /// count when the capture began.
+    pub(crate) fn check_capture(&self, at_begin: usize) -> Result<(), GpuError> {
+        if self.open() != at_begin {
+            return Err(GpuError::Capture("the capture ended with the side stream forked and not joined".into()));
+        }
+        Ok(())
+    }
+}
+
 /// One GPU, a stream of its own, and the kernels compiled for it.
 ///
 /// Every operation is ordered on the stream. [`Device::read`] and
 /// [`Device::sync`] are the only ones that wait for the device. A device is
 /// shared between threads (solvers hold it in an `Arc`), and what it makes
 /// moves between them.
+///
+/// Launches may also go to a side stream ([`Lane::Side`]) between a
+/// [`fork`](Device::fork) and a [`join`](Device::join), to run alongside
+/// the main stream's; a device with one stream runs them in order on it.
 pub trait Device: Send + Sync {
     /// Device memory: a run of bytes.
     type Block: Send + Sync;
@@ -436,7 +487,33 @@ pub trait Device: Send + Sync {
         args: &[Arg<'_, Self::Block>],
     ) -> Result<(), GpuError>;
 
-    /// Waits until everything queued has run.
+    /// Queues `kernel` on `lane`: [`launch`](Self::launch) on the main
+    /// stream, on the side stream between a [`fork`](Self::fork) and the
+    /// [`join`](Self::join) after it (a side launch outside those panics).
+    /// The CPU device has one stream and runs the side's launches on it, in
+    /// order.
+    ///
+    /// ```ignore
+    /// dev.launch(&update_next, launch, &args)?;
+    /// dev.fork()?;
+    /// dev.launch(&update_rest, big, &args)?;
+    /// dev.launch_on(Lane::Side, &factor_next, small, &args)?; // runs alongside update_rest
+    /// dev.join()?;
+    /// ```
+    fn launch_on(&self, lane: Lane, kernel: &Self::Kernel, launch: Launch, args: &[Arg<'_, Self::Block>]) -> Result<(), GpuError>;
+
+    /// Opens the side stream: its launches from now on start after the main
+    /// stream's work queued so far.
+    fn fork(&self) -> Result<(), GpuError>;
+
+    /// Closes the side stream (a join without a fork panics): the main
+    /// stream's work queued from now on starts after the side's. Reads and
+    /// writes follow the main stream only, so a side launch's results are
+    /// read after a join; a capture whose forks it did not join fails
+    /// ([`GpuError::Capture`]).
+    fn join(&self) -> Result<(), GpuError>;
+
+    /// Waits until everything queued has run, on both streams.
     fn sync(&self) -> Result<(), GpuError>;
 
     /// The launches `record` queues, recorded as a graph instead of run.

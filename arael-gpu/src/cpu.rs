@@ -33,7 +33,7 @@ use std::thread::ThreadId;
 
 use crate::disk::DiskCache;
 use crate::pool::{Pool, capacity};
-use crate::{Arch, Arg, Device, GpuError, HEADER, Launch, MAX_ARGS};
+use crate::{Arch, Arg, Device, GpuError, HEADER, Lane, Launch, MAX_ARGS};
 
 /// The kernels' side of the CPU target, in front of every kernel source.
 const CPU_H: &str = include_str!("../kernels/cpu.h");
@@ -294,8 +294,11 @@ pub struct CpuDevice {
     /// The open capture: its thread and what it recorded.
     capture: Mutex<Option<(ThreadId, Vec<Recorded>)>>,
     /// Held by every copy and launch: they run one at a time, in the order
-    /// of their calls, as on a GPU's stream.
+    /// of their calls, as on a GPU's stream. The side stream's launches run
+    /// on it too ([`Device::launch_on`]).
     stream: Mutex<()>,
+    /// The side stream's forks open.
+    forks: crate::Forks,
     pool: Arc<Pool<Mem>>,
     host_pool: Arc<Pool<Mem>>,
 }
@@ -324,6 +327,7 @@ impl CpuDevice {
             modules: Mutex::new(HashMap::new()),
             capture: Mutex::new(None),
             stream: Mutex::new(()),
+            forks: crate::Forks::default(),
             pool: Arc::new(Pool::new()),
             host_pool: Arc::new(Pool::new()),
         })
@@ -587,6 +591,23 @@ impl Device for CpuDevice {
         run(kernel, &launch, &slots)
     }
 
+    fn launch_on(&self, lane: Lane, kernel: &CpuKernel, launch: Launch, args: &[Arg<'_, CpuBlock>]) -> Result<(), GpuError> {
+        self.forks.check(lane);
+        self.launch(kernel, launch, args)
+    }
+
+    fn fork(&self) -> Result<(), GpuError> {
+        crate::fault::check("fork")?;
+        self.forks.fork();
+        Ok(())
+    }
+
+    fn join(&self) -> Result<(), GpuError> {
+        crate::fault::check("join")?;
+        self.forks.join();
+        Ok(())
+    }
+
     fn sync(&self) -> Result<(), GpuError> {
         crate::fault::check("sync")?;
         self.not_capturing("a sync")
@@ -614,10 +635,12 @@ impl Device for CpuDevice {
             *capture = Some((std::thread::current().id(), Vec::new()));
         }
         let open = Open(&self.capture);
+        let forks = self.forks.open();
         let recorded = record();
         let launches = open.close();
         // the recording's error first: it is why the capture broke, if it did
         recorded?;
+        self.forks.check_capture(forks)?;
         Ok(CpuGraph { launches })
     }
 

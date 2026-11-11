@@ -7,12 +7,15 @@
 //! rewritten into Metal's buffer bindings ([`signature`]). Metal has no
 //! f64: a factor is f32 and the wide scalar df32.
 //!
-//! The stream is one command queue. Launches are encoded into an open
-//! command buffer, committed when the host waits and every
-//! [`COMMIT_EVERY`] launches. Memory is shared between the host and the
-//! GPU: a write when nothing is queued is a copy into the buffer, otherwise
-//! a copy queued behind the work before it, as on a CUDA stream; a read
-//! waits, then copies out of the buffer.
+//! The stream is one command queue, the side stream a second
+//! ([`crate::Lane`]). Launches are encoded into an open command buffer,
+//! committed when the host waits, every [`COMMIT_EVERY`] launches and when
+//! the next launch goes to the other queue. The buffers are untracked: each
+//! queue keeps its work in order with a fence, and a fork or join orders one
+//! queue after the other with an event. Memory is shared between the host
+//! and the GPU: a write when nothing is queued is a copy into the buffer,
+//! otherwise a copy queued behind the work before it, as on a CUDA stream;
+//! a read waits, then copies out of the buffer.
 //!
 //! [`MetalDevice::time_kernels`] times each launch on the GPU, summed per
 //! kernel.
@@ -38,17 +41,21 @@ use objc2_foundation::NSRange;
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions,
-    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCopyAllDevices, MTLDevice, MTLGPUFamily, MTLLibrary, MTLMathFloatingPointFunctions,
-    MTLMathMode, MTLResourceOptions, MTLSize,
+    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCopyAllDevices, MTLDevice, MTLFence, MTLGPUFamily, MTLLibrary,
+    MTLMathFloatingPointFunctions, MTLMathMode, MTLResourceOptions, MTLSharedEvent, MTLSize,
 };
 
 use crate::pool::{Pool, capacity};
-use crate::{Arch, Arg, Device, GpuError, Launch, MAX_ARGS};
+use crate::{Arch, Arg, Device, GpuError, Lane, Launch, MAX_ARGS};
 use signature::{Entry, Param};
 
 /// Launches per command buffer before it is committed without a wait, so
 /// the GPU starts while the host still encodes.
 pub const COMMIT_EVERY: usize = 128;
+
+/// Every buffer's storage: shared with the host, and untracked, its order
+/// the device's own ([`Stream`]).
+const BUFFER_OPTIONS: MTLResourceOptions = MTLResourceOptions::StorageModeShared.union(MTLResourceOptions::HazardTrackingModeUntracked);
 
 /// A Metal buffer in shared storage, the host's and the GPU's at once.
 struct Buf(Retained<ProtocolObject<dyn MTLBuffer>>);
@@ -64,15 +71,21 @@ impl Buf {
     }
 }
 
-/// A command buffer and its serial number on the device's queue.
+/// A command buffer and its serial number on its queue.
 struct CmdBuf {
     cb: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     serial: u64,
 }
 
-/// The device's queue: the command buffer being encoded, its compute
-/// encoder, and the command buffers committed and not yet seen complete.
+/// One of the device's queues: the command buffer being encoded, its
+/// compute encoder, and the command buffers committed and not yet seen
+/// complete. The buffers are untracked (Metal orders nothing on them): the
+/// queue's encoders wait for its fence as they begin and update it as they
+/// end, so its work runs in order, and the queues order each other through
+/// the device's event ([`Streams`]).
 struct Stream {
+    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    fence: Retained<ProtocolObject<dyn MTLFence>>,
     open: Option<CmdBuf>,
     encoder: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>>,
     /// Launches in the open command buffer.
@@ -84,6 +97,21 @@ struct Stream {
     /// The first error of a command buffer seen complete without a wait,
     /// for the next wait to return.
     failed: Option<String>,
+}
+
+/// The device's main queue and its side queue ([`Lane`]), and the event
+/// that orders one after the other: a fork signals it on the main queue and
+/// waits for it on the side queue, a join the other way round.
+struct Streams {
+    main: Stream,
+    side: Stream,
+    event: Retained<ProtocolObject<dyn MTLSharedEvent>>,
+    /// The event's last value signalled.
+    signalled: u64,
+    /// The lane of the last launch: a lane's command buffer is committed
+    /// when the next launch goes to the other, so it runs while the host
+    /// encodes the other's.
+    last: Lane,
     /// Whether launches are timed ([`MetalDevice::time_kernels`]).
     timing: bool,
     /// Each timed kernel's launches and GPU seconds, until taken.
@@ -99,20 +127,21 @@ pub struct KernelTime {
     pub seconds: f64,
 }
 
-// SAFETY: command buffers and encoders are used only under the device's
-// lock on the stream, one thread at a time.
-unsafe impl Send for Stream {}
+// SAFETY: command buffers, encoders, fences and the event are used only
+// under the device's lock on its streams, one thread at a time.
+unsafe impl Send for Streams {}
 
-/// One Metal GPU and a command queue of its own.
+/// One Metal GPU and two command queues of its own ([`Streams`]).
 pub struct MetalDevice {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
-    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     arch: Arch,
-    stream: Mutex<Stream>,
+    streams: Mutex<Streams>,
+    /// The side stream's forks open.
+    forks: crate::Forks,
     /// Compiled sources by their full text.
     modules: Mutex<HashMap<String, Arc<Module>>>,
     /// The open capture: its thread and what it recorded.
-    capture: Mutex<Option<(ThreadId, Vec<Recorded>)>>,
+    capture: Mutex<Option<(ThreadId, Vec<Op>)>>,
     pool: Arc<Pool<Buf>>,
     host_pool: Arc<Pool<HostMem>>,
 }
@@ -251,9 +280,17 @@ struct Recorded {
 // device's lock; Metal's buffers are thread-safe objects.
 unsafe impl Send for Recorded {}
 
-/// The launches a capture recorded, encoded again by a replay.
+/// What a capture records: a launch on its lane, a fork, a join.
+enum Op {
+    Launch(Lane, Recorded),
+    Fork,
+    Join,
+}
+
+/// The launches, forks and joins a capture recorded, encoded again by a
+/// replay.
 pub struct MetalGraph {
-    launches: Vec<Recorded>,
+    ops: Vec<Op>,
 }
 
 /// Metal compilations in this process.
@@ -267,42 +304,71 @@ pub fn compiles() -> usize {
 }
 
 impl Stream {
+    /// A stream on `queue`, its fence from `device`.
+    fn new(device: &ProtocolObject<dyn MTLDevice>, queue: Retained<ProtocolObject<dyn MTLCommandQueue>>) -> Result<Self, GpuError> {
+        let fence = device.newFence().ok_or_else(|| GpuError::Driver("no fence".into()))?;
+        Ok(Stream { queue, fence, open: None, encoder: None, launches: 0, flight: VecDeque::new(), next: 0, failed: None })
+    }
+
     /// The open command buffer, made when there is none.
-    fn open(&mut self, queue: &ProtocolObject<dyn MTLCommandQueue>) -> Result<&CmdBuf, GpuError> {
+    fn open(&mut self) -> Result<&CmdBuf, GpuError> {
         if self.open.is_none() {
-            let cb = queue.commandBuffer().ok_or_else(|| GpuError::Driver("no command buffer from the queue".into()))?;
+            let cb = self.queue.commandBuffer().ok_or_else(|| GpuError::Driver("no command buffer from the queue".into()))?;
             self.open = Some(CmdBuf { cb, serial: self.next });
             self.next += 1;
         }
         Ok(self.open.as_ref().unwrap())
     }
 
-    /// The compute encoder of the open command buffer, made when there is none.
-    fn encoder(&mut self, queue: &ProtocolObject<dyn MTLCommandQueue>) -> Result<&ProtocolObject<dyn MTLComputeCommandEncoder>, GpuError> {
+    /// The compute encoder of the open command buffer, made when there is
+    /// none, after the queue's work before it.
+    fn encoder(&mut self) -> Result<&ProtocolObject<dyn MTLComputeCommandEncoder>, GpuError> {
         if self.encoder.is_none() {
-            let enc = self.open(queue)?.cb.computeCommandEncoder().ok_or_else(|| GpuError::Driver("no compute encoder".into()))?;
+            let enc = self.open()?.cb.computeCommandEncoder().ok_or_else(|| GpuError::Driver("no compute encoder".into()))?;
+            enc.waitForFence(&self.fence);
             self.encoder = Some(enc);
         }
         Ok(self.encoder.as_deref().unwrap())
     }
 
-    /// `encode` on a blit encoder of the open command buffer, after the
-    /// launches before it.
-    fn blit(&mut self, queue: &ProtocolObject<dyn MTLCommandQueue>, encode: impl FnOnce(&ProtocolObject<dyn MTLBlitCommandEncoder>)) -> Result<(), GpuError> {
+    /// Ends the compute encoder, if any, updating the fence the queue's next
+    /// encoder waits for.
+    fn end_encoder(&mut self) {
         if let Some(enc) = self.encoder.take() {
+            enc.updateFence(&self.fence);
             enc.endEncoding();
         }
-        let blit = self.open(queue)?.cb.blitCommandEncoder().ok_or_else(|| GpuError::Driver("no blit encoder".into()))?;
+    }
+
+    /// `encode` on a blit encoder of the open command buffer, after the
+    /// launches before it.
+    fn blit(&mut self, encode: impl FnOnce(&ProtocolObject<dyn MTLBlitCommandEncoder>)) -> Result<(), GpuError> {
+        self.end_encoder();
+        let blit = self.open()?.cb.blitCommandEncoder().ok_or_else(|| GpuError::Driver("no blit encoder".into()))?;
+        blit.waitForFence(&self.fence);
         encode(&blit);
+        blit.updateFence(&self.fence);
         blit.endEncoding();
+        Ok(())
+    }
+
+    /// Signals `event` with `value` once the queue's work before it has run.
+    fn signal(&mut self, event: &ProtocolObject<dyn MTLSharedEvent>, value: u64) -> Result<(), GpuError> {
+        self.end_encoder();
+        self.open()?.cb.encodeSignalEvent_value(ProtocolObject::from_ref(event), value);
+        Ok(())
+    }
+
+    /// Holds the queue's work after this until `event` reaches `value`.
+    fn wait_for(&mut self, event: &ProtocolObject<dyn MTLSharedEvent>, value: u64) -> Result<(), GpuError> {
+        self.end_encoder();
+        self.open()?.cb.encodeWaitForEvent_value(ProtocolObject::from_ref(event), value);
         Ok(())
     }
 
     /// Commits the open command buffer, if any, without waiting.
     fn commit(&mut self) {
-        if let Some(enc) = self.encoder.take() {
-            enc.endEncoding();
-        }
+        self.end_encoder();
         if let Some(open) = self.open.take() {
             open.cb.commit();
             self.flight.push_back(open);
@@ -355,11 +421,11 @@ impl Stream {
         }
     }
 
-    /// Commits the open command buffer, waits for it, and adds its GPU time
-    /// to kernel `name`'s.
-    fn time_open(&mut self, name: &str) -> Result<(), GpuError> {
+    /// Commits the open command buffer, waits for it, and returns its GPU
+    /// seconds.
+    fn time_open(&mut self) -> Result<f64, GpuError> {
         let Some(serial) = self.open.as_ref().map(|o| o.serial) else {
-            return Ok(());
+            return Ok(0.0);
         };
         self.commit();
         let cb = self.flight.back().expect("the command buffer just committed").cb.clone();
@@ -367,13 +433,41 @@ impl Stream {
         // SAFETY: both take no arguments and return a CFTimeInterval (an
         // f64, seconds); the command buffer has completed.
         let (start, end): (f64, f64) = unsafe { (msg_send![&*cb, GPUStartTime], msg_send![&*cb, GPUEndTime]) };
-        match self.times.get_mut(name) {
-            Some(t) => *t = (t.0 + 1, t.1 + (end - start)),
-            None => {
-                self.times.insert(name.to_string(), (1, end - start));
-            }
+        Ok(end - start)
+    }
+}
+
+impl Streams {
+    fn lane(&mut self, lane: Lane) -> &mut Stream {
+        match lane {
+            Lane::Main => &mut self.main,
+            Lane::Side => &mut self.side,
         }
-        Ok(())
+    }
+
+    /// The side queue's work after this starts after the main queue's
+    /// before it; the main queue's work so far is committed.
+    fn fork(&mut self) -> Result<(), GpuError> {
+        self.signalled += 1;
+        self.main.signal(&self.event, self.signalled)?;
+        self.main.commit();
+        self.side.wait_for(&self.event, self.signalled)
+    }
+
+    /// The main queue's work after this starts after the side queue's
+    /// before it; the side queue's work so far is committed.
+    fn join(&mut self) -> Result<(), GpuError> {
+        self.signalled += 1;
+        self.side.signal(&self.event, self.signalled)?;
+        self.side.commit();
+        self.main.wait_for(&self.event, self.signalled)
+    }
+
+    /// Waits until both queues' work has run; the first error of either.
+    fn wait_all(&mut self) -> Result<(), GpuError> {
+        let main = self.main.wait_until(u64::MAX);
+        let side = self.side.wait_until(u64::MAX);
+        main.and(side)
     }
 }
 
@@ -443,7 +537,16 @@ impl MetalDevice {
                 .into_iter()
                 .find(|(f, _)| device.supportsFamily(*f))
                 .map_or(7, |(_, n)| n);
-            let queue = device.newCommandQueue().ok_or_else(|| GpuError::Driver("no command queue".into()))?;
+            let queue = || device.newCommandQueue().ok_or_else(|| GpuError::Driver("no command queue".into()));
+            let streams = Streams {
+                main: Stream::new(&device, queue()?)?,
+                side: Stream::new(&device, queue()?)?,
+                event: device.newSharedEvent().ok_or_else(|| GpuError::Driver("no shared event".into()))?,
+                signalled: 0,
+                last: Lane::Main,
+                timing: false,
+                times: HashMap::new(),
+            };
             let arch = Arch {
                 name,
                 vendor: crate::Vendor::Apple,
@@ -459,9 +562,9 @@ impl MetalDevice {
             };
             Ok(MetalDevice {
                 device,
-                queue,
                 arch,
-                stream: Mutex::new(Stream { open: None, encoder: None, launches: 0, flight: VecDeque::new(), next: 0, failed: None, timing: false, times: HashMap::new() }),
+                streams: Mutex::new(streams),
+                forks: crate::Forks::default(),
                 modules: Mutex::new(HashMap::new()),
                 capture: Mutex::new(None),
                 pool: Arc::new(Pool::new()),
@@ -470,8 +573,8 @@ impl MetalDevice {
         })
     }
 
-    fn stream(&self) -> MutexGuard<'_, Stream> {
-        self.stream.lock().unwrap_or_else(|e| e.into_inner())
+    fn streams(&self) -> MutexGuard<'_, Streams> {
+        self.streams.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Starts (`true`) or stops (`false`) timing each launch on the GPU,
@@ -488,16 +591,30 @@ impl MetalDevice {
     /// }
     /// ```
     pub fn time_kernels(&self, on: bool) {
-        self.stream().timing = on;
+        self.streams().timing = on;
     }
 
     /// The GPU time of each kernel launched while timing was on, the
     /// largest first; the sums start again from zero.
     pub fn take_kernel_times(&self) -> Vec<KernelTime> {
-        let times = core::mem::take(&mut self.stream().times);
+        let times = core::mem::take(&mut self.streams().times);
         let mut v: Vec<KernelTime> = times.into_iter().map(|(name, (launches, seconds))| KernelTime { name, launches, seconds }).collect();
         v.sort_by(|a, b| b.seconds.total_cmp(&a.seconds).then_with(|| a.name.cmp(&b.name)));
         v
+    }
+
+    /// `op` into the calling thread's open capture (`None`), or, without
+    /// one, back to run now.
+    fn record(&self, op: impl FnOnce() -> Op) -> Option<Op> {
+        let me = std::thread::current().id();
+        let mut capture = self.capture.lock().unwrap_or_else(|e| e.into_inner());
+        match capture.as_mut() {
+            Some((t, ops)) if *t == me => {
+                ops.push(op());
+                None
+            }
+            _ => Some(op()),
+        }
     }
 
     /// Whether the calling thread has a capture open.
@@ -513,10 +630,10 @@ impl MetalDevice {
         Ok(())
     }
 
-    /// A shared buffer of `bytes` (zeroed by Metal).
+    /// A shared buffer of `bytes` (zeroed by Metal), untracked ([`Stream`]).
     fn new_buffer(&self, bytes: usize) -> Result<Buf, GpuError> {
         self.device
-            .newBufferWithLength_options(bytes.max(1), MTLResourceOptions::StorageModeShared)
+            .newBufferWithLength_options(bytes.max(1), BUFFER_OPTIONS)
             .map(Buf)
             .ok_or_else(|| GpuError::Limit(format!("a Metal buffer of {bytes} bytes")))
     }
@@ -547,12 +664,20 @@ impl MetalDevice {
     }
 
     /// Encodes one launch of `kernel` on the open command buffer.
-    fn encode(&self, s: &mut Stream, kernel: &MetalKernel, launch: &Launch, args: &[Bound]) -> Result<(), GpuError> {
-        if s.timing {
+    fn encode(&self, streams: &mut Streams, lane: Lane, kernel: &MetalKernel, launch: &Launch, args: &[Bound]) -> Result<(), GpuError> {
+        if streams.last != lane {
+            // the other lane's work runs while this one's is encoded
+            let last = streams.last;
+            streams.lane(last).commit();
+            streams.last = lane;
+        }
+        let timing = streams.timing;
+        let s = streams.lane(lane);
+        if timing {
             // a command buffer of its own: the copies queued before stay out of its time
             s.commit();
         }
-        let enc = s.encoder(&self.queue)?;
+        let enc = s.encoder()?;
         enc.setComputePipelineState(&kernel.inner.pipeline);
         for (i, a) in args.iter().enumerate() {
             match a {
@@ -571,8 +696,15 @@ impl MetalDevice {
         let size = |x: u32, y: u32, z: u32| MTLSize { width: x as usize, height: y as usize, depth: z as usize };
         enc.dispatchThreadgroups_threadsPerThreadgroup(size(gx, gy, gz), size(bx, by, bz));
         s.launches += 1;
-        if s.timing {
-            s.time_open(&kernel.inner.entry.name)?;
+        if timing {
+            let seconds = s.time_open()?;
+            let name = &kernel.inner.entry.name;
+            match streams.times.get_mut(name) {
+                Some(t) => *t = (t.0 + 1, t.1 + seconds),
+                None => {
+                    streams.times.insert(name.clone(), (1, seconds));
+                }
+            }
         } else if s.launches >= COMMIT_EVERY {
             s.commit();
         }
@@ -619,13 +751,13 @@ impl Device for MetalDevice {
             let block = MetalBlock { mem: Some(mem), len: bytes, pool: self.pool.clone() };
             // a fresh buffer is zeroed; a reused one may still be read by queued work
             if !fresh && bytes > 0 {
-                let mut s = self.stream();
+                let s = &mut self.streams().main;
                 if s.idle() {
                     // SAFETY: `bytes` within the buffer, nothing queued uses it.
                     unsafe { core::ptr::write_bytes(block.buf().ptr(), 0, bytes) };
                 } else {
                     let buf = &block.buf().0;
-                    s.blit(&self.queue, |b| b.fillBuffer_range_value(buf, NSRange::new(0, bytes), 0))?;
+                    s.blit(|b| b.fillBuffer_range_value(buf, NSRange::new(0, bytes), 0))?;
                 }
             }
             Ok(block)
@@ -640,20 +772,18 @@ impl Device for MetalDevice {
             return Ok(());
         }
         autoreleasepool(|_| {
-            let mut s = self.stream();
+            let s = &mut self.streams().main;
             if s.idle() {
                 // SAFETY: within the block; nothing queued uses it.
                 unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst.buf().ptr().add(offset), src.len()) };
                 return Ok(());
             }
             // SAFETY: Metal copies `src` into the new buffer now.
-            let staging = unsafe {
-                self.device.newBufferWithBytes_length_options(NonNull::from(src).cast(), src.len(), MTLResourceOptions::StorageModeShared)
-            }
-            .ok_or_else(|| GpuError::Limit(format!("a Metal staging buffer of {} bytes", src.len())))?;
+            let staging = unsafe { self.device.newBufferWithBytes_length_options(NonNull::from(src).cast(), src.len(), BUFFER_OPTIONS) }
+                .ok_or_else(|| GpuError::Limit(format!("a Metal staging buffer of {} bytes", src.len())))?;
             let to = &dst.buf().0;
             // SAFETY: both ranges within their buffers.
-            s.blit(&self.queue, |b| unsafe { b.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging, 0, to, offset, src.len()) })
+            s.blit(|b| unsafe { b.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging, 0, to, offset, src.len()) })
         })
     }
 
@@ -679,7 +809,7 @@ impl Device for MetalDevice {
         let last = mem.last_use.load(Ordering::Acquire);
         if last > 0 {
             // serials start at 0; last_use holds the serial plus one
-            autoreleasepool(|_| self.stream().wait_until(last - 1))?;
+            autoreleasepool(|_| self.streams().main.wait_until(last - 1))?;
         }
         // SAFETY: the buffer holds `len` bytes, no copy from it pending.
         Ok(unsafe { core::slice::from_raw_parts_mut(mem.buf.ptr(), host.len) })
@@ -694,12 +824,12 @@ impl Device for MetalDevice {
             return Ok(());
         }
         autoreleasepool(|_| {
-            let mut s = self.stream();
+            let s = &mut self.streams().main;
             let mem = host.mem();
             let (from, to) = (&mem.buf.0, &dst.buf().0);
             // SAFETY: both ranges within their buffers; the host block is not
             // written before this command buffer completes (host_mut waits).
-            s.blit(&self.queue, |b| unsafe { b.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(from, range.start, to, offset, range.len()) })?;
+            s.blit(|b| unsafe { b.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(from, range.start, to, offset, range.len()) })?;
             let serial = s.open.as_ref().expect("the blit's command buffer").serial;
             mem.last_use.store(serial + 1, Ordering::Release);
             Ok(())
@@ -713,7 +843,7 @@ impl Device for MetalDevice {
     fn read_many(&self, reads: &mut [(&MetalBlock, usize, &mut [u8])]) -> Result<(), GpuError> {
         crate::fault::check("read")?;
         self.not_capturing("a read")?;
-        autoreleasepool(|_| self.stream().wait_until(u64::MAX))?;
+        autoreleasepool(|_| self.streams().main.wait_until(u64::MAX))?;
         for (src, offset, dst) in reads.iter_mut() {
             assert!(*offset + dst.len() <= src.len, "a read past the block's {} bytes", src.len);
             // SAFETY: within the block; the work before has completed.
@@ -760,7 +890,12 @@ impl Device for MetalDevice {
     }
 
     fn launch(&self, kernel: &MetalKernel, launch: Launch, args: &[Arg<'_, MetalBlock>]) -> Result<(), GpuError> {
+        self.launch_on(Lane::Main, kernel, launch, args)
+    }
+
+    fn launch_on(&self, lane: Lane, kernel: &MetalKernel, launch: Launch, args: &[Arg<'_, MetalBlock>]) -> Result<(), GpuError> {
         crate::fault::check("launch")?;
+        self.forks.check(lane);
         assert!(args.len() <= MAX_ARGS, "a launch takes at most {MAX_ARGS} arguments");
         let entry = &kernel.inner.entry;
         assert_eq!(args.len(), entry.params.len(), "kernel `{}` takes {} arguments", entry.name, entry.params.len());
@@ -789,31 +924,44 @@ impl Device for MetalDevice {
             };
             bound.push(b);
         }
-        {
-            let me = std::thread::current().id();
-            let mut capture = self.capture.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((t, recorded)) = capture.as_mut()
-                && *t == me
-            {
-                recorded.push(Recorded { kernel: kernel.clone(), launch, args: bound });
-                return Ok(());
-            }
+        let recorded = Recorded { kernel: kernel.clone(), launch, args: bound };
+        let Some(recorded) = self.record(|| Op::Launch(lane, recorded)) else {
+            return Ok(());
+        };
+        let Op::Launch(_, r) = recorded else { unreachable!("a launch was offered") };
+        autoreleasepool(|_| self.encode(&mut self.streams(), lane, kernel, &launch, &r.args))
+    }
+
+    fn fork(&self) -> Result<(), GpuError> {
+        crate::fault::check("fork")?;
+        if self.record(|| Op::Fork).is_some() {
+            autoreleasepool(|_| self.streams().fork())?;
         }
-        autoreleasepool(|_| self.encode(&mut self.stream(), kernel, &launch, &bound))
+        self.forks.fork();
+        Ok(())
+    }
+
+    fn join(&self) -> Result<(), GpuError> {
+        crate::fault::check("join")?;
+        self.forks.join();
+        if self.record(|| Op::Join).is_some() {
+            autoreleasepool(|_| self.streams().join())?;
+        }
+        Ok(())
     }
 
     fn sync(&self) -> Result<(), GpuError> {
         crate::fault::check("sync")?;
         self.not_capturing("a wait")?;
-        autoreleasepool(|_| self.stream().wait_until(u64::MAX))
+        autoreleasepool(|_| self.streams().wait_all())
     }
 
     fn capture(&self, record: impl FnOnce() -> Result<(), GpuError>) -> Result<MetalGraph, GpuError> {
         crate::fault::check("capture")?;
         /// Closes the capture on every way out, a panicking recording's too.
-        struct Open<'a>(&'a Mutex<Option<(ThreadId, Vec<Recorded>)>>);
+        struct Open<'a>(&'a Mutex<Option<(ThreadId, Vec<Op>)>>);
         impl Open<'_> {
-            fn take(&self) -> Vec<Recorded> {
+            fn take(&self) -> Vec<Op> {
                 self.0.lock().unwrap_or_else(|e| e.into_inner()).take().map(|(_, r)| r).unwrap_or_default()
             }
         }
@@ -830,20 +978,26 @@ impl Device for MetalDevice {
             *capture = Some((std::thread::current().id(), Vec::new()));
         }
         let open = Open(&self.capture);
+        let forks = self.forks.open();
         let recorded = record();
-        let launches = open.take();
+        let ops = open.take();
         // the recording's error first; an empty recording replays as nothing
         recorded?;
-        Ok(MetalGraph { launches })
+        self.forks.check_capture(forks)?;
+        Ok(MetalGraph { ops })
     }
 
     fn replay(&self, graph: &MetalGraph) -> Result<(), GpuError> {
         crate::fault::check("replay")?;
         self.not_capturing("a replay")?;
         autoreleasepool(|_| {
-            let mut s = self.stream();
-            for r in &graph.launches {
-                self.encode(&mut s, &r.kernel, &r.launch, &r.args)?;
+            let mut s = self.streams();
+            for op in &graph.ops {
+                match op {
+                    Op::Launch(lane, r) => self.encode(&mut s, *lane, &r.kernel, &r.launch, &r.args)?,
+                    Op::Fork => s.fork()?,
+                    Op::Join => s.join()?,
+                }
             }
             Ok(())
         })

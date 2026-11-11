@@ -4,7 +4,7 @@
 use crate::disk::DiskCache;
 use crate::hip_sys::{rt, rtc};
 use crate::pool::{Pool, capacity};
-use crate::{Arch, Arg, Device, GpuError, Launch, MAX_ARGS};
+use crate::{Arch, Arg, Device, GpuError, Lane, Launch, MAX_ARGS};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -63,12 +63,22 @@ fn check_rtc(l: &Libs, e: rtc::hiprtcResult, entry: &str, what: &str) -> Result<
 /// `hipStreamNonBlocking`: the stream does not wait for the legacy default stream.
 const STREAM_NON_BLOCKING: u32 = 1;
 
-/// One HIP device and a stream of its own. HIP's current device is per
-/// thread, so every call sets it first.
+/// One HIP device, a stream of its own and a side stream
+/// ([`Device::launch_on`]). HIP's current device is per thread, so every
+/// call sets it first.
 pub struct HipDevice {
     l: &'static Libs,
     index: i32,
     stream: rt::hipStream_t,
+    /// At the device's highest priority, so its blocks start as soon as the
+    /// main stream's leave room.
+    side: rt::hipStream_t,
+    /// Recorded on the main stream and waited for by the side at a fork.
+    fork_event: rt::hipEvent_t,
+    /// Recorded on the side stream and waited for by the main at a join.
+    join_event: rt::hipEvent_t,
+    /// The side stream's forks open.
+    forks: crate::Forks,
     arch: Arch,
     /// Compiled modules by their full source.
     modules: Mutex<HashMap<String, Arc<HipModule>>>,
@@ -93,11 +103,15 @@ impl core::fmt::Debug for HipDevice {
 
 impl Drop for HipDevice {
     fn drop(&mut self) {
-        // SAFETY: the stream was made in `new` and is destroyed once; an error
-        // here has nobody to go to.
+        // SAFETY: the streams and events were made in `new` and are destroyed
+        // once; an error here has nobody to go to.
         unsafe {
             let _ = self.l.rt.hipSetDevice(self.index);
             let _ = self.l.rt.hipStreamSynchronize(self.stream);
+            let _ = self.l.rt.hipStreamSynchronize(self.side);
+            let _ = self.l.rt.hipEventDestroy(self.fork_event);
+            let _ = self.l.rt.hipEventDestroy(self.join_event);
+            let _ = self.l.rt.hipStreamDestroy(self.side);
             let _ = self.l.rt.hipStreamDestroy(self.stream);
         }
     }
@@ -454,6 +468,13 @@ impl HipDevice {
             check(l, l.rt.hipGetDevicePropertiesR0600(&mut prop, index), "hipGetDeviceProperties")?;
             let mut stream = core::ptr::null_mut();
             check(l, l.rt.hipStreamCreateWithFlags(&mut stream, STREAM_NON_BLOCKING), "hipStreamCreateWithFlags")?;
+            let (mut least, mut highest) = (0, 0);
+            check(l, l.rt.hipDeviceGetStreamPriorityRange(&mut least, &mut highest), "hipDeviceGetStreamPriorityRange")?;
+            let mut side = core::ptr::null_mut();
+            check(l, l.rt.hipStreamCreateWithPriority(&mut side, STREAM_NON_BLOCKING, highest), "hipStreamCreateWithPriority")?;
+            let (mut fork_event, mut join_event) = (core::ptr::null_mut(), core::ptr::null_mut());
+            check(l, l.rt.hipEventCreateWithFlags(&mut fork_event, rt::hipEventDisableTiming), "hipEventCreateWithFlags")?;
+            check(l, l.rt.hipEventCreateWithFlags(&mut join_event, rt::hipEventDisableTiming), "hipEventCreateWithFlags")?;
             // the code object's target: the architecture without its feature flags
             let gcn = field(&prop.gcnArchName);
             let target = gcn.split(':').next().unwrap_or(&gcn).to_string();
@@ -472,6 +493,10 @@ impl HipDevice {
                 l,
                 index,
                 stream,
+                side,
+                fork_event,
+                join_event,
+                forks: crate::Forks::default(),
                 arch,
                 modules: Mutex::new(HashMap::new()),
                 capturing: AtomicBool::new(false),
@@ -699,7 +724,16 @@ impl Device for HipDevice {
     }
 
     fn launch(&self, kernel: &HipKernel, launch: Launch, args: &[Arg<'_, HipBlock>]) -> Result<(), GpuError> {
+        self.launch_on(Lane::Main, kernel, launch, args)
+    }
+
+    fn launch_on(&self, lane: Lane, kernel: &HipKernel, launch: Launch, args: &[Arg<'_, HipBlock>]) -> Result<(), GpuError> {
         crate::fault::check("launch")?;
+        self.forks.check(lane);
+        let stream = match lane {
+            Lane::Main => self.stream,
+            Lane::Side => self.side,
+        };
         assert!(args.len() <= MAX_ARGS, "a launch takes at most {MAX_ARGS} arguments");
         let mut values = [0u64; MAX_ARGS];
         for (slot, arg) in values.iter_mut().zip(args) {
@@ -725,26 +759,60 @@ impl Device for HipDevice {
         // SAFETY: the kernel's parameters are the caller's to match; the
         // argument slots live until the call returns, and the launch only queues.
         let e = unsafe {
-            self.l.rt.hipModuleLaunchKernel(kernel.function, gx, gy, gz, bx, by, bz, launch.shared_bytes, self.stream, params.as_mut_ptr(), core::ptr::null_mut())
+            self.l.rt.hipModuleLaunchKernel(kernel.function, gx, gy, gz, bx, by, bz, launch.shared_bytes, stream, params.as_mut_ptr(), core::ptr::null_mut())
         };
         check(self.l, e, "hipModuleLaunchKernel")
+    }
+
+    /// The side stream waits for an event recorded on the main one; in a
+    /// capture, the wait brings the side stream into it.
+    fn fork(&self) -> Result<(), GpuError> {
+        crate::fault::check("fork")?;
+        self.bind()?;
+        // SAFETY: the device's streams and event.
+        unsafe {
+            check(self.l, self.l.rt.hipEventRecord(self.fork_event, self.stream), "hipEventRecord")?;
+            check(self.l, self.l.rt.hipStreamWaitEvent(self.side, self.fork_event, 0), "hipStreamWaitEvent")?;
+        }
+        self.forks.fork();
+        Ok(())
+    }
+
+    /// The main stream waits for an event recorded on the side one; in a
+    /// capture, the wait joins the side stream back.
+    fn join(&self) -> Result<(), GpuError> {
+        crate::fault::check("join")?;
+        self.forks.join();
+        self.bind()?;
+        // SAFETY: the device's streams and event.
+        unsafe {
+            check(self.l, self.l.rt.hipEventRecord(self.join_event, self.side), "hipEventRecord")?;
+            check(self.l, self.l.rt.hipStreamWaitEvent(self.stream, self.join_event, 0), "hipStreamWaitEvent")
+        }
     }
 
     fn sync(&self) -> Result<(), GpuError> {
         crate::fault::check("sync")?;
         self.not_capturing("a wait")?;
         self.bind()?;
-        // SAFETY: the device's stream.
-        check(self.l, unsafe { self.l.rt.hipStreamSynchronize(self.stream) }, "hipStreamSynchronize")
+        // SAFETY: the device's streams.
+        unsafe {
+            check(self.l, self.l.rt.hipStreamSynchronize(self.stream), "hipStreamSynchronize")?;
+            check(self.l, self.l.rt.hipStreamSynchronize(self.side), "hipStreamSynchronize")
+        }
     }
 
     /// Stream capture in thread-local mode, instantiated and uploaded, as on CUDA.
     fn capture(&self, record: impl FnOnce() -> Result<(), GpuError>) -> Result<HipGraph, GpuError> {
         crate::fault::check("capture")?;
+        let forks = self.forks.open();
         let open = OpenCapture::begin(self)?;
         let recorded = record();
+        // ours first: HIP's own error for a fork not joined says less
+        let joined = self.forks.check_capture(forks);
         let graph = open.end();
         recorded?;
+        joined?;
         let graph = graph?;
         if graph.0.is_null() {
             return Err(GpuError::Capture("the capture recorded nothing".into()));
