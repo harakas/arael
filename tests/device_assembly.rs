@@ -419,6 +419,11 @@ pub struct QCamera<T: Float> {
     pub hb: SelfBlock<QCamera<T>, T>,
 }
 
+/// An observation by a [`QCamera`], its residuals in `with_wide` as the
+/// Euler scene's: computed in f32, the projection's intermediates (a focal
+/// length of 500 times the image coordinates) round each residual by more
+/// than an f32 solve's last steps gain, and the solve stops where the
+/// rounding happens to favour it, up to 2e-4 above the optimum.
 #[arael::model]
 #[arael(constraint(hb, {
     let pc = cam.q.rotation_matrix() * pt.pos + cam.t;
@@ -426,7 +431,7 @@ pub struct QCamera<T: Float> {
     let py = -pc.y / pc.z;
     let r2 = px * px + py * py;
     let d = 1.0 + r2 * (cam.intr.y + cam.intr.z * r2);
-    [cam.intr.x * d * px - qobs.xy.x, cam.intr.x * d * py - qobs.xy.y]
+    [with_wide(cam.intr.x * d * px - qobs.xy.x), with_wide(cam.intr.x * d * py - qobs.xy.y)]
 }))]
 #[derive(Clone)]
 pub struct QObs<T: Float> {
