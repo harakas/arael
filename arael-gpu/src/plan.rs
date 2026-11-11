@@ -334,9 +334,13 @@ impl GpuSupernodalParams {
     /// Measured on an Apple M4 Pro: slower on bundle adjustment reduced
     /// systems, as the two queues' synchronization costs more than the
     /// overlap gains (Metal has no queue priorities, so the side's small
-    /// launches wait for the update's blocks to leave). NVIDIA and AMD GPUs,
-    /// whose side stream runs at the highest priority, are not measured; the
-    /// CPU device has one stream.
+    /// launches wait for the update's blocks to leave). On an NVIDIA
+    /// discrete GPU it pays only on the widest supernodes: with `syrk_block`
+    /// 256, Ladybug-1723's reduced system factors 8% faster in f32 and 1% in
+    /// f64, the smaller bundle adjustment systems 3 to 10% slower and SLAM
+    /// systems (up to 12000 poses) up to 1.5% slower; in blocks of 32, the
+    /// default there, it is always slower. On an AMD integrated GPU it is up
+    /// to 1% slower. The CPU device has one stream.
     ///
     /// ```ignore
     /// let lookahead = GpuSupernodalParams::default().lookahead_on(dev.arch());

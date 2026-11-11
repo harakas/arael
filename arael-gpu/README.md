@@ -207,8 +207,12 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
   on the main stream while the next block's steps run on the side stream,
   so their chain of small launches overlaps it. Unset, off: slower on an
   Apple M4 Pro, where the two queues' synchronization costs more than the
-  overlap gains. NVIDIA and AMD GPUs, whose side stream runs at the highest
-  priority, are not measured.
+  overlap gains. On an NVIDIA discrete GPU it pays only on the widest
+  supernodes: with `syrk_block` 256, Ladybug-1723's reduced system factors
+  8% faster in `f32` and 1% in `f64`, while the smaller bundle adjustment
+  systems factor 3 to 10% slower and SLAM systems up to 1.5% slower; in
+  blocks of 32, the default there, it is always slower. On an AMD
+  integrated GPU, with 2 compute units to fill, it is up to 1% slower.
 
 `GpuSchurParams` (`GpuSchur::with_params`), for the forming of S, which
 takes a tile of S per lockstep unit (a warp or a wavefront):
