@@ -59,6 +59,9 @@ pub(crate) trait GpuSolver<T>: Send {
     fn drop_reduction(&mut self);
     /// Whether a reduction is built.
     fn reduces(&self) -> bool;
+    /// Whether the reduction computes in f32
+    /// (`GpuSchurParams::f32_reduction`).
+    fn f32_reduction(&self) -> bool;
     /// One damped solve on the device from the damped H's tile values and
     /// the gradient, refined under `refine` (`(max_steps, tolerance)`), the
     /// step into `delta`; `None` when an eliminated block or S is not

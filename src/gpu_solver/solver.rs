@@ -27,6 +27,8 @@ pub(crate) struct DeviceSolver<T, D: Device> {
     wide: Wide,
     /// Where the device assembly's image is written before it is copied.
     staging: crate::device::Staging,
+    /// The reduction in f32 (`GpuSchurParams::f32_reduction`).
+    f32_reduction: bool,
 }
 
 /// The device assembly of the reduced route and the LM loop's vectors
@@ -66,7 +68,8 @@ fn on_device<V>(r: Result<V, GpuError>, operation: &'static str) -> Result<V, De
 impl<T, D: Device> DeviceSolver<T, D> {
     /// The factor of `sn`, the analysis of the block structure `asym`, in
     /// `precision`, on `dev`; the reduction and the route built after it
-    /// work in `wide`, the route's image staged in `staging`.
+    /// work in `wide`, the route's image staged in `staging`, the reduction
+    /// in f32 with `f32_reduction`.
     pub fn new(
         dev: &Arc<D>,
         precision: GpuPrecision,
@@ -74,9 +77,10 @@ impl<T, D: Device> DeviceSolver<T, D> {
         asym: &SymbolicSparseBlockColMat<SparseIndex>,
         wide: Wide,
         staging: crate::device::Staging,
+        f32_reduction: bool,
     ) -> Result<Self, GpuError> {
         let factor = GpuFactor::new(dev, precision, sn, asym, &Default::default(), wide)?;
-        Ok(DeviceSolver { route: None, schur: None, factor, wide, staging })
+        Ok(DeviceSolver { route: None, schur: None, factor, wide, staging, f32_reduction })
     }
 }
 
@@ -180,8 +184,9 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         // the old blocks go first, so the device holds one structure's at a time
         self.drop_reduction();
         let dev = self.factor.device();
+        let params = arael_gpu::GpuSchurParams { f32_reduction: self.f32_reduction, ..Default::default() };
         self.schur = Some(match schur {
-            Some(s) => GpuSchur::new(dev, s, hsym, self.wide)?,
+            Some(s) => GpuSchur::with_params(dev, s, hsym, self.wide, &params)?,
             None => GpuSchur::whole(dev, hsym, self.wide)?,
         });
         Ok(())
@@ -194,6 +199,10 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
 
     fn reduces(&self) -> bool {
         self.schur.is_some()
+    }
+
+    fn f32_reduction(&self) -> bool {
+        self.schur.as_ref().is_some_and(|s| s.f32_reduction())
     }
 
     fn solve_reduced(&mut self, hvals: &[T], grad: &[T], refine: Option<(usize, f64)>, delta: &mut [T]) -> Result<Option<RefineStats>, DeviceFailure> {

@@ -4768,6 +4768,7 @@ pub struct GpuDevice {
     pub index: usize,
     wide: GpuWide,
     staging: GpuStaging,
+    wide_schur: bool,
     #[cfg(feature = "gpu-cuda")]
     cuda: DeviceSlot<arael_gpu::cuda::CudaDevice>,
     #[cfg(feature = "gpu-hip")]
@@ -4807,6 +4808,7 @@ impl GpuDevice {
             index,
             wide: if backend.has_f64() { GpuWide::F64 } else { GpuWide::Df32 },
             staging: GpuStaging::Pinned,
+            wide_schur: false,
             #[cfg(feature = "gpu-cuda")]
             cuda: Default::default(),
             #[cfg(feature = "gpu-hip")]
@@ -4881,6 +4883,28 @@ impl GpuDevice {
     /// Where the device assembly's image is staged ([`Self::with_staging`]).
     pub fn staging(&self) -> GpuStaging {
         self.staging
+    }
+
+    /// The device with an f32 solve's reduced system formed in the wide
+    /// values ([`Self::with_wide`]: df32 or f64) instead of f32 (`on`): S
+    /// more precise than the CPU's f32 route forms it, at more cost. Off by
+    /// default: an f32 solve without [`MixedPrecision`] forms S in f32, as
+    /// on the CPU. An f64 solve, and one with [`MixedPrecision`] (whose
+    /// refinement measures its residuals against S), always forms it in the
+    /// wide values.
+    ///
+    /// ```ignore
+    /// let gpu = GpuDevice::cuda(0).with_wide_schur(true);
+    /// ```
+    pub fn with_wide_schur(mut self, on: bool) -> Self {
+        self.wide_schur = on;
+        self
+    }
+
+    /// Whether an f32 solve forms its reduced system in the wide values
+    /// ([`Self::with_wide_schur`]).
+    pub fn wide_schur(&self) -> bool {
+        self.wide_schur
     }
 
     /// The process's shared state of device `index` of `backend`: every
@@ -5546,6 +5570,11 @@ pub struct SchurPlan {
     /// ([`SparseFaerOptions::with_gpu_assembly`]). Only ever true with
     /// [`gpu_factor`](Self::gpu_factor) on the reduced route.
     pub gpu_assembly: bool,
+    /// Whether the GPU formed the reduced system in f32, as the CPU's f32
+    /// route: an f32 solve without [`MixedPrecision`], unless
+    /// [`GpuDevice::with_wide_schur`]. Only ever true with
+    /// [`gpu_factor`](Self::gpu_factor) on the reduced route.
+    pub gpu_f32_reduction: bool,
     /// Refinement steps summed over the solve, when the factor was single
     /// precision; `None` otherwise. Divided by the attempt count, what each
     /// damped solve took on top of its factorization.
@@ -5739,6 +5768,18 @@ impl<T> SnNumeric<T> {
         }
     }
 
+    /// Whether the reduced system is formed on a GPU in f32.
+    fn gpu_f32_reduction(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu_solver.as_ref().is_some_and(|g| g.f32_reduction())
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            false
+        }
+    }
+
     /// Whether the factor is on a GPU.
     fn gpu_active(&self) -> bool {
         #[cfg(feature = "gpu")]
@@ -5800,15 +5841,16 @@ fn gpu_setup_failed(operation: &'static str, e: arael_gpu::GpuError) -> SolveFai
     SolveFailureKind::Device(DeviceFailure { operation, message: e.to_string() })
 }
 
-/// The device factor of `sn` on `dev`'s runtime;
-/// [`SetupError::SolverUnavailable`] when that runtime is not compiled in,
-/// [`SolveFailureKind::Device`] when it cannot be set up.
+/// The device factor of `sn` on `dev`'s runtime, its reduction in f32 with
+/// `f32_reduction`; [`SetupError::SolverUnavailable`] when that runtime is
+/// not compiled in, [`SolveFailureKind::Device`] when it cannot be set up.
 #[cfg(feature = "gpu")]
 fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
     dev: &GpuDevice,
     precision: arael_gpu::GpuPrecision,
     sn: &arael_faer::supernodal::SupernodalSymbolic,
     asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+    f32_reduction: bool,
 ) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SolveFailureKind> {
     #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
     let wide = match dev.wide() {
@@ -5824,48 +5866,48 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
         #[cfg(feature = "gpu-cuda")]
         GpuBackend::Cuda => {
             let made = device_in(&dev.cuda, || arael_gpu::cuda::CudaDevice::new(dev.index));
-            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging));
+            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging, f32_reduction));
             report_kernel_cache();
             Ok(Box::new(solver.map_err(|e| gpu_setup_failed("setup of the CUDA factor", e))?))
         }
         #[cfg(not(feature = "gpu-cuda"))]
         GpuBackend::Cuda => {
-            let _ = (precision, sn, asym);
+            let _ = (precision, sn, asym, f32_reduction);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the CUDA runtime is not compiled in (feature gpu-cuda)" }.into())
         }
         #[cfg(feature = "gpu-hip")]
         GpuBackend::Hip => {
             let made = device_in(&dev.hip, || arael_gpu::hip::HipDevice::new(dev.index));
-            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging));
+            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging, f32_reduction));
             report_kernel_cache();
             Ok(Box::new(solver.map_err(|e| gpu_setup_failed("setup of the HIP factor", e))?))
         }
         #[cfg(not(feature = "gpu-hip"))]
         GpuBackend::Hip => {
-            let _ = (precision, sn, asym);
+            let _ = (precision, sn, asym, f32_reduction);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the HIP runtime is not compiled in (feature gpu-hip)" }.into())
         }
         #[cfg(feature = "gpu-cpu")]
         GpuBackend::Cpu => {
             let made = device_in(&dev.cpu, || arael_gpu::cpu::CpuDevice::new(dev.index));
-            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging));
+            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging, f32_reduction));
             report_kernel_cache();
             Ok(Box::new(solver.map_err(|e| gpu_setup_failed("setup of the CPU device's factor", e))?))
         }
         #[cfg(not(feature = "gpu-cpu"))]
         GpuBackend::Cpu => {
-            let _ = (precision, sn, asym);
+            let _ = (precision, sn, asym, f32_reduction);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the CPU device is not compiled in (feature gpu-cpu)" }.into())
         }
         #[cfg(gpu_metal)]
         GpuBackend::Metal => {
             let made = device_in(&dev.metal, || arael_gpu::metal::MetalDevice::new(dev.index));
-            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging));
+            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging, f32_reduction));
             Ok(Box::new(solver.map_err(|e| gpu_setup_failed("setup of the Metal factor", e))?))
         }
         #[cfg(not(gpu_metal))]
         GpuBackend::Metal => {
-            let _ = (precision, sn, asym);
+            let _ = (precision, sn, asym, f32_reduction);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the Metal runtime is not compiled in (feature gpu-metal, on an Apple target)" }.into())
         }
     }
@@ -5935,7 +5977,10 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
             self.gpu_solver = None;
             metal_supports::<T>(dev, self.mixed.is_some())?;
             let precision = device_precision::<T>(self.mixed.is_some());
-            self.gpu_solver = Some(device_solver(dev, precision, sn, asym)?);
+            // as the CPU's f32 route, unless the wide values are asked for; a
+            // refinement measures its residuals against S, so not with one
+            let f32_reduction = precision == arael_gpu::GpuPrecision::F32 && self.mixed.is_none() && !dev.wide_schur();
+            self.gpu_solver = Some(device_solver(dev, precision, sn, asym, f32_reduction)?);
             Ok(())
         }
         #[cfg(not(feature = "gpu"))]
@@ -6687,6 +6732,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             f32_factor: false,
             gpu_factor: false,
             gpu_assembly: false,
+            gpu_f32_reduction: false,
             refinements: None,
             refinement_shortfalls: None,
         });
@@ -6924,6 +6970,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             f32_factor: self.sn_num.mixed.is_some(),
             gpu_factor: self.sn_num.gpu_active(),
             gpu_assembly: false,
+            gpu_f32_reduction: false,
             refinements: None,
             refinement_shortfalls: None,
         });
@@ -7344,6 +7391,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 f32_factor: false,
                 gpu_factor: false,
                 gpu_assembly: false,
+                gpu_f32_reduction: false,
                 refinements: None,
                 refinement_shortfalls: None,
             });
@@ -7465,6 +7513,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 f32_factor: false,
                 gpu_factor: false,
                 gpu_assembly: false,
+                gpu_f32_reduction: false,
                 refinements: None,
                 refinement_shortfalls: None,
             });
@@ -7831,6 +7880,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             f32_factor: false,
             gpu_factor: self.sn_num.gpu_active(),
             gpu_assembly: false,
+            gpu_f32_reduction: false,
             refinements: None,
             refinement_shortfalls: None,
         });
@@ -8174,6 +8224,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.rhs_kept.resize(nk, T::zero());
         self.x_kept.resize(nk, T::zero());
         self.sn_num.prepare_schur(&schur, &hsym, self.sn_active && !iterative)?;
+        if let Some(plan) = self.plan.as_mut() {
+            plan.gpu_f32_reduction = self.sn_num.gpu_f32_reduction();
+        }
         // The device route forms S on the device and never reads a host copy.
         self.s = if self.sn_num.gpu_reduces() { None } else { s };
         self.schur = Some(schur);

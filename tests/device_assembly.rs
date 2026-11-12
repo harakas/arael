@@ -396,6 +396,39 @@ fn an_f32_solve_through_the_device_assembly_reaches_the_optimum() {
     }
 }
 
+/// An f32 solve forms its reduced system in f32, as the CPU's f32 route,
+/// or in the wide values with `GpuDevice::with_wide_schur`: either lands on
+/// the f64 model's optimum to 1e-4. An f64 solve with `MixedPrecision`,
+/// whose refinement measures its residuals against S, forms it in the wide
+/// values whatever the option.
+#[test]
+fn an_f32_solve_reaches_the_optimum_with_s_in_f32_or_in_the_wide_values() {
+    let optimum = consistent_optimum();
+    for d in f32_devices() {
+        for wide_schur in [false, true] {
+            let gpu = d.clone().with_wide_schur(wide_schur);
+            let (cameras, points, observations) = consistent_scene::<f32>();
+            let mut s = SceneF { cameras, points, observations };
+            let mut x = Vec::new();
+            s.serialize(&mut x);
+            let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&options(Some(&gpu), true));
+            let c = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &to_the_optimum()).unwrap().end_cost as f64;
+            assert!((c - optimum).abs() <= 1e-4 * optimum, "{}, wide S {wide_schur}: {c} against the optimum {optimum}", label(&d));
+            assert_eq!(solver.plan().unwrap().gpu_f32_reduction, !wide_schur, "{}", label(&d));
+            let (cameras, points, observations) = consistent_scene::<f64>();
+            let mut s = Scene { cameras, points, observations };
+            let mut x = Vec::new();
+            s.serialize(&mut x);
+            let refined = options(Some(&gpu), true).with_mixed_precision(Some(arael::simple_lm::MixedPrecision::default()));
+            let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&refined);
+            let c = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &to_the_optimum()).unwrap().end_cost;
+            assert!((c - optimum).abs() <= 1e-9 * optimum, "{}, wide S {wide_schur}, refined: {c} against the optimum {optimum}", label(&d));
+            let plan = solver.plan().unwrap();
+            assert!(plan.gpu_factor && !plan.gpu_f32_reduction, "{}: a refined solve's S is wide", label(&d));
+        }
+    }
+}
+
 #[test]
 fn a_root_with_a_constraint_without_a_device_form_says_which() {
     let mut points = refs::Vec::new();
