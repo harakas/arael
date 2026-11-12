@@ -100,7 +100,9 @@ pub fn mixed_precision() -> Option<arael::simple_lm::MixedPrecision> {
 /// (`GpuWide::Df32`), `f64` in f64, unset the device's default (df32 on
 /// Metal, else f64). ARAEL_GPU_STAGING=pageable stages the device
 /// assembly's image in ordinary memory (`GpuStaging::Pageable`), `pinned`
-/// or unset in pinned memory. The binary needs arael's `gpu-cuda`,
+/// or unset in pinned memory. ARAEL_GPU_WIDE_SCHUR=1 forms an f32 row's
+/// reduced system in the wide values (`GpuDevice::with_wide_schur`), `0`
+/// or unset in f32. The binary needs arael's `gpu-cuda`,
 /// `gpu-hip` or `gpu-metal` feature. Every solver of the process gets a
 /// clone of one device, so they share its stream and memory as repeated
 /// solves in an application would.
@@ -129,7 +131,12 @@ pub fn gpu() -> Option<arael::simple_lm::GpuDevice> {
                 Ok("pageable") => arael::simple_lm::GpuStaging::Pageable,
                 Ok(other) => panic!("ARAEL_GPU_STAGING={other}: expected pinned or pageable"),
             };
-            Some(device.with_wide(wide).with_staging(staging))
+            let wide_schur = match std::env::var("ARAEL_GPU_WIDE_SCHUR").as_deref() {
+                Err(_) | Ok("0") => false,
+                Ok("1") => true,
+                Ok(other) => panic!("ARAEL_GPU_WIDE_SCHUR={other}: expected 0 or 1"),
+            };
+            Some(device.with_wide(wide).with_staging(staging).with_wide_schur(wide_schur))
         })
         .clone()
 }
@@ -317,10 +324,24 @@ where
     I: arael_faer::faer::Index,
     P: ::arael::simple_lm::RootProblem<f64> + ::arael::simple_lm::LmProblemInternals<f64>,
 {
-    use ::arael::simple_lm::LmProblemInternals as _;
+    hessian_in::<I, f64, P>(problem)
+}
+
+/// [`hessian`] in the model's scalar `T`: an f32 model's Hessian as its
+/// solve assembles it.
+///
+/// ```ignore
+/// let (h, grad, partition) = bench_harness::arael::hessian_in::<u32, f32, _>(&mut model);
+/// ```
+pub fn hessian_in<I, T, P>(problem: &mut P) -> (arael_faer::bsc::SparseBlockColMat<I, T>, Vec<T>, Vec<usize>)
+where
+    I: arael_faer::faer::Index,
+    T: ::arael::utils::Float + arael_faer::schur::SchurReal,
+    P: ::arael::simple_lm::RootProblem<T> + ::arael::simple_lm::LmProblemInternals<T>,
+{
     use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
     let mut ctx = ::arael::threads::Context::new();
-    let mut params: Vec<f64> = Vec::new();
+    let mut params: Vec<T> = Vec::new();
     problem.serialize(&mut params);
     let n = params.len();
     let mut spans = Vec::new();
@@ -337,17 +358,18 @@ where
         &mut positions,
         &mut ctx,
     );
-    let mut h = SparseBlockColMat::<I, f64>::zeroed(hsym);
-    let mut grad = vec![0.0; n];
+    let mut h = SparseBlockColMat::<I, T>::zeroed(hsym);
+    let mut grad = vec![T::zero(); n];
     problem.calc_grad_hessian_sparse_indexed(&params, &mut grad, h.vals_mut(), &positions, &mut ctx);
     // the structure once: cloned per block, it made this quadratic
     let hs = h.symbolic().clone();
+    let damp = T::one() + T::from(1e-8).unwrap();
     for b in 0..partition.len() - 1 {
         let w = partition[b + 1] - partition[b];
         let d = hs.col_range(b).find(|&x| hs.blk_row(x) == b).expect("every block has its diagonal tile");
         let base = hs.val_range(d).start;
         for k in 0..w {
-            h.vals_mut()[base + k * (w + 1)] *= 1.0 + 1e-8;
+            h.vals_mut()[base + k * (w + 1)] *= damp;
         }
     }
     (h, grad, partition)
