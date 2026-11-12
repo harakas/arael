@@ -287,8 +287,11 @@ views are named by their container's nature: `PathPosesDeque`,
   (`GpuStaging` Pinned / Pageable) writes the device assembly's image
   into pinned host memory (asynchronous copies, the default) or into
   ordinary memory (for platforms where copies from pinned memory are
-  slow). The plan's
-  `gpu_factor` and `gpu_assembly` report which ran. The interface must
+  slow). An f32 solve without `mixed_precision` forms the reduced system
+  in f32, as the CPU's f32 route; `gpu_wide_schur` forms it in the wide
+  values instead (more precise, off by default). The plan's
+  `gpu_factor`, `gpu_assembly` and `gpu_f32_reduction` report which ran.
+  The interface must
   be built with the runtime: the CMake cache variable `ARAEL_GPU`
   (`cuda`, `hip`, `metal` or `cpu`) builds the capi crate with the
   feature of that name (`gpu-cuda`, `gpu-hip`, `gpu-metal`, `gpu-cpu`);

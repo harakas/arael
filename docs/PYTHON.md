@@ -396,9 +396,11 @@ f64 matrix; the plan's `f32_factor`, `refinements` and
 `refinement_shortfalls` report it), and the GPU: `gpu` (`GpuBackend`
 NONE / CUDA / HIP / CPU / METAL; CPU is the CPU running the GPU kernels)
 with `gpu_index`, `gpu_assembly`, `gpu_wide` (`GpuWide` F64 / DF32 /
-DEFAULT, the default: the device's own, df32 on Metal, else f64) and
-`gpu_staging` (`GpuStaging` PINNED / PAGEABLE), as in the C++ interface
-(docs/CXX.md). Metal has no f64 (`GpuBackend.METAL.has_f64` is false):
+DEFAULT, the default: the device's own, df32 on Metal, else f64),
+`gpu_staging` (`GpuStaging` PINNED / PAGEABLE) and `gpu_wide_schur` (an
+f32 solve's reduced system in the wide values instead of f32, off by
+default; the plan's `gpu_f32_reduction` reports an f32 one), as in the
+C++ interface (docs/CXX.md). Metal has no f64 (`GpuBackend.METAL.has_f64` is false):
 an f64 model on it needs `mixed_precision`, and `GpuWide.F64` fails the
 solve with `SolverUnavailable`. The cdylib must be built with the
 runtime's feature (`cargo build --release -p <crate>-capi --features

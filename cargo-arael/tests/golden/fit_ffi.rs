@@ -512,6 +512,9 @@ pub struct CSparseOptions {
     /// Where the device assembly's image is staged (GpuStaging): 0 pinned,
     /// 1 pageable.
     pub gpu_staging: u32,
+    /// An f32 solve's reduced system in the wide values instead of f32
+    /// (GpuDevice::with_wide_schur; off by default).
+    pub gpu_wide_schur: bool,
 }
 
 impl CSparseOptions {
@@ -583,7 +586,7 @@ impl CSparseOptions {
                 0 => arael::simple_lm::GpuStaging::Pinned,
                 1 => arael::simple_lm::GpuStaging::Pageable,
                 t => panic!("unknown gpu_staging tag {t}"),
-            })))
+            }).with_wide_schur(self.gpu_wide_schur)))
             .with_gpu_assembly(self.gpu_assembly);
         let cg = arael::simple_lm::CgParams {
             tol: self.cg_tol,
@@ -667,6 +670,7 @@ pub unsafe extern "C" fn fit_sparse_options(out: *mut CSparseOptions) {
             None | Some(arael::simple_lm::GpuStaging::Pinned) => 0,
             Some(arael::simple_lm::GpuStaging::Pageable) => 1,
         },
+        gpu_wide_schur: d.gpu.as_ref().is_some_and(|g| g.wide_schur()),
     };
 }
 
@@ -1017,6 +1021,8 @@ pub struct CSchurPlan {
     /// Whether the factorization ran on the GPU, and the assembly too.
     pub gpu_factor: bool,
     pub gpu_assembly: bool,
+    /// Whether the GPU formed the reduced system in f32.
+    pub gpu_f32_reduction: bool,
 }
 
 unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
@@ -1072,6 +1078,7 @@ unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
         },
         gpu_factor: p.gpu_factor,
         gpu_assembly: p.gpu_assembly,
+        gpu_f32_reduction: p.gpu_f32_reduction,
     };
 }
 

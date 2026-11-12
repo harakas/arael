@@ -338,6 +338,9 @@ class SparseOptions(ctypes.Structure):
         ("_gpu_wide", ctypes.c_uint32),
         # Where the device assembly's image is staged (GpuStaging).
         ("_gpu_staging", ctypes.c_uint32),
+        # An f32 solve's reduced system in the GPU's wide values instead
+        # of f32, as the CPU's f32 route forms it. Off by default.
+        ("gpu_wide_schur", ctypes.c_bool),
     ]
 
     schur = _enum_property("_schur", SchurPolicy)
@@ -399,7 +402,8 @@ class SchurPlan(ctypes.Structure):
     refinement steps summed over the solve and `refinement_shortfalls`
     the damped solves that ended above the tolerance; `gpu_factor` and
     `gpu_assembly` that the factorization and the assembly ran on the
-    GPU; optional statistics read as None when absent."""
+    GPU, `gpu_f32_reduction` that the GPU formed the reduced system in
+    f32; optional statistics read as None when absent."""
     _fields_ = [
         ("reduced", ctypes.c_bool),
         ("eliminated_blocks", ctypes.c_uint32),
@@ -418,6 +422,7 @@ class SchurPlan(ctypes.Structure):
         ("_refinement_shortfalls", _OptU32),
         ("gpu_factor", ctypes.c_bool),
         ("gpu_assembly", ctypes.c_bool),
+        ("gpu_f32_reduction", ctypes.c_bool),
     ]
 
     fill_ratio = _plan_opt("_fill_ratio", float)
