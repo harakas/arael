@@ -240,3 +240,84 @@ pub fn ba_like(np: usize, nl: usize, seed: u64) -> (SparseBlockColMat<SparseInde
     let eliminated: Vec<usize> = (0..nblk).filter(|&b| is_landmark(b)).collect();
     (a, dense, rhs, eliminated)
 }
+
+/// A bundle adjustment's Gauss-Newton Hessian `J^T J` on [`ba_like`]'s
+/// structure, its diagonal damped by `1 + lambda`. An observation is two
+/// residual rows over its pose and its landmark, an odometry coupling six
+/// over its two poses. A landmark's rows scale one direction of its columns
+/// by `eps`, as for a point seen along nearly parallel rays, so its block's
+/// condition number is about `min(1 / eps^2, 1 / lambda)`. Returns the
+/// matrix (upper stored), the right-hand side `J^T r` for random residuals
+/// `r`, and the landmark block ids.
+pub fn ba_ill_conditioned(np: usize, nl: usize, eps: f64, lambda: f64, seed: u64) -> (SparseBlockColMat<SparseIndex, f64>, Vec<f64>, Vec<usize>) {
+    let (mut a, _, mut rhs, eliminated) = ba_like(np, nl, seed);
+    let sym = a.symbolic().clone();
+    let nblk = sym.nblk_cols();
+    let mut landmark = vec![false; nblk];
+    for &b in &eliminated {
+        landmark[b] = true;
+    }
+    let width = |b: usize| sym.col_span(b).len();
+    let tile = |r: usize, c: usize| sym.val_range(sym.col_range(c).find(|&b| sym.blk_row(b) == r).expect("a stored tile")).start;
+    let mut rng = Lcg(seed ^ 0x9e37_79b9_7f4a_7c15);
+    // per landmark, I + (eps - 1) u u^T for a random unit u: its columns'
+    // scaling, column-major
+    let mut scale: Vec<Vec<f64>> = vec![Vec::new(); nblk];
+    for &b in &eliminated {
+        let w = width(b);
+        let mut u: Vec<f64> = (0..w).map(|_| rng.unit()).collect();
+        let norm = u.iter().map(|v| v * v).sum::<f64>().sqrt();
+        u.iter_mut().for_each(|v| *v /= norm);
+        scale[b] = (0..w * w).map(|k| f64::from(k % w == k / w) + (eps - 1.0) * u[k % w] * u[k / w]).collect();
+    }
+    // J_r^T J_c into the tile (r, c), r <= c; each J column-major, m rows
+    let add = |a: &mut SparseBlockColMat<SparseIndex, f64>, r: usize, jr: &[f64], c: usize, jc: &[f64], m: usize| {
+        let (wr, wc, base) = (width(r), width(c), tile(r, c));
+        for cc in 0..wc {
+            for rr in 0..wr {
+                if r == c && rr > cc {
+                    continue;
+                }
+                let v: f64 = (0..m).map(|k| jr[k + rr * m] * jc[k + cc * m]).sum();
+                a.vals_mut()[base + rr + cc * wr] += v;
+            }
+        }
+    };
+    a.vals_mut().fill(0.0);
+    rhs.fill(0.0);
+    for c in 0..nblk {
+        for b in sym.col_range(c) {
+            let r = sym.blk_row(b);
+            if r == c {
+                continue;
+            }
+            let m = if landmark[r] || landmark[c] { 2 } else { 6 };
+            let mut jac = |blk: usize| -> Vec<f64> {
+                let g: Vec<f64> = (0..m * width(blk)).map(|_| rng.unit()).collect();
+                if !landmark[blk] {
+                    return g;
+                }
+                let (w, s) = (width(blk), &scale[blk]);
+                (0..m * w).map(|k| (0..w).map(|i| g[k % m + i * m] * s[i + (k / m) * w]).sum()).collect()
+            };
+            let (jr, jc) = (jac(r), jac(c));
+            add(&mut a, r, &jr, r, &jr, m);
+            add(&mut a, c, &jc, c, &jc, m);
+            add(&mut a, r, &jr, c, &jc, m);
+            let res: Vec<f64> = (0..m).map(|_| rng.unit()).collect();
+            for (blk, j) in [(r, &jr), (c, &jc)] {
+                let off = sym.col_span(blk).start;
+                for k in 0..width(blk) {
+                    rhs[off + k] += (0..m).map(|i| j[i + k * m] * res[i]).sum::<f64>();
+                }
+            }
+        }
+    }
+    for b in 0..nblk {
+        let (w, base) = (width(b), tile(b, b));
+        for k in 0..w {
+            a.vals_mut()[base + k * (w + 1)] *= 1.0 + lambda;
+        }
+    }
+    (a, rhs, eliminated)
+}

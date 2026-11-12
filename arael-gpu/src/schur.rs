@@ -3,12 +3,13 @@
 //! the refinement and the back-substitution.
 //!
 //! Formed in the route's wide scalar ([`Wide`]: `f64` or df32) whatever the
-//! matrix's scalar (docs/dev/GPU.md, E2: `f32` cannot form S, the
-//! cancelling sums lose their operands' digits). Per reduction, from the
-//! Hessian's tile values and the gradient:
+//! matrix's scalar, as an f32 factor's refinement measures its residuals
+//! against S, or in f32 for an f32 solve that does not refine, as the CPU's
+//! f32 route ([`GpuSchurParams::f32_reduction`]).
+//! Per reduction, from the Hessian's tile values and the gradient:
 //!
-//!   elim      one unit per eliminated block: `D_e^-1` through its Cholesky
-//!             factor, and `z_e = D_e^-1 b_e`
+//!   elim      one unit per eliminated block: the Cholesky factor of `D_e`,
+//!             and `z_e = D_e^-1 b_e`
 //!   w         one unit per observer: `W_o = C_o D_e^-1`
 //!   tiles     one plane per tile of S: `S(a, b) = H(a, b) - sum over the
 //!             pairs (oa, ob) of its list of W_oa C_ob^T`, the pair lists
@@ -16,6 +17,11 @@
 //!   rhs       one plane per kept block: `b_k - sum over its observers of
 //!             C_o z_e`
 //!   backsub   one unit per eliminated block: `x_e = D_e^-1 (b_e - sum_a C_a^T x_a)`
+//!
+//! `D_e^-1` is applied by two triangular solves with its factor, as on the
+//! CPU, never as an explicit inverse: multiplying by a rounded inverse loses
+//! digits in proportion to `D_e`'s condition number, high for a point seen
+//! along nearly parallel rays.
 //!
 //! A block symv over the tiles of S gives the refinement its residual on the
 //! device, and one-block norm kernels decide there whether the next step is
@@ -40,7 +46,7 @@ pub(crate) const SE_DIAG_OFF: usize = 0;
 pub(crate) const SE_W: usize = 1;
 pub(crate) const SE_ORIG_OFF: usize = 2;
 pub(crate) const SE_OBS_PTR: usize = 3;
-pub(crate) const SE_DINV_OFF: usize = 4;
+pub(crate) const SE_DFAC_OFF: usize = 4;
 pub(crate) const SE_Z_OFF: usize = 5;
 pub(crate) const SO_CA_OFF: usize = 6;
 pub(crate) const SO_TRANS: usize = 7;
@@ -94,6 +100,13 @@ pub struct GpuSchurParams {
     /// than one, else one (measured: two on SLAM, one on bundle
     /// adjustment; four slower than two on both).
     pub tile_groups: Option<u32>,
+    /// Whether the reduction computes in f32, as the CPU's f32 route: the
+    /// eliminated blocks' factors, W, S, the reduced right-hand side and the
+    /// eliminated blocks' step, from the inputs rounded to f32, the values
+    /// stored in the wide scalar's buffers. For a solve whose factor is f32
+    /// and that does not refine against S: a refined solve panics. Off: in
+    /// the wide scalar.
+    pub f32_reduction: bool,
 }
 
 impl GpuSchurParams {
@@ -115,7 +128,7 @@ impl GpuSchurParams {
 
 impl Default for GpuSchurParams {
     fn default() -> Self {
-        GpuSchurParams { tile_warps: None, split_pairs: 128, tile_groups: None }
+        GpuSchurParams { tile_warps: None, split_pairs: 128, tile_groups: None, f32_reduction: false }
     }
 }
 
@@ -211,9 +224,10 @@ pub(crate) struct SchurPlan {
     /// The Hessian's scalar dimension, and the reduced system's.
     pub n: usize,
     pub nks: usize,
-    /// Values of S, of the block inverses, of z and of W.
+    /// Values of S, of the eliminated blocks' Cholesky factors, of z and of
+    /// W.
     pub s_len: usize,
-    pub dinv_len: usize,
+    pub dfac_len: usize,
     pub z_len: usize,
     pub w_len: usize,
     /// The widest eliminated block, and it and the widest kept block
@@ -282,8 +296,8 @@ impl SchurPlan {
         let nks = sym.s.nrows();
         let hpart = hsym.col_part();
         // the eliminated blocks
-        let (mut e_diag, mut e_w, mut e_orig, mut e_dinv, mut e_z, mut elim_blk) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let (mut dinv_len, mut z_len) = (0u32, 0u32);
+        let (mut e_diag, mut e_w, mut e_orig, mut e_dfac, mut e_z, mut elim_blk) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut dfac_len, mut z_len) = (0u32, 0u32);
         let mut ew_max = 1usize;
         for slot in 0..ne {
             let dblk = sym.elim_diag[slot] as usize;
@@ -293,10 +307,10 @@ impl SchurPlan {
             e_diag.push(hsym.val_range(dblk).start as u32);
             e_w.push(we as u32);
             e_orig.push(hpart[e]);
-            e_dinv.push(dinv_len);
+            e_dfac.push(dfac_len);
             e_z.push(z_len);
             elim_blk.push(e as u32);
-            dinv_len += (we * we) as u32;
+            dfac_len += (we * we) as u32;
             z_len += we as u32;
         }
         let e_obs_ptr: Vec<u32> = sym.elim_obs_ptr.to_vec();
@@ -403,7 +417,7 @@ impl SchurPlan {
             (SE_W, &e_w),
             (SE_ORIG_OFF, &e_orig),
             (SE_OBS_PTR, &e_obs_ptr),
-            (SE_DINV_OFF, &e_dinv),
+            (SE_DFAC_OFF, &e_dfac),
             (SE_Z_OFF, &e_z),
             (SO_CA_OFF, &o_ca),
             (SO_TRANS, &o_trans),
@@ -462,7 +476,7 @@ impl SchurPlan {
             n,
             nks,
             s_len: ssym.val_count(),
-            dinv_len: dinv_len as usize,
+            dfac_len: dfac_len as usize,
             z_len: z_len as usize,
             w_len: w_len as usize,
             ew_max,
@@ -543,7 +557,7 @@ struct Sections {
     /// The Hessian's tile values and the gradient, f64.
     h: usize,
     rhs: usize,
-    dinv: usize,
+    dfac: usize,
     z: usize,
     w: usize,
     s: usize,
@@ -559,7 +573,8 @@ struct Sections {
 
 /// The device plan of a [`SchurSymbolic`] and the device state of one
 /// reduction on a [`Device`]: the Hessian's values and gradient as
-/// uploaded, the block inverses, W, S and the reduced right-hand side, the
+/// uploaded, the eliminated blocks' Cholesky factors, W, S and the reduced
+/// right-hand side, the
 /// solution. Every device buffer is made in [`new`](Self::new): the plan in
 /// one block, uploaded in one copy, and the rest in a work block.
 pub struct GpuSchur<D: Device> {
@@ -571,6 +586,8 @@ pub struct GpuSchur<D: Device> {
     replayed: bool,
     dev: Arc<D>,
     wide: Wide,
+    /// [`GpuSchurParams::f32_reduction`].
+    f32_reduction: bool,
     k: Kernels<D::Kernel>,
     /// The plan words (at 0, as the plan's header offsets require), then a
     /// word holding 1, at `on`: the gate of kernels that always run; then
@@ -645,10 +662,11 @@ impl<D: Device> GpuSchur<D> {
         // its barrier is the block's
         let warps = if lanes == dev.arch().warp { params.tile_warps_on(dev.arch()) } else { 1 };
         let groups = params.tile_groups.unwrap_or_else(|| tile_groups(&p.words, p.nt as usize, lanes));
-        let widths = TileWidths { kw_cap: p.kw_cap, ew_cap: p.ew_cap, kw_max: p.kw_max, ew_max: p.ew_max, lanes };
+        let elem = if params.f32_reduction { 4 } else { 8 };
+        let widths = TileWidths { kw_cap: p.kw_cap, ew_cap: p.ew_cap, kw_max: p.kw_max, ew_max: p.ew_max, lanes, elem };
         let set = (params.tile_warps.is_some() && lanes == dev.arch().warp, params.tile_groups.is_some());
         let (tile_warps, tile_groups, tile_shared) = fit_tiles(&widths, (warps, groups), set, dev.arch().shared_bytes)?;
-        let defines = format!("{}{}", wide.defines(), defines(&p, lanes, tile_warps, tile_groups));
+        let defines = format!("{}#define SCHUR_F32 {}\n{}", wide.defines(), params.f32_reduction as u32, defines(&p, lanes, tile_warps, tile_groups));
         let (kt_ptr_words, kt_words) = tiles_by_kept_block(&p);
         let mut pk = Packer { words: p.words };
         let blocks = tile_blocks(&pk.words, p.nt as usize, tile_warps as usize, params.split_pairs);
@@ -666,9 +684,9 @@ impl<D: Device> GpuSchur<D> {
         let sec = Sections {
             h: l.take(nh * f),
             rhs: l.take(p.n * f),
-            dinv: l.take(p.dinv_len * f),
-            z: l.take(p.z_len * f),
-            w: l.take(p.w_len * f),
+            dfac: l.take(p.dfac_len * elem),
+            z: l.take(p.z_len * elem),
+            w: l.take(p.w_len * elem),
             s: l.take(p.s_len * f),
             rhs_kept: l.take(p.nks * f),
             x_kept: l.take(p.nks * f),
@@ -689,6 +707,7 @@ impl<D: Device> GpuSchur<D> {
             replayed: false,
             dev: dev.clone(),
             wide,
+            f32_reduction: params.f32_reduction,
             k,
             ints,
             on,
@@ -755,6 +774,12 @@ impl<D: Device> GpuSchur<D> {
     /// The scalar of H, the gradient, S and the reduction's vectors.
     pub fn wide(&self) -> Wide {
         self.wide
+    }
+
+    /// Whether the reduction computes in f32
+    /// ([`GpuSchurParams::f32_reduction`]).
+    pub fn f32_reduction(&self) -> bool {
+        self.f32_reduction
     }
 
     /// The reduced right-hand side on the device, [`kept_size`](Self::kept_size) values.
@@ -844,9 +869,9 @@ impl<D: Device> GpuSchur<D> {
         let (s, plan) = (&self.sec, Arg::Block(&self.ints, 0));
         let w = |at: usize| Arg::Block(&self.work, at);
         self.run(&self.k.zero_u32, 1, PLANE, &[w(self.flag_at(0)), Arg::U32(N_FLAGS as u32)])?;
-        let elim = [plan, w(s.h), w(s.rhs), w(s.dinv), w(s.z), w(self.flag_at(F_ELIM)), Arg::U32(self.ne)];
+        let elim = [plan, w(s.h), w(s.rhs), w(s.dfac), w(s.z), w(self.flag_at(F_ELIM)), Arg::U32(self.ne)];
         self.run(&self.k.elim, self.ne.div_ceil(THREADS), THREADS, &elim)?;
-        self.run(&self.k.w, (self.no * self.w_rows).div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.dinv), w(s.w), Arg::U32(self.no)])?;
+        self.run(&self.k.w, (self.no * self.w_rows).div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.dfac), w(s.w), Arg::U32(self.no)])?;
         self.run_shared(&self.k.tiles, self.tile_blocks, self.lanes * self.tile_warps, self.tile_shared, &[plan, w(s.h), w(s.w), w(s.s)])?;
         self.run(&self.k.rhs, self.nk, PLANE, &[plan, w(s.h), w(s.rhs), w(s.z), w(s.rhs_kept)])
     }
@@ -889,6 +914,7 @@ impl<D: Device> GpuSchur<D> {
     /// back-substitution. The same sequence every time for the same factor
     /// and refinement, which is what makes it a graph.
     fn launch_attempt(&self, factor: &GpuFactor<D>, max_steps: usize, tol_rel: f64) -> Result<(), GpuError> {
+        assert!(!(self.f32_reduction && max_steps > 0), "a refinement measures its residuals against S, which GpuSchurParams::f32_reduction forms in f32");
         self.launch_reduce()?;
         let (s, plan) = (&self.sec, Arg::Block(&self.ints, 0));
         let w = |at: usize| Arg::Block(&self.work, at);
@@ -922,7 +948,7 @@ impl<D: Device> GpuSchur<D> {
         }
         // the kept blocks into the full vector, then the eliminated ones
         self.run(&self.k.scatter_kept, self.nk.div_ceil(THREADS), THREADS, &[plan, w(s.x_kept), w(s.out), Arg::U32(self.nk)])?;
-        self.run(&self.k.backsub, self.ne.div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.rhs), w(s.dinv), w(s.out), Arg::U32(self.ne)])
+        self.run(&self.k.backsub, self.ne.div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.rhs), w(s.dfac), w(s.out), Arg::U32(self.ne)])
     }
 
     /// One damped solve, entirely on the device, waiting once: form S and
@@ -1095,17 +1121,20 @@ struct TileWidths {
     kw_max: usize,
     ew_max: usize,
     lanes: u32,
+    /// Bytes of a value as the reduction computes: 8 in the wide scalar
+    /// (f64 or df32), 4 in f32 ([`GpuSchurParams::f32_reduction`]).
+    elem: usize,
 }
 
 /// `k_schur_tiles`' shared memory a block, in bytes, at `warps` units of
 /// `groups` lane groups: the groups' W_oa and C_ob (`KW x EW` each) and the
-/// units' sums of a split tile, all in W (8 bytes, f64 or df32).
+/// units' sums of a split tile, `elem` bytes each.
 ///
 /// Kept blocks of 9 columns, eliminated of 3 (`KW` 16, `EW` 4), on 32
-/// lanes, 1 unit of 1 group: 8 (2 x 64 + 3 x 32) = 1792.
+/// lanes, 1 unit of 1 group, in the wide scalar: 8 (2 x 64 + 3 x 32) = 1792.
 fn tiles_shared_bytes(w: &TileWidths, warps: u32, groups: u32) -> usize {
     let unit = 2 * groups as usize * w.kw_cap * w.ew_cap + tile_acc(w.kw_max, w.lanes, groups) * (w.lanes / groups) as usize;
-    8 * warps as usize * unit
+    w.elem * warps as usize * unit
 }
 
 /// The units per block and lane groups of `k_schur_tiles` that fit
@@ -1195,7 +1224,7 @@ fn defines(p: &SchurPlan, lanes: u32, tile_warps: u32, tile_groups: u32) -> Stri
             ("SE_W", SE_W),
             ("SE_ORIG_OFF", SE_ORIG_OFF),
             ("SE_OBS_PTR", SE_OBS_PTR),
-            ("SE_DINV_OFF", SE_DINV_OFF),
+            ("SE_DFAC_OFF", SE_DFAC_OFF),
             ("SE_Z_OFF", SE_Z_OFF),
             ("SO_CA_OFF", SO_CA_OFF),
             ("SO_TRANS", SO_TRANS),
@@ -1236,11 +1265,12 @@ mod tests {
     use super::*;
     use crate::GpuPrecision;
     use crate::TestDevice;
-    use crate::test_util::{ba_like, precisions, rel_residual, wide, wides};
+    use crate::test_util::{ba_ill_conditioned, ba_like, precisions, rel_residual, wide, wides};
     use arael_faer::schur::{SchurContext, schur_reduce, schur_symbolic};
     use arael_faer::supernodal::{SupernodalParams, SupernodalSymbolic, nd_block_order};
 
     type Matrix = arael_faer::bsc::SparseBlockColMat<SparseIndex, f64>;
+    type Matrix32 = arael_faer::bsc::SparseBlockColMat<SparseIndex, f32>;
 
     fn device() -> Arc<TestDevice> {
         Arc::new(TestDevice::new(0).unwrap())
@@ -1288,13 +1318,15 @@ mod tests {
     /// or one unit of one group that does not, is a limit error.
     #[test]
     fn the_tiles_fit_the_shared_memory_or_say_why_not() {
-        let ba = TileWidths { kw_cap: 16, ew_cap: 4, kw_max: 9, ew_max: 3, lanes: 32 };
+        let ba = TileWidths { kw_cap: 16, ew_cap: 4, kw_max: 9, ew_max: 3, lanes: 32, elem: 8 };
         assert_eq!(tiles_shared_bytes(&ba, 1, 1), 1792);
+        // f32 products: half
+        assert_eq!(tiles_shared_bytes(&TileWidths { elem: 4, ..ba }, 1, 1), 896);
         let b = |w: &TileWidths, warps, groups| tiles_shared_bytes(w, warps, groups) as u32;
         assert_eq!(fit_tiles(&ba, (4, 2), (false, false), 32 * 1024).unwrap(), (4, 2, b(&ba, 4, 2)), "fits as wanted");
         // kept blocks of 20 columns, eliminated of 32: a unit of two groups
         // over 32 KB, of one under it
-        let wide = TileWidths { kw_cap: 32, ew_cap: 32, kw_max: 20, ew_max: 20, lanes: 32 };
+        let wide = TileWidths { kw_cap: 32, ew_cap: 32, kw_max: 20, ew_max: 20, lanes: 32, elem: 8 };
         assert!(b(&wide, 1, 2) > 32 * 1024 && b(&wide, 1, 1) < 32 * 1024);
         assert_eq!(fit_tiles(&wide, (4, 2), (false, false), 32 * 1024).unwrap(), (1, 1, b(&wide, 1, 1)), "units, then groups");
         assert_eq!(fit_tiles(&wide, (4, 2), (false, false), 48 * 1024).unwrap(), (1, 2, b(&wide, 1, 2)), "units alone");
@@ -1305,7 +1337,7 @@ mod tests {
         let e = fit_tiles(&wide, (4, 2), (false, true), 32 * 1024).unwrap_err();
         assert!(matches!(&e, GpuError::Limit(m) if m.contains("tile_warps 1 and tile_groups 2")), "{e}");
         // blocks of 40 columns: one unit of one group over 64 KB
-        let widest = TileWidths { kw_cap: 64, ew_cap: 64, kw_max: 40, ew_max: 40, lanes: 32 };
+        let widest = TileWidths { kw_cap: 64, ew_cap: 64, kw_max: 40, ew_max: 40, lanes: 32, elem: 8 };
         let e = fit_tiles(&widest, (1, 1), (false, false), 64 * 1024).unwrap_err();
         assert!(
             matches!(&e, GpuError::Limit(m) if m.contains("one unit of one lane group") && m.contains("kept blocks of 40 and eliminated blocks of 40 columns")),
@@ -1342,7 +1374,7 @@ mod tests {
             let es = err_max(&g.download().unwrap().0, s_cpu.vals());
             assert!(es < 1e-12, "{wide:?}, {} units of {} groups: S err/max {es}", g.tile_warps(), g.tile_groups());
         }
-        let w = TileWidths { kw_cap: 32, ew_cap: 16, kw_max: 20, ew_max: 10, lanes: dev.arch().warp.max(PLANE) };
+        let w = TileWidths { kw_cap: 32, ew_cap: 16, kw_max: 20, ew_max: 10, lanes: dev.arch().warp.max(PLANE), elem: 8 };
         if w.lanes == dev.arch().warp {
             let warps = limit / tiles_shared_bytes(&w, 1, 1) as u32 + 1;
             let params = GpuSchurParams { tile_warps: Some(warps), tile_groups: Some(1), ..Default::default() };
@@ -1358,7 +1390,7 @@ mod tests {
     fn the_widest_blocks_reduce_or_are_a_limit_error() {
         let (h, rhs, sym) = checkerboard(3, 40, 40);
         let dev = device();
-        let w = TileWidths { kw_cap: 64, ew_cap: 64, kw_max: 40, ew_max: 40, lanes: dev.arch().warp.max(PLANE) };
+        let w = TileWidths { kw_cap: 64, ew_cap: 64, kw_max: 40, ew_max: 40, lanes: dev.arch().warp.max(PLANE), elem: 8 };
         let need = tiles_shared_bytes(&w, 1, 1);
         match GpuSchur::new(&dev, &sym, h.symbolic(), wide(&*dev)) {
             Err(GpuError::Limit(m)) => assert!(need > dev.arch().shared_bytes as usize, "{m}"),
@@ -1399,6 +1431,168 @@ mod tests {
         let r64: Vec<f64> = r32.iter().map(|&v| v as f64).collect();
         g.reduce(&h64, &r64).unwrap();
         assert_eq!(s32, g.download().unwrap().0, "f32 inputs are their f64 twins");
+    }
+
+    /// Point blocks of condition numbers near 1e8, a direction of each
+    /// almost unobserved (as for a point seen along nearly parallel rays)
+    /// and bounded by the damping: S and the reduced right-hand side are
+    /// the CPU's, and the back-substitution's points solve their rows, to
+    /// the wide scalar's rounding.
+    #[test]
+    fn ill_conditioned_point_blocks_reduce_and_solve_as_on_the_cpu() {
+        let dev = device();
+        let (h, rhs, elim) = ba_ill_conditioned(30, 200, 1e-8, 1e-8, 3);
+        let hs = h.symbolic();
+        let sym = schur_symbolic(hs, &elim).unwrap();
+        let sn = SupernodalSymbolic::new(&sym.s, Some(&nd_block_order(&sym.s)), &SupernodalParams::default()).unwrap();
+        let mut s_cpu = sym.alloc_s::<f64>();
+        let mut rhs_cpu = vec![0.0f64; sym.kept_size()];
+        schur_reduce(&sym, &h, &rhs, &mut SchurContext::new(), &mut s_cpu, &mut rhs_cpu).unwrap();
+        for wide in wides(&*dev) {
+            // multiplying by D's rounded inverse: 1e-9 in f64, 1e-7 in df32
+            let tol = if wide == Wide::F64 { 1e-14 } else { 1e-12 };
+            let mut g = GpuSchur::new(&dev, &sym, hs, wide).unwrap();
+            g.reduce(h.vals(), &rhs).unwrap();
+            let (s, r) = g.download().unwrap();
+            let (es, er) = (err_max(&s, s_cpu.vals()), err_max(&r, &rhs_cpu));
+            let (precision, refine, _) = solve_settings(&dev)[0];
+            let mut f = factor(&dev, precision, &sn, &sym.s, wide);
+            let mut delta = vec![0.0f64; hs.ncols()];
+            g.solve(&mut f, h.vals(), &rhs, refine, &mut delta).unwrap();
+            let eb = point_residual(&h, &sym, &elim, &rhs, &delta);
+            assert!(es < tol && er < tol && eb < tol, "{wide:?}: S err/max {es}, rhs err/max {er}, points' residual {eb}");
+        }
+    }
+
+    /// [`ill_conditioned_point_blocks_reduce_and_solve_as_on_the_cpu`] in
+    /// f32, at f32's scales (condition numbers near 1e4): the f32 reduction
+    /// is the CPU's f32 reduction's to its rounding and solves.
+    #[test]
+    fn ill_conditioned_point_blocks_reduce_in_f32_as_on_the_cpu() {
+        let dev = device();
+        let (h, rhs, elim) = ba_ill_conditioned(30, 200, 1e-3, 1e-4, 3);
+        let hs = h.symbolic();
+        let sym = schur_symbolic(hs, &elim).unwrap();
+        let sn = SupernodalSymbolic::new(&sym.s, Some(&nd_block_order(&sym.s)), &SupernodalParams::default()).unwrap();
+        let h32 = Matrix32::new(hs.clone(), h.vals().iter().map(|&v| v as f32).collect());
+        let r32: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
+        let mut s_cpu32 = sym.alloc_s::<f32>();
+        let mut rhs_cpu32 = vec![0.0f32; sym.kept_size()];
+        schur_reduce(&sym, &h32, &r32, &mut SchurContext::new(), &mut s_cpu32, &mut rhs_cpu32).unwrap();
+        let (s_cpu32, rhs_cpu32): (Vec<f64>, Vec<f64>) = (s_cpu32.vals().iter().map(|&v| v as f64).collect(), rhs_cpu32.iter().map(|&v| v as f64).collect());
+        let h64 = Matrix::new(hs.clone(), h32.vals().iter().map(|&v| v as f64).collect());
+        let r64: Vec<f64> = r32.iter().map(|&v| v as f64).collect();
+        for wide in wides(&*dev) {
+            let params = GpuSchurParams { f32_reduction: true, ..Default::default() };
+            let mut g = GpuSchur::with_params(&dev, &sym, hs, wide, &params).unwrap();
+            g.reduce(h32.vals(), &r32).unwrap();
+            let (s, r) = g.download().unwrap();
+            let (es, er) = (err_max(&s, &s_cpu32), err_max(&r, &rhs_cpu32));
+            let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
+            let mut delta = vec![0.0f64; hs.ncols()];
+            g.solve(&mut f, h64.vals(), &r64, None, &mut delta).unwrap();
+            let eb = point_residual(&h64, &sym, &elim, &r64, &delta);
+            assert!(es < 2e-5 && er < 2e-5 && eb < 1e-6, "{wide:?}: S err/max {es}, rhs err/max {er}, points' residual {eb}");
+        }
+    }
+
+    /// The worst point's `|D_e x_e - t_e| / (|D_e| |x_e| + |t_e|)` (max
+    /// norms), `t_e = b_e - sum C_o^T x_o` over its observers: how well the
+    /// step's points solve their rows given its kept blocks.
+    fn point_residual(h: &Matrix, sym: &SchurSymbolic<SparseIndex>, elim: &[usize], rhs: &[f64], x: &[f64]) -> f64 {
+        let (hs, hv) = (h.symbolic(), h.vals());
+        let mut worst = 0.0f64;
+        for (slot, &e) in elim.iter().enumerate() {
+            let we = sym.elim_w()[slot] as usize;
+            let off = hs.col_span(e).start;
+            let mut t: Vec<f64> = rhs[off..off + we].to_vec();
+            for o in sym.elim_obs_ptr()[slot] as usize..sym.elim_obs_ptr()[slot + 1] as usize {
+                let (wo, ca, xo) = (sym.obs_w()[o] as usize, sym.obs_ca_off()[o] as usize, sym.obs_orig_off()[o] as usize);
+                for (k, tk) in t.iter_mut().enumerate() {
+                    for i in 0..wo {
+                        let c = if sym.obs_trans()[o] { hv[ca + k + i * we] } else { hv[ca + i + k * wo] };
+                        *tk -= c * x[xo + i];
+                    }
+                }
+            }
+            let diag = hs.val_range(sym.elim_diag()[slot] as usize).start;
+            let d = |i: usize, j: usize| if i <= j { hv[diag + i + j * we] } else { hv[diag + j + i * we] };
+            let xe = &x[off..off + we];
+            let (mut res, mut dn) = (0.0f64, 0.0f64);
+            for i in 0..we {
+                let row: f64 = (0..we).map(|j| d(i, j) * xe[j]).sum();
+                res = res.max((row - t[i]).abs());
+                dn = dn.max((0..we).map(|j| d(i, j).abs()).sum());
+            }
+            let xn = xe.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            let tn = t.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            worst = worst.max(res / (dn * xn + tn));
+        }
+        worst
+    }
+
+    /// The f32 reduction is the CPU's f32 route: from f32 inputs, S and the
+    /// reduced right-hand side are f32 values, the CPU's f32 reduction's to
+    /// its rounding and the exact reduction's to single precision, on split
+    /// and grouped tiles and on wide blocks, in either wide scalar; a solve
+    /// through them solves the system to single precision.
+    #[test]
+    fn the_f32_reduction_reduces_as_the_cpu_in_f32() {
+        let dev = device();
+        let (h, dense, rhs, elim) = ba_like(40, 300, 5);
+        let n = h.symbolic().ncols();
+        let ba = (h.clone(), rhs, schur_symbolic(h.symbolic(), &elim).unwrap());
+        for (fixture, (h, rhs, sym)) in [ba, checkerboard(5, 10, 20)].into_iter().enumerate() {
+            let h32 = Matrix32::new(h.symbolic().clone(), h.vals().iter().map(|&v| v as f32).collect());
+            let r32: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
+            let mut s_cpu32 = sym.alloc_s::<f32>();
+            let mut rhs_cpu32 = vec![0.0f32; sym.kept_size()];
+            schur_reduce(&sym, &h32, &r32, &mut SchurContext::new(), &mut s_cpu32, &mut rhs_cpu32).unwrap();
+            let (s_cpu32, rhs_cpu32): (Vec<f64>, Vec<f64>) = (s_cpu32.vals().iter().map(|&v| v as f64).collect(), rhs_cpu32.iter().map(|&v| v as f64).collect());
+            // the exact reduction of the f32 inputs
+            let h64 = Matrix::new(h.symbolic().clone(), h32.vals().iter().map(|&v| v as f64).collect());
+            let r64: Vec<f64> = r32.iter().map(|&v| v as f64).collect();
+            let mut s_exact = sym.alloc_s::<f64>();
+            let mut rhs_exact = vec![0.0f64; sym.kept_size()];
+            schur_reduce(&sym, &h64, &r64, &mut SchurContext::new(), &mut s_exact, &mut rhs_exact).unwrap();
+            for wide in wides(&*dev) {
+                for (groups, split_pairs) in [(1, 128), (2, 128), (1, 1)] {
+                    let params = GpuSchurParams { f32_reduction: true, tile_groups: Some(groups), split_pairs, ..Default::default() };
+                    let mut g = GpuSchur::with_params(&dev, &sym, h.symbolic(), wide, &params).unwrap();
+                    g.reduce(h32.vals(), &r32).unwrap();
+                    let (s, r) = g.download().unwrap();
+                    let at = (fixture, wide, groups, split_pairs);
+                    assert!(s.iter().chain(&r).all(|&v| v as f32 as f64 == v), "{at:?}: S and the right-hand side hold f32 values");
+                    let (es, er) = (err_max(&s, &s_cpu32), err_max(&r, &rhs_cpu32));
+                    assert!(es < 1e-6 && er < 1e-6, "{at:?}: against the CPU's f32 reduction, S err/max {es}, rhs err/max {er}");
+                    let (es, er) = (err_max(&s, s_exact.vals()), err_max(&r, &rhs_exact));
+                    assert!(es < 1e-6 && er < 1e-6, "{at:?}: against the exact reduction, S err/max {es}, rhs err/max {er}");
+                    if fixture == 0 {
+                        let sn = SupernodalSymbolic::new(&sym.s, Some(&nd_block_order(&sym.s)), &SupernodalParams::default()).unwrap();
+                        let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
+                        let mut delta = vec![0.0f64; n];
+                        g.solve(&mut f, h64.vals(), &r64, None, &mut delta).unwrap();
+                        let res = rel_residual(&dense, n, &delta, &rhs);
+                        assert!(res < 1e-5, "{at:?}: residual {res}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A refinement measures its residuals against S: refining against an
+    /// S formed in f32 is refused.
+    #[test]
+    #[should_panic(expected = "f32_reduction")]
+    fn a_refined_solve_through_the_f32_reduction_panics() {
+        let (h, _, rhs, _, sym, sn) = setup(10, 30, 2);
+        let dev = device();
+        let wide = wide(&*dev);
+        let params = GpuSchurParams { f32_reduction: true, ..Default::default() };
+        let mut g = GpuSchur::with_params(&dev, &sym, h.symbolic(), wide, &params).unwrap();
+        let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
+        let mut delta = vec![0.0f64; h.symbolic().ncols()];
+        let _ = g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut delta);
     }
 
     /// Tiles split over a block's units (every tile of more than one pair)

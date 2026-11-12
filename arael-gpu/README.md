@@ -16,7 +16,10 @@ On a device:
   solve, in `f64` or `f32` (which arael refines against the f64 matrix);
 - `GpuSchur`: the Schur reduction from the Hessian's tile values and the
   gradient, then the factorization, the solve, the refinement and the
-  back-substitution, waiting for the device once, for the result;
+  back-substitution, waiting for the device once, for the result. Each
+  eliminated block is applied through its Cholesky factor, as on the CPU,
+  not through an explicit inverse, which loses digits on ill-conditioned
+  blocks (points seen along nearly parallel rays);
 - `LmVectors`: the LM loop's vector passes (the trial point, the norms,
   the damping, the predicted reduction).
 
@@ -231,3 +234,9 @@ takes a tile of S per lockstep unit (a warp or a wavefront):
   NVIDIA discrete and an AMD integrated GPU two groups form SLAM's 6 x 6
   tiles in 20% and 11% less time than one, and bundle adjustment's 9 x 9
   tiles in 3% and 15% more. Four groups are slower than two on both.
+- `f32_reduction`: whether the reduction computes in f32, as the CPU's f32
+  route (the eliminated blocks' factors, W, S, the reduced right-hand side
+  and the eliminated blocks' step), for a solve with an f32 factor that
+  does not refine against S. Off: in the wide scalar. arael turns it on
+  for an f32 solve, unless `GpuDevice::with_wide_schur` keeps the wide
+  scalar.
