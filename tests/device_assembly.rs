@@ -2937,7 +2937,6 @@ fn cost_terms() -> (refs::Vec<CTerm<f32>>, f64) {
 /// which.
 #[test]
 fn an_f32_root_s_cost_sums_on_the_device_as_its_keywords_say() {
-    use arael::__gpu::DeviceRoot;
     fn cost_of<P: LmProblemInternals<f32> + RootProblem<f32>>(s: &mut P, wide: arael::__gpu::Wide) -> arael::__gpu::DeviceCheck {
         let mut x = Vec::new();
         s.serialize(&mut x);
