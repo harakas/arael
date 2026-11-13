@@ -880,10 +880,10 @@ impl<D: Device> GpuSchur<D> {
         assert_eq!(rhs.len(), self.n);
         let values = self.values;
         self.conv.clear();
-        hvals.iter().for_each(|v| values.push(v.to_f64(), &mut self.conv));
+        values.extend(hvals.iter().map(|v| v.to_f64()), &mut self.conv);
         self.dev.write(&mut self.work, self.sec.h, &self.conv)?;
         self.conv.clear();
-        rhs.iter().for_each(|v| values.push(v.to_f64(), &mut self.conv));
+        values.extend(rhs.iter().map(|v| v.to_f64()), &mut self.conv);
         self.dev.write(&mut self.work, self.sec.rhs, &self.conv)
     }
 

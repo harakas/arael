@@ -257,8 +257,21 @@ impl Values {
 
     /// [`encode`](Self::encode) appended to `out`.
     pub fn encode_into(self, v: &[f64], out: &mut Vec<u8>) {
-        for &x in v {
-            self.push(x, out);
+        self.extend(v.iter().copied(), out);
+    }
+
+    /// The values of `v` appended to `out` in one pass, for an upload of
+    /// many values: [`push`](Self::push) per value is several times slower.
+    ///
+    /// ```ignore
+    /// values.extend(hvals.iter().map(|v| v.to_f64()), &mut bytes);
+    /// ```
+    pub fn extend(self, v: impl Iterator<Item = f64>, out: &mut Vec<u8>) {
+        if self.f32 {
+            out.extend(v.flat_map(|x| (x as f32).to_le_bytes()));
+        } else {
+            let wide = self.wide;
+            out.extend(v.flat_map(|x| wide.bits(x).to_le_bytes()));
         }
     }
 
@@ -692,5 +705,32 @@ impl Layout {
     /// The block's size.
     pub fn bytes(&self) -> usize {
         self.at
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`Values::extend`] writes the bytes [`Values::push`] writes a value
+    /// at a time, in each scalar, and they decode back to the values the
+    /// scalar holds.
+    #[test]
+    fn values_extend_as_push_does() {
+        let v = [0.1, 1.0 / 3.0, -2.5e7, 0.0, f64::INFINITY, 1e-30];
+        for values in [Values::from(Wide::F64), Values::from(Wide::Df32), Values::f32(Wide::Df32)] {
+            let mut one = Vec::new();
+            v.iter().for_each(|&x| values.push(x, &mut one));
+            let mut all = vec![7u8];
+            values.extend(v.iter().copied(), &mut all);
+            assert_eq!(all[1..], one[..], "{values:?}");
+            assert_eq!(values.encode(&v), one, "{values:?}");
+            let mut back = [0.0; 6];
+            values.decode(&one, &mut back);
+            for (b, x) in back.iter().zip(v) {
+                let held = if values.is_f32() { x as f32 as f64 } else { values.wide().value(values.wide().bits(x)) };
+                assert_eq!(*b, held, "{values:?}");
+            }
+        }
     }
 }
