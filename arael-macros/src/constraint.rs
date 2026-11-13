@@ -10487,7 +10487,7 @@ pub fn generate_root_methods(
                 quote! { #(#walks)* }
             };
             let idx_fill = |ty: &str, acc: &TokenStream2, out: &syn::Ident| store_idx_stmts(ty, acc, out).1;
-            let (items, cpp) = crate::device::device_root(root_name, precision, &device_constraints, &groups, &entity_walk, &idx_fill);
+            let (items, cpp) = crate::device::device_root(root_name, precision, cost_f64, &device_constraints, &groups, &entity_walk, &idx_fill);
             crate::device::dump_kernels(&root_str, Ok(&cpp)).map_err(|e| syn::Error::new(root_name.span(), e))?;
             (items, quote! { None }, quote! {
                 ::arael::__gpu_items! {

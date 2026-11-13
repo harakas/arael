@@ -283,6 +283,8 @@ pub(crate) struct DevRef {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefKind {
     Euler,
+    /// A `MixedEulerAngleParam`: its reference in the wide scalar.
+    MixedEuler,
     Quaternion,
     Transform,
     UnitVec,
@@ -304,8 +306,11 @@ impl RefKind {
     /// The kind of the field `field` of the registered type `ty`.
     fn of(ty: &str, field: &str) -> Option<RefKind> {
         let l = crate::registry_lookup(ty)?;
-        if l.universal_euler_angle_fields.iter().any(|f| f == field) || l.mixed_euler_angle_fields.iter().any(|(f, _)| f == field) {
+        if l.universal_euler_angle_fields.iter().any(|f| f == field) {
             return Some(RefKind::Euler);
+        }
+        if l.mixed_euler_angle_fields.iter().any(|(f, _)| f == field) {
+            return Some(RefKind::MixedEuler);
         }
         if l.universal_rotvec_fields.iter().any(|f| f == field) {
             return Some(RefKind::Quaternion);
@@ -329,7 +334,7 @@ impl RefKind {
     /// `values` and `derivatives`).
     fn widths(self) -> (usize, usize) {
         match self {
-            RefKind::Euler | RefKind::Quaternion | RefKind::SimpleEuler => (9, 27),
+            RefKind::Euler | RefKind::MixedEuler | RefKind::Quaternion | RefKind::SimpleEuler => (9, 27),
             RefKind::Transform => (12, 45),
             RefKind::UnitVec => (3, 6),
         }
@@ -339,7 +344,7 @@ impl RefKind {
     /// suffixes: (the first's, the others' with their offsets).
     fn step(self) -> (&'static str, &'static [(&'static str, usize)]) {
         match self {
-            RefKind::Euler | RefKind::Quaternion => ("delta.x", &[("delta.y", 1), ("delta.z", 2)]),
+            RefKind::Euler | RefKind::MixedEuler | RefKind::Quaternion => ("delta.x", &[("delta.y", 1), ("delta.z", 2)]),
             RefKind::Transform => ("w.work().x", &[("w.work().y", 1), ("w.work().z", 2), ("d.work().x", 3), ("d.work().y", 4), ("d.work().z", 5)]),
             RefKind::UnitVec => ("d.work().x", &[("d.work().y", 1)]),
             RefKind::SimpleEuler => ("work().x", &[("work().y", 1), ("work().z", 2)]),
@@ -369,9 +374,9 @@ impl RefKind {
         let dvec = |r: &str| idx(r).and_then(|(k, r)| Some(k * 3 + comp(r)?));
         let (name, rest) = tail.split_at(tail.find(['[', '.']).unwrap_or(tail.len()));
         match (self, name) {
-            (RefKind::Euler | RefKind::Quaternion | RefKind::Transform | RefKind::SimpleEuler, "rotation_matrix") => Some((RefCol::Val, mat(rest)?)),
-            (RefKind::Euler, "rotation_matrix_wide") => Some((RefCol::ValW, mat(rest)?)),
-            (RefKind::Euler | RefKind::Quaternion | RefKind::SimpleEuler, "rotation_matrix_deriv") => Some((RefCol::Der, dmat(rest)?)),
+            (RefKind::Euler | RefKind::MixedEuler | RefKind::Quaternion | RefKind::Transform | RefKind::SimpleEuler, "rotation_matrix") => Some((RefCol::Val, mat(rest)?)),
+            (RefKind::Euler | RefKind::MixedEuler, "rotation_matrix_wide") => Some((RefCol::ValW, mat(rest)?)),
+            (RefKind::Euler | RefKind::MixedEuler | RefKind::Quaternion | RefKind::SimpleEuler, "rotation_matrix_deriv") => Some((RefCol::Der, dmat(rest)?)),
             (RefKind::Transform, "translation") => Some((RefCol::Val, 9 + comp(rest)?)),
             (RefKind::Transform, "rotation_matrix_dw") => Some((RefCol::Der, dmat(rest)?)),
             (RefKind::Transform, "translation_dd") => Some((RefCol::Der, 27 + dvec(rest)?)),
@@ -387,7 +392,7 @@ impl RefKind {
     fn read(self, field: &TokenStream2) -> Option<TokenStream2> {
         Some(match self {
             RefKind::SimpleEuler => return None,
-            RefKind::Euler => quote! {
+            RefKind::Euler | RefKind::MixedEuler => quote! {
                 {
                     let __m = &#field.ref_rotation;
                     let __f = ::arael::__gpu::leaf_f64;
@@ -402,6 +407,7 @@ impl RefKind {
     fn ident(self) -> TokenStream2 {
         match self {
             RefKind::Euler => quote! { Euler },
+            RefKind::MixedEuler => quote! { MixedEuler },
             RefKind::Quaternion => quote! { Quaternion },
             RefKind::Transform => quote! { Transform },
             RefKind::UnitVec => quote! { UnitVec },
@@ -794,7 +800,7 @@ fn cpp_kernels(
     let expr = |e: &E| -> Result<String, String> { e.to_cpp_in(ft, "W", &map).map_err(|e| e.0) };
     let prologue = |b: &str| {
         let slots: String = (0..ns.len()).map(|i| format!("const u32 s{i} = COL({b}, u32, C{cid}_S{i})[o];\n")).collect();
-        format!("GLOBAL const u64* L = (GLOBAL const u64*)B;\nconst u32 o = global_x();\nW c = 0.0f;\nif (o < n) {{\n{slots}")
+        format!("GLOBAL const u64* L = (GLOBAL const u64*)B;\nconst u32 o = global_x();\nCACC c = 0.0f;\nif (o < n) {{\n{slots}")
     };
     // the linearization: per instance its record, R rows of the residual
     // and the sides' derivatives, zero where the guard drops it
@@ -824,7 +830,7 @@ fn cpp_kernels(
                 body.push_str(&format!("{LOSS_ARG_SYM} += rec[{0}] * rec[{0}];\n", ri * stride));
             }
             body.push_str(&format!(
-                "{{\n{}c += (W)({});\nconst F __lw = {};\nconst F __sw = __lw > (F)0.0f ? sqrt(__lw) : (F)0.0f;\n\
+                "{{\n{}c += (CACC)({});\nconst F __lw = {};\nconst F __sw = __lw > (F)0.0f ? sqrt(__lw) : (F)0.0f;\n\
                  #pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) rec[k] *= __sw;\n}}\n",
                 stmts(&l.gh.0)?,
                 expr(&l.gh.1)?,
@@ -832,7 +838,7 @@ fn cpp_kernels(
             ));
             String::new()
         }
-        None => (0..rows).map(|ri| format!("c += (W)rec[{0}] * (W)rec[{0}];\n", ri * stride)).collect(),
+        None => (0..rows).map(|ri| format!("c += (CACC)rec[{0}] * (CACC)rec[{0}];\n", ri * stride)).collect(),
     };
     let gh_code = match guard {
         Some((pre, q)) => format!("{}if ({} >= 0.0f) {{\n{body}}}\n", stmts(pre)?, expr(q)?),
@@ -844,7 +850,7 @@ fn cpp_kernels(
          KERNEL_THREADS(256) void __dk{cid}_gh(GLOBAL u8* RESTRICT B, u32 n) {{\n{}// the leaves the body reads\n{}\
          F rec[{recw}];\n#pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) rec[k] = (F)0.0f;\n// the body: the rows and their partials\n{gh_code}{costs}\
          // the record out\nGLOBAL F* out = COL_MUT(B, F, C{cid}_REC) + o * {recw}u;\n#pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) out[k] = rec[k];\n\
-         }}\nSHARED W arael_sh[256];\ncost_partial(COL_MUT(B, W, C{cid}_PART), c, arael_sh, thread_x(), block_x());\n}}\n",
+         }}\nSHARED CACC arael_sh[256];\ncost_partial(COL_MUT(B, CACC, C{cid}_PART), c, arael_sh, thread_x(), block_x());\n}}\n",
         if rows == 1 { "" } else { "s" },
         prologue("B"),
         lets(gh_syms)?
@@ -854,13 +860,13 @@ fn cpp_kernels(
     let mut reduce = format!(
         "// C{cid}: its cost parts summed into the cost\n\
          KERNEL_THREADS(256) void __dk{cid}_csum(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT cost, u32 parts) {{\n\
-         GLOBAL const u64* L = (GLOBAL const u64*)B;\nSHARED W arael_sh[256];\ncost_sum(COL(B, W, C{cid}_PART), parts, cost, arael_sh, thread_x());\n}}\n"
+         GLOBAL const u64* L = (GLOBAL const u64*)B;\nSHARED CACC arael_sh[256];\ncost_sum(COL(B, CACC, C{cid}_PART), parts, cost, arael_sh, thread_x());\n}}\n"
     );
     for (i, (&n, &off)) in ns.iter().zip(&offs).enumerate() {
         reduce.push_str(&format!(
             "\n// C{cid}, side {i}: each entity's tile and gradient, summed over its instances' records\n\
              // ({n} parameters, the partials from value {off} of a row on)\n\
-             KERNEL_THREADS(256) void __dk{cid}_r{i}(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, GLOBAL W* RESTRICT g, u32 slots) {{\n\
+             KERNEL_THREADS(256) void __dk{cid}_r{i}(GLOBAL const u8* RESTRICT B, GLOBAL V* RESTRICT h, GLOBAL V* RESTRICT g, u32 slots) {{\n\
              GLOBAL const u64* L = (GLOBAL const u64*)B;\n\
              reduce_entity<{n}u, {rows}u, {stride}u, {off}u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_OFF{i}), COL(B, u32, C{cid}_INST{i}), \
              COL(B, u32, C{cid}_IDX{i}), COL(B, u32, C{cid}_TILE{i}), h, g, slots, global_x());\n}}\n"
@@ -870,7 +876,7 @@ fn cpp_kernels(
         let (ni, nj, oi, oj) = (ns[i], ns[j], offs[i], offs[j]);
         reduce.push_str(&format!(
             "\n// C{cid}, cross tile {p} (sides {i} and {j}): each tile summed over its instances' products\n\
-             KERNEL_THREADS(256) void __dk{cid}_x{p}(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, u32 slots) {{\n\
+             KERNEL_THREADS(256) void __dk{cid}_x{p}(GLOBAL const u8* RESTRICT B, GLOBAL V* RESTRICT h, u32 slots) {{\n\
              GLOBAL const u64* L = (GLOBAL const u64*)B;\n\
              reduce_cross<{ni}u, {nj}u, {rows}u, {stride}u, {oi}u, {oj}u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_XOFF{p}), COL(B, u32, C{cid}_XINST{p}), \
              COL(B, u32, C{cid}_S{i}), COL(B, u32, C{cid}_S{j}), COL(B, u32, C{cid}_IDX{i}), COL(B, u32, C{cid}_TILE{i}), \
@@ -886,15 +892,15 @@ fn cpp_kernels(
         let r = expr(r)?;
         cbody.push_str(&match loss {
             Some(_) => format!("const F r{ri} = {r};\n{LOSS_ARG_SYM} += r{ri} * r{ri};\n"),
-            None => format!("const F r{ri} = {r};\nc += (W)r{ri} * (W)r{ri};\n"),
+            None => format!("const F r{ri} = {r};\nc += (CACC)r{ri} * (CACC)r{ri};\n"),
         });
     }
     if let Some(l) = loss {
-        cbody.push_str(&format!("{{\n{}c += (W)({});\n}}\n", stmts(&l.cost.0)?, expr(&l.cost.1)?));
+        cbody.push_str(&format!("{{\n{}c += (CACC)({});\n}}\n", stmts(&l.cost.0)?, expr(&l.cost.1)?));
     }
     let cost_kernel = format!(
         "// C{cid}'s cost alone, at a trial point: the rows without their partials\n\
-         KERNEL_THREADS(256) void __dk{cid}_cost(GLOBAL u8* RESTRICT B, u32 n) {{\n{}{}{cbody}}}\nSHARED W arael_sh[256];\ncost_partial(COL_MUT(B, W, C{cid}_PART), c, arael_sh, thread_x(), block_x());\n}}\n",
+         KERNEL_THREADS(256) void __dk{cid}_cost(GLOBAL u8* RESTRICT B, u32 n) {{\n{}{}{cbody}}}\nSHARED CACC arael_sh[256];\ncost_partial(COL_MUT(B, CACC, C{cid}_PART), c, arael_sh, thread_x(), block_x());\n}}\n",
         prologue("B"),
         lets(cost_syms)?
     );
@@ -1024,13 +1030,15 @@ impl Record {
 }
 
 /// The device items of a root whose every constraint has a device form,
-/// and their C++ (the root's `device_cpp`). `entity_walk(type, body)` walks
-/// every entity of `type` in slot order, `body` reading it as `__ent`;
-/// `idx_stmts(type, acc, idx)` fills `idx` with the parameters' global
-/// indices of the entity `acc`.
+/// and their C++ (the root's `device_cpp`). The cost sums in the root's
+/// scalar, or with `cost_f64` in the wide one. `entity_walk(type, body)`
+/// walks every entity of `type` in slot order, `body` reading it as
+/// `__ent`; `idx_stmts(type, acc, idx)` fills `idx` with the parameters'
+/// global indices of the entity `acc`.
 pub(crate) fn device_root(
     root_name: &syn::Ident,
     ft: &str,
+    cost_f64: bool,
     constraints: &[DevConstraint],
     groups: &std::collections::BTreeMap<String, DevGroup>,
     entity_walk: &dyn Fn(&str, TokenStream2) -> TokenStream2,
@@ -1148,6 +1156,11 @@ pub(crate) fn device_root(
          //\n",
         site(&root_name.to_string())
     );
+    cpp.push_str(&format!(
+        "// CACC: the scalar of the cost's terms and sums, {}.\ntypedef {} CACC;\n//\n",
+        if cost_f64 { "the wide one (the root's `cost_f64`)" } else { "the root's (V)" },
+        if cost_f64 { "W" } else { "V" }
+    ));
     cpp.push_str("// Entity tables, a row per entity in slot order: E<e>_EV its parameter values, E<e>_IDX their\n\
                   // global indices, E<e>_TILE its Hessian tile, E<e>_DATA its data record E<e>Data.\n");
     for (e, en) in entities.iter().enumerate() {

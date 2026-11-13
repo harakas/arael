@@ -638,6 +638,11 @@ nothing. It combines with `cost_kahan`.
 `cost_plain` is the explicit spelling of the default and cannot be
 combined with the other two.
 
+On the GPU's device assembly the cost sums in the root's scalar, or
+with `cost_f64` in the device's wide scalar ([docs/SOLVERS.md](SOLVERS.md)).
+Its sums are trees, short chains already, so `cost_kahan` sums as the
+default there.
+
 What none of them change is the rounding of the residuals themselves:
 a residual computed in f32 carries about `f32::EPSILON` times its
 intermediate magnitudes, and the sum of those errors over the rows
@@ -683,6 +688,10 @@ vector, as the `coo` storage's does, sums in the root's precision. The
 Hessian blocks sum in the root's precision in every case: a block entry
 is a sum of a few hundred squares at most, without the cancellation of
 the gradient.
+
+On the GPU's device assembly the gradient and the Hessian sum in the
+root's scalar, in trees; `grad_kahan` and `grad_f64` apply to the CPU's
+block stores only.
 
 ### Generic models
 

@@ -890,7 +890,7 @@ The factor lives on the device, in the solver's scalar or in `f32` under
 `with_mixed_precision` with the same refinement against the `f64`
 matrix. On the reduced (Schur) route the device does the whole damped
 solve: it forms the reduced system from the Hessian's values, in the
-device's wide scalar (below) whatever the solver's scalar, factorizes it, solves, refines, and
+precision the CPU's route forms it in (below), factorizes it, solves, refines, and
 recovers the eliminated blocks, and only the step comes back, the one
 time per damped solve the solver waits for the device; from the second
 damped solve of a structure on, its hundreds of kernels are replayed as
@@ -1017,15 +1017,20 @@ ARAEL_DEVICE_CHECK=1 ARAEL_DEVICE_CHECK_LOG=check.log cargo test --features gpu-
 ARAEL_DEVICE_CHECK=1 cargo test --features gpu-cpu   # without a GPU
 ```
 
-The device sums without atomic writes, in its wide scalar: `f64`, or
-with `GpuDevice::with_wide(GpuWide::Df32)` df32, two f32 whose sum is the
-value, about 48 bits, for H, the gradient, the cost, the Schur reduction
-(but see the f32 reduction below), the refinement's residual, the LM
-loop's vectors, the reference rotations and the bodies' `with_wide`
-scopes (an f64 root's too, which then compute in 48 bits instead of the
-CPU's 53). With an f32 root and
-the f32 factor nothing on the device then runs in f64, which consumer
-cards run at 1/32 to 1/64 of f32:
+The device keeps a root's values in the root's scalar, as the CPU's
+route does: an f32 root's H, gradient, step, LM vectors, reference
+rotations and cost sums are f32. The rest is in the device's wide
+scalar, `f64`, or with `GpuDevice::with_wide(GpuWide::Df32)` df32, two
+f32 whose sum is the value, about 48 bits: an f64 root's values (which
+then compute in 48 bits instead of the CPU's 53), an f32 root's cost
+with `cost_f64`, a `MixedEulerAngleParam`'s reference, the bodies'
+`with_wide` scopes, the step's and the trial point's sums of squares
+the stopping test reads (the CPU forms them in f64), and the
+refinement's residual. The device sums without atomic writes, in trees:
+`cost_kahan` sums as the default there, and `grad_kahan` and `grad_f64`
+apply to the CPU's assembly only. With an f32 root and the f32 factor
+nothing on the device then runs in f64, which consumer cards run at
+1/32 to 1/64 of f32:
 
 ```rust,ignore
 SparseFaer::from_options(&SparseFaerOptions::default()
@@ -1034,8 +1039,10 @@ SparseFaer::from_options(&SparseFaerOptions::default()
 ```
 
 An f32 solve without `MixedPrecision` forms the Schur reduction in f32,
-as the CPU's f32 route does: S, W and the eliminated blocks' factors and
-steps. `GpuDevice::with_wide_schur(true)` forms it in the wide scalar
+as the CPU's f32 route does: S, W, the eliminated blocks' factors and
+steps, the reduced right-hand side and the kept blocks' solution (S is H
+on the whole-system route). `GpuDevice::with_wide_schur(true)` forms it
+in the wide scalar
 instead, more precisely than the CPU's f32 route; an f64 solve, and one
 with `MixedPrecision` (whose refinement measures its residuals against
 S), always does. The plan's `gpu_f32_reduction` says which ran:

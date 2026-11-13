@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arael_gpu::{Arg, Device, FIXED, GpuError, Launch, WIDE, Wide};
+use arael_gpu::{Arg, Device, FIXED, GpuError, Launch, Values, WIDE, Wide};
 
 /// A root's device layout, as its generated code describes it.
 #[derive(Clone, Debug)]
@@ -64,6 +64,9 @@ pub struct DeviceReference {
 pub enum ReferenceKind {
     /// `EulerAngleParam`: a rotation matrix (row-major) and Euler angles.
     Euler,
+    /// `MixedEulerAngleParam`: [`Euler`](Self::Euler)'s, its reference
+    /// kept in the wide scalar.
+    MixedEuler,
     /// `QuaternionParam`: a unit quaternion (w, x, y, z) and a rotation
     /// vector.
     Quaternion,
@@ -81,7 +84,7 @@ impl ReferenceKind {
     /// The values of one reference.
     pub fn reference_len(self) -> usize {
         match self {
-            ReferenceKind::Euler => 9,
+            ReferenceKind::Euler | ReferenceKind::MixedEuler => 9,
             ReferenceKind::Quaternion | ReferenceKind::UnitVec => 4,
             ReferenceKind::Transform => 7,
             ReferenceKind::SimpleEuler => 0,
@@ -93,10 +96,24 @@ impl ReferenceKind {
         self != ReferenceKind::SimpleEuler
     }
 
+    /// The scalar its reference is kept and composed in on a route of
+    /// `values`: the root's, as the CPU's parameter keeps it, the wide one
+    /// for a [`MixedEuler`](Self::MixedEuler).
+    ///
+    /// ```
+    /// use arael::__gpu::{ReferenceKind, Values, Wide};
+    /// let f32s = Values::f32(Wide::Df32);
+    /// assert_eq!(ReferenceKind::Euler.scalar(f32s), f32s);
+    /// assert_eq!(ReferenceKind::MixedEuler.scalar(f32s), Values::from(Wide::Df32));
+    /// ```
+    pub fn scalar(self, values: Values) -> Values {
+        if self == ReferenceKind::MixedEuler { values.wide().into() } else { values }
+    }
+
     /// The parameters of one step.
     pub fn step_len(self) -> usize {
         match self {
-            ReferenceKind::Euler | ReferenceKind::Quaternion | ReferenceKind::SimpleEuler => 3,
+            ReferenceKind::Euler | ReferenceKind::MixedEuler | ReferenceKind::Quaternion | ReferenceKind::SimpleEuler => 3,
             ReferenceKind::Transform => 6,
             ReferenceKind::UnitVec => 2,
         }
@@ -106,7 +123,7 @@ impl ReferenceKind {
     /// a rotation matrix and a translation (12), a direction (3).
     pub fn values(self) -> usize {
         match self {
-            ReferenceKind::Euler | ReferenceKind::Quaternion | ReferenceKind::SimpleEuler => 9,
+            ReferenceKind::Euler | ReferenceKind::MixedEuler | ReferenceKind::Quaternion | ReferenceKind::SimpleEuler => 9,
             ReferenceKind::Transform => 12,
             ReferenceKind::UnitVec => 3,
         }
@@ -115,7 +132,7 @@ impl ReferenceKind {
     /// The derivatives of the values by the step a linearization reads.
     pub fn derivatives(self) -> usize {
         match self {
-            ReferenceKind::Euler | ReferenceKind::Quaternion | ReferenceKind::SimpleEuler => 27,
+            ReferenceKind::Euler | ReferenceKind::MixedEuler | ReferenceKind::Quaternion | ReferenceKind::SimpleEuler => 27,
             ReferenceKind::Transform => 45,
             ReferenceKind::UnitVec => 6,
         }
@@ -126,6 +143,7 @@ impl ReferenceKind {
     fn kernel_name(self) -> &'static str {
         match self {
             ReferenceKind::Euler => "euler",
+            ReferenceKind::MixedEuler => "mixed_euler",
             ReferenceKind::Quaternion => "quat",
             ReferenceKind::Transform => "transform",
             ReferenceKind::UnitVec => "unitvec",
@@ -137,15 +155,21 @@ impl ReferenceKind {
     fn reference(self, v: &[f64]) -> crate::model::Reference {
         use crate::model::Reference;
         match self {
-            ReferenceKind::Euler => Reference::Matrix(v.try_into().unwrap()),
+            ReferenceKind::Euler | ReferenceKind::MixedEuler => Reference::Matrix(v.try_into().unwrap()),
             ReferenceKind::Quaternion | ReferenceKind::UnitVec => Reference::Quaternion(v.try_into().unwrap()),
             ReferenceKind::Transform => Reference::Transform(v.try_into().unwrap()),
             ReferenceKind::SimpleEuler => unreachable!("a SimpleEulerAngleParam has no reference"),
         }
     }
 
-    const ALL: [ReferenceKind; 5] =
-        [ReferenceKind::Euler, ReferenceKind::Quaternion, ReferenceKind::Transform, ReferenceKind::UnitVec, ReferenceKind::SimpleEuler];
+    const ALL: [ReferenceKind; 6] = [
+        ReferenceKind::Euler,
+        ReferenceKind::MixedEuler,
+        ReferenceKind::Quaternion,
+        ReferenceKind::Transform,
+        ReferenceKind::UnitVec,
+        ReferenceKind::SimpleEuler,
+    ];
 }
 
 /// One constraint of a [`DeviceShape`]: its entities (its sides), each of
@@ -263,13 +287,13 @@ pub fn leaf_f64<V: num::ToPrimitive>(v: V) -> f64 {
 /// row, checked against its column's extent once.
 pub struct DeviceWriter<'a, T> {
     bytes: &'a mut [u8],
-    wide: Wide,
     /// Per entity table: the fixed values' offset, the parameters, the slots.
     fixed: Vec<(usize, usize, usize)>,
     /// Per entity table: the data records' offset and record bytes.
     data: Vec<(usize, usize)>,
-    /// Per referenced field: the references' offset and values per slot.
-    refr: Vec<(usize, usize, usize)>,
+    /// Per referenced field: the references' offset, values per slot, slots
+    /// and scalar ([`ReferenceKind::scalar`]).
+    refr: Vec<(usize, usize, usize, Values)>,
     /// The root's record: offset and bytes.
     root: (usize, usize),
     /// Per constraint: its instance columns' offsets and its rows.
@@ -307,13 +331,17 @@ impl<T: crate::utils::Float> DeviceWriter<'_, T> {
     }
 
     /// The reference of referenced field `r` of the entity at `slot`, in
-    /// the route's wide scalar.
+    /// its kind's scalar ([`ReferenceKind::scalar`]).
     #[inline]
     pub fn reference<const K: usize>(&mut self, r: usize, slot: usize, v: [f64; K]) {
-        let (at, len, slots) = self.refr[r];
+        let (at, len, slots, scalar) = self.refr[r];
         assert!(slot < slots && len == K, "referenced field {r}: {K} values at slot {slot}, {len} each over {slots} slots");
-        let wide = self.wide;
-        self.run(at + slot * K * 8, &v.map(|x| wide.bits(x)));
+        if scalar.is_f32() {
+            self.run(at + slot * K * 4, &v.map(|x| x as f32));
+        } else {
+            let wide = scalar.wide();
+            self.run(at + slot * K * 8, &v.map(|x| wide.bits(x)));
+        }
     }
 
     /// The data record of the entity at `slot` of entity table `e`.
@@ -449,8 +477,9 @@ fn word_names(k: &DeviceConstraint) -> impl Iterator<Item = String> {
 /// per constraint its instance data. Then the columns the kernels write: per
 /// entity table its gathered values, per referenced field its values (in F
 /// and W) and derivatives, per constraint its records and cost parts. The
-/// order depends on the shape alone. W values are 8 bytes.
-fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: &[usize], ts: usize) -> (Vec<Column>, usize, usize) {
+/// order depends on the shape alone. W values are 8 bytes, the model's
+/// `ts`; a reference is in its kind's scalar on a route of `route`.
+fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: &[usize], ts: usize, route: Values) -> (Vec<Column>, usize, usize) {
     let col = |name: String, elem: usize, len: usize| Column { name, elem, len };
     let mut v = Vec::new();
     for (e, &n) in shape.entities.iter().enumerate() {
@@ -485,7 +514,7 @@ fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: 
         v.push(col(format!("E{e}_DATA"), shape.entity_data[e], s));
     }
     for (r, rf) in shape.references.iter().enumerate() {
-        v.push(col(format!("R{r}_REFR"), 8, rf.kind.reference_len() * slots[rf.entity]));
+        v.push(col(format!("R{r}_REFR"), rf.kind.scalar(route).bytes(), rf.kind.reference_len() * slots[rf.entity]));
     }
     v.push(col("ROOT".to_string(), shape.root_data, 1));
     for (c, k) in shape.constraints.iter().enumerate() {
@@ -505,6 +534,7 @@ fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: 
     }
     for (c, &n) in counts.iter().enumerate() {
         v.push(col(format!("C{c}_REC"), ts, n * record_width(shape, c)));
+        // the cost's partials in the root's CACC: W or narrower
         v.push(col(format!("C{c}_PART"), 8, parts(n)));
     }
     (v, structure, values)
@@ -578,7 +608,9 @@ struct Kernels<K> {
     gather: K,
     /// Per [`ReferenceKind`], in [`ReferenceKind::ALL`]'s order.
     references: Vec<ReferenceKernels<K>>,
+    /// Zeroes the cost (W), and H and the gradient (V, the root's scalar).
     zero: K,
+    zero_values: K,
     zero_steps: K,
     constraints: Vec<ConstraintKernels<K>>,
 }
@@ -640,11 +672,14 @@ pub type Target<'a, B> = (&'a B, usize);
 
 /// A root laid out on a [`Device`] in one block: its structure uploaded
 /// once, its values written into pinned staging and uploaded per solve; the
-/// parameter vector, the targets and the cost are the caller's buffers, in
-/// the assembly's [`Wide`] scalar.
+/// parameter vector, the targets and the cost are the caller's buffers:
+/// the parameters, H and the gradient in the assembly's [`Values`], the
+/// cost in its [`Wide`] scalar.
 pub struct DeviceAssembly<T, D: Device> {
     dev: Arc<D>,
     wide: Wide,
+    /// The root's [`Values`] on the route of `wide`.
+    route: Values,
     shape: DeviceShape,
     slots: Vec<usize>,
     cross_slots: Vec<usize>,
@@ -658,7 +693,7 @@ pub struct DeviceAssembly<T, D: Device> {
     offset: HashMap<String, usize>,
     block: D::Block,
     /// The values range of the block on the host: what a refresh rewrites.
-    values: HostBuf<D::Host>,
+    staged: HostBuf<D::Host>,
     kernels: Kernels<D::Kernel>,
     generation: u64,
     /// The fewest significand bits of the model's leaves at the last
@@ -906,16 +941,17 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             }
         }
         let (entity_tiles, cross_tiles) = tiles(&shape, &st, &slots, &cross_slots, &Resolver::new(pattern), (threads, PAR_MIN));
-        let layout = Layout::new(columns(&shape, &slots, &cross_slots, &counts, ts));
+        let route = Values::of(ts, wide);
+        let layout = Layout::new(columns(&shape, &slots, &cross_slots, &counts, ts, route));
         let scalar = if ts == 8 { "double" } else { "float" };
-        let defines = format!("{}#define SCALAR {scalar}\n{}", wide.defines(), layout.defines());
+        let defines = format!("{}#define SCALAR {scalar}\n{}", route.defines(), layout.defines());
         let source = format!("{WIDE}\n{}\n{}", arael_gpu::ASSEMBLY, root.device_cpp());
         if let Some(dir) = std::env::var_os(KERNEL_DUMP_VAR) {
             dump_unit(dir.as_ref(), root.device_name(), &dev.arch().target, wide, &dev.unit(&source, &defines))?;
         }
         // every entry point in one lookup of the source, in the order the
         // kernels take them below
-        let mut entries: Vec<String> = ["k_gather_params", "k_zero_wide", "k_zero_steps"].map(String::from).to_vec();
+        let mut entries: Vec<String> = ["k_gather_params", "k_zero_wide", "k_zero_values", "k_zero_steps"].map(String::from).to_vec();
         for kind in ReferenceKind::ALL {
             entries.extend(["values", "derivatives"].map(|e| format!("k_{}_{e}", kind.kernel_name())));
             if kind.recentres() {
@@ -933,6 +969,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         let kernels = Kernels {
             gather: k(),
             zero: k(),
+            zero_values: k(),
             zero_steps: k(),
             references: ReferenceKind::ALL
                 .iter()
@@ -957,10 +994,11 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         let ref_index = write_structure(host.bytes_mut(&**dev)?, &layout, &offset, &shape, &st, &slots, &cross_slots, &entity_tiles, &cross_tiles);
         host.upload(&**dev, &mut block, 0, layout.structure_bytes)?;
         drop(host);
-        let values = HostBuf::new(&**dev, staging, layout.host_bytes - layout.structure_bytes)?;
+        let staged = HostBuf::new(&**dev, staging, layout.host_bytes - layout.structure_bytes)?;
         let mut asm = DeviceAssembly {
             dev: dev.clone(),
             wide,
+            route,
             shape,
             slots,
             cross_slots,
@@ -970,7 +1008,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             layout,
             offset,
             block,
-            values,
+            staged,
             kernels,
             generation: 0,
             leaf_bits: 53,
@@ -992,8 +1030,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         let at = |name: &str| self.offset[name] - base;
         let n_ent = self.shape.entities.len();
         let mut w = DeviceWriter {
-            bytes: self.values.bytes_mut(&*self.dev)?,
-            wide: self.wide,
+            bytes: self.staged.bytes_mut(&*self.dev)?,
             fixed: (0..n_ent).map(|e| (at(&format!("E{e}_FIXED")), self.shape.entities[e], self.slots[e])).collect(),
             data: (0..n_ent).map(|e| (at(&format!("E{e}_DATA")), self.shape.entity_data[e])).collect(),
             refr: self
@@ -1001,7 +1038,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
                 .references
                 .iter()
                 .enumerate()
-                .map(|(r, rf)| (at(&format!("R{r}_REFR")), rf.kind.reference_len(), self.slots[rf.entity]))
+                .map(|(r, rf)| (at(&format!("R{r}_REFR")), rf.kind.reference_len(), self.slots[rf.entity], rf.kind.scalar(self.route)))
                 .collect(),
             root: (at("ROOT"), self.shape.root_data),
             inst: self
@@ -1017,7 +1054,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         root.device_values(&self.keep, &mut w);
         self.leaf_bits = w.bits;
         let len = self.layout.host_bytes - base;
-        self.values.upload(&*self.dev, &mut self.block, base, len)
+        self.staged.upload(&*self.dev, &mut self.block, base, len)
     }
 
     /// Changes whenever the block or its offsets change: a graph of the
@@ -1034,9 +1071,16 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         self.leaf_bits
     }
 
-    /// The scalar of the sums, the parameters, the targets and the references.
+    /// The scalar of the cost and the references.
     pub fn wide(&self) -> Wide {
         self.wide
+    }
+
+    /// The scalar of the parameters, H and the gradient: the root's, as the
+    /// CPU's route keeps them (f32 for an f32 root, else
+    /// [`wide`](Self::wide)).
+    pub fn values(&self) -> Values {
+        self.route
     }
 
     /// A column of the block as a kernel argument.
@@ -1053,6 +1097,11 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
 
     fn zero(&self, t: Target<'_, D::Block>, n: usize) -> Result<(), GpuError> {
         self.run(&self.kernels.zero, n, &[Arg::Block(t.0, t.1), Arg::U32(n as u32)])
+    }
+
+    /// `n` values of H or the gradient zeroed, in [`values`](Self::values).
+    fn zero_values(&self, t: Target<'_, D::Block>, n: usize) -> Result<(), GpuError> {
+        self.run(&self.kernels.zero_values, n, &[Arg::Block(t.0, t.1), Arg::U32(n as u32)])
     }
 
     /// The entities' parameter values and the referenced fields' values at
@@ -1079,7 +1128,9 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
 
     /// The gradient (`ng` values at `g`), the pattern's tile values (`nh`
     /// at `h`) and the cost (one value at `cost`) at the parameters `x`,
-    /// each zeroed first, all in [`wide`](Self::wide); nothing read back.
+    /// each zeroed first: the parameters, the gradient and H in
+    /// [`values`](Self::values), the cost in [`wide`](Self::wide); nothing
+    /// read back.
     pub fn assemble_at(
         &self,
         x: Target<'_, D::Block>,
@@ -1089,8 +1140,8 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         nh: usize,
         cost: Target<'_, D::Block>,
     ) -> Result<(), GpuError> {
-        self.zero(g, ng)?;
-        self.zero(h, nh)?;
+        self.zero_values(g, ng)?;
+        self.zero_values(h, nh)?;
         self.zero(cost, 1)?;
         self.gather(x, true)?;
         let (b, h, g, cost) = (Arg::Block(&self.block, 0), Arg::Block(h.0, h.1), Arg::Block(g.0, g.1), Arg::Block(cost.0, cost.1));
@@ -1167,10 +1218,11 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         let mut refr: Vec<Vec<f64>> = Vec::new();
         for (r, rf) in self.shape.references.iter().enumerate() {
             let n = rf.kind.reference_len() * self.slots[rf.entity];
-            let mut bytes = vec![0u8; 8 * n];
+            let scalar = rf.kind.scalar(self.route);
+            let mut bytes = vec![0u8; scalar.bytes() * n];
             self.dev.read(&self.block, self.offset[&format!("R{r}_REFR")], &mut bytes)?;
             let mut v = vec![0f64; n];
-            self.wide.decode(&bytes, &mut v);
+            scalar.decode(&bytes, &mut v);
             refr.push(v);
         }
         let mut at = HashMap::new();
@@ -1250,21 +1302,24 @@ where
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
     let asm = DeviceAssembly::<T, D>::new(dev, root, &hsym, threads, wide, Staging::Pinned)
         .expect("lay the root out on the device");
-    // x, the gradient, the values and the cost in one block of the test's own
-    let (at_g, at_h) = (n * 8, n * 16);
-    let at_cost = at_h + nv * 8;
-    let mut work = dev.alloc(at_cost + 8).expect("allocate the targets");
+    // the cost (wide), x, the gradient and the values (the root's values)
+    // in one block of the test's own
+    let values = asm.values();
+    let (at_cost, at_x) = (0, 8);
+    let at_g = at_x + n * values.bytes();
+    let at_h = at_g + n * values.bytes();
+    let mut work = dev.alloc(at_h + nv * values.bytes()).expect("allocate the targets");
     let x64: Vec<f64> = x.iter().map(|v| v.to_f64().unwrap()).collect();
-    dev.write(&mut work, 0, &wide.encode(&x64)).expect("upload x");
-    asm.assemble_at((&work, 0), (&work, at_g), n, (&work, at_h), nv, (&work, at_cost)).expect("assemble on the device");
-    let read = |at: usize, len: usize| -> Vec<f64> {
-        let mut bytes = vec![0u8; 8 * len];
+    dev.write(&mut work, at_x, &values.encode(&x64)).expect("upload x");
+    asm.assemble_at((&work, at_x), (&work, at_g), n, (&work, at_h), nv, (&work, at_cost)).expect("assemble on the device");
+    let read = |at: usize, len: usize, values: Values| -> Vec<f64> {
+        let mut bytes = vec![0u8; values.bytes() * len];
         dev.read(&work, at, &mut bytes).expect("read a target");
         let mut v = vec![0f64; len];
-        wide.decode(&bytes, &mut v);
+        values.decode(&bytes, &mut v);
         v
     };
-    let (gd, hd, cost) = (read(at_g, n), read(at_h, nv), read(at_cost, 1));
+    let (gd, hd, cost) = (read(at_g, n, values), read(at_h, nv, values), read(at_cost, 1, wide.into()));
     let err = |dev: &[f64], cpu: &[T]| -> f64 {
         let max = cpu.iter().fold(0.0f64, |m, v| m.max(v.to_f64().unwrap().abs()));
         let diff = dev.iter().zip(cpu).fold(0.0f64, |m, (d, c)| m.max((d - c.to_f64().unwrap()).abs()));

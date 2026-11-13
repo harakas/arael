@@ -4984,9 +4984,11 @@ impl GpuBackend {
     }
 }
 
-/// What a [`GpuDevice`] keeps and sums its wide values in: H, the gradient,
-/// the cost, the Schur reduction, the refinement's residual and the LM
-/// loop's vectors ([`GpuDevice::with_wide`]).
+/// What a [`GpuDevice`] keeps and sums its wide values in
+/// ([`GpuDevice::with_wide`]): an f64 root's H, gradient, step and LM
+/// vectors, the cost (an f32 root's with `cost_f64`), the Schur reduction
+/// (an f64 solve's, or with [`GpuDevice::with_wide_schur`]) and the
+/// refinement's residual. An f32 root's values are f32, as on the CPU.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GpuWide {
     /// f64.
@@ -5573,7 +5575,7 @@ pub struct SchurPlan {
     /// Whether the GPU formed the reduced system in f32, as the CPU's f32
     /// route: an f32 solve without [`MixedPrecision`], unless
     /// [`GpuDevice::with_wide_schur`]. Only ever true with
-    /// [`gpu_factor`](Self::gpu_factor) on the reduced route.
+    /// [`gpu_factor`](Self::gpu_factor).
     pub gpu_f32_reduction: bool,
     /// Refinement steps summed over the solve, when the factor was single
     /// precision; `None` otherwise. Divided by the attempt count, what each

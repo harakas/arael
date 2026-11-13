@@ -9,7 +9,7 @@ use arael_faer::{SparseIndex, ValueIndex};
 use arael_gpu::lm::{N_SCALARS, S_COST_TRY, S_COST_X, Scalars};
 use arael_gpu::schur::{GraphKey, STATUS_BYTES};
 use arael_gpu::FactorizeError;
-use arael_gpu::{Device, GpuError, GpuFactor, LmVectors, GpuSchur, GpuSchurError, Wide};
+use arael_gpu::{Device, GpuError, GpuFactor, LmVectors, GpuSchur, GpuSchurError, Values, Wide};
 use arael_gpu::{GpuPrecision, RefineStats};
 
 use super::{GpuSolver, narrow, resident_attempt};
@@ -23,7 +23,8 @@ pub(crate) struct DeviceSolver<T, D: Device> {
     route: Option<Route<T, D>>,
     schur: Option<GpuSchur<D>>,
     factor: GpuFactor<D>,
-    /// The scalar of the reduction, the assembly's sums and the loop's vectors.
+    /// The route's wide scalar: the cost's and the loop's scalars'
+    /// ([`values`](Self::values) for the vectors, H and the gradient).
     wide: Wide,
     /// Where the device assembly's image is written before it is copied.
     staging: crate::device::Staging,
@@ -82,29 +83,39 @@ impl<T, D: Device> DeviceSolver<T, D> {
         let factor = GpuFactor::new(dev, precision, sn, asym, &Default::default(), wide)?;
         Ok(DeviceSolver { route: None, schur: None, factor, wide, staging, f32_reduction })
     }
+
+    /// The scalar of the vectors, H and the gradient: the root's, as the
+    /// CPU's route keeps them.
+    fn values(&self) -> Values {
+        Values::of(core::mem::size_of::<T>(), self.wide)
+    }
 }
 
-/// The values of `ranges` (block, byte offset, count), read with one wait
-/// into `bytes` and decoded from `wide` into `host`, one range after another.
+/// The values of `ranges` (block, byte offset, count, scalar), read with
+/// one wait into `bytes` and decoded into `host`, one range after another.
 fn read_values<D: Device>(
     dev: &D,
-    wide: Wide,
-    ranges: &[(&D::Block, usize, usize)],
+    ranges: &[(&D::Block, usize, usize, Values)],
     bytes: &mut Vec<u8>,
     host: &mut Vec<f64>,
 ) -> Result<(), GpuError> {
-    let total: usize = ranges.iter().map(|r| r.2).sum();
-    bytes.resize(8 * total, 0);
+    bytes.resize(ranges.iter().map(|r| r.2 * r.3.bytes()).sum(), 0);
     let mut reads = Vec::with_capacity(ranges.len());
     let mut rest = &mut bytes[..];
-    for &(b, at, n) in ranges {
-        let (head, tail) = rest.split_at_mut(8 * n);
+    for &(b, at, n, v) in ranges {
+        let (head, tail) = rest.split_at_mut(n * v.bytes());
         reads.push((b, at, head));
         rest = tail;
     }
     dev.read_many(&mut reads)?;
-    host.resize(total, 0.0);
-    wide.decode(bytes, host);
+    host.resize(ranges.iter().map(|r| r.2).sum(), 0.0);
+    let (mut b, mut h) = (&bytes[..], &mut host[..]);
+    for &(_, _, n, v) in ranges {
+        let (bh, bt) = b.split_at(n * v.bytes());
+        let (hh, ht) = h.split_at_mut(n);
+        v.decode(bh, hh);
+        (b, h) = (bt, ht);
+    }
     Ok(())
 }
 
@@ -185,9 +196,10 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         self.drop_reduction();
         let dev = self.factor.device();
         let params = arael_gpu::GpuSchurParams { f32_reduction: self.f32_reduction, ..Default::default() };
+        let values = self.values();
         self.schur = Some(match schur {
-            Some(s) => GpuSchur::with_params(dev, s, hsym, self.wide, &params)?,
-            None => GpuSchur::whole(dev, hsym, self.wide)?,
+            Some(s) => GpuSchur::with_params(dev, s, hsym, values, &params)?,
+            None => GpuSchur::whole_with_params(dev, hsym, values, &params)?,
         });
         Ok(())
     }
@@ -225,7 +237,7 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
             attempt_graph: None,
             step_graph: None,
             asm,
-            vec: LmVectors::new(dev, bdiag_pos, self.wide)?,
+            vec: LmVectors::new(dev, bdiag_pos, self.values())?,
             diag_host: vec![T::zero(); bdiag_pos.len()],
             bytes: Vec::new(),
             host: Vec::new(),
@@ -253,6 +265,7 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
     }
 
     fn route_compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T]) -> Result<T, DeviceFailure> {
+        let (values, wide) = (self.values(), Values::from(self.wide));
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a device route");
         // what the device holds is the last compute's only once this one
@@ -271,7 +284,7 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         let queued = r.asm.assemble_at(r.vec.x(), g, n, h, r.nh, cost).and_then(|()| r.vec.gather_diag(h));
         on_device(queued, "assembly")?;
         let diag = r.vec.diag();
-        let read = read_values(&**r.asm.device(), self.wide, &[(g.0, g.1, n), (diag.0, diag.1, n), (cost.0, cost.1, 1)], &mut r.bytes, &mut r.host);
+        let read = read_values(&**r.asm.device(), &[(g.0, g.1, n, values), (diag.0, diag.1, n, values), (cost.0, cost.1, 1, wide)], &mut r.bytes, &mut r.host);
         on_device(read, "read of the gradient")?;
         narrow(grad, &r.host[..n]);
         narrow(&mut r.diag_host, &r.host[n..2 * n]);
@@ -358,19 +371,21 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
 
     fn params(&mut self, x: &mut [T]) -> Result<(), DeviceFailure> {
         self.settle()?;
+        let values = self.values();
         let r = self.route.as_mut().expect("a resident solve has its device route");
         let at = r.vec.x();
-        on_device(read_values(&**r.asm.device(), self.wide, &[(at.0, at.1, x.len())], &mut r.bytes, &mut r.host), "read of the parameters")?;
+        on_device(read_values(&**r.asm.device(), &[(at.0, at.1, x.len(), values)], &mut r.bytes, &mut r.host), "read of the parameters")?;
         narrow(x, &r.host);
         Ok(())
     }
 
     fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]) -> Result<(), DeviceFailure> {
+        let values = self.values();
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a resident solve has its device route");
         let n = grad.len();
         let (g, d, s) = (gs.rhs_target(), r.vec.diag(), gs.step_view());
-        let read = read_values(&**r.asm.device(), self.wide, &[(g.0, g.1, n), (d.0, d.1, n), (s.0, s.1, n)], &mut r.bytes, &mut r.host);
+        let read = read_values(&**r.asm.device(), &[(g.0, g.1, n, values), (d.0, d.1, n, values), (s.0, s.1, n, values)], &mut r.bytes, &mut r.host);
         on_device(read, "read of the vectors")?;
         narrow(grad, &r.host[..n]);
         narrow(diagonal, &r.host[n..2 * n]);
@@ -379,11 +394,13 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
     }
 
     fn nonfinite(&mut self) -> Result<[usize; 4], DeviceFailure> {
+        let values = self.values();
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a resident solve has its device route");
         let n = r.vec.len();
         let (g, d, x, h) = (gs.rhs_target(), r.vec.diag(), r.vec.x(), gs.h_target());
-        let read = read_values(&**r.asm.device(), self.wide, &[(g.0, g.1, n), (d.0, d.1, n), (x.0, x.1, n), (h.0, h.1, r.nh)], &mut r.bytes, &mut r.host);
+        let ranges = [(g.0, g.1, n, values), (d.0, d.1, n, values), (x.0, x.1, n, values), (h.0, h.1, r.nh, values)];
+        let read = read_values(&**r.asm.device(), &ranges, &mut r.bytes, &mut r.host);
         on_device(read, "read of the vectors")?;
         let count = |v: &[f64]| v.iter().filter(|v| !v.is_finite()).count();
         let v = &r.host;

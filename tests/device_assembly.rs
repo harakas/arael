@@ -601,6 +601,165 @@ fn an_f32_quaternion_scene_assembles_and_solves_on_the_device_as_on_the_cpu() {
     }
 }
 
+/// A camera turned by an `EulerAngleParam`: the device keeps its reference
+/// rotation in the root's scalar, as the parameter does.
+#[arael::model]
+#[derive(Clone)]
+pub struct ECamera<T: Float> {
+    pub t: Param<vect3<T>>,
+    pub ea: arael::model::EulerAngleParam<T>,
+    pub intr: Param<vect3<T>>,
+    pub hb: SelfBlock<ECamera<T>, T>,
+}
+
+/// An observation by an [`ECamera`], as [`QObs`].
+#[arael::model]
+#[arael(constraint(hb, {
+    let pc = cam.ea.rotation_matrix() * pt.pos + cam.t;
+    let px = -pc.x / pc.z;
+    let py = -pc.y / pc.z;
+    let r2 = px * px + py * py;
+    let d = 1.0 + r2 * (cam.intr.y + cam.intr.z * r2);
+    [with_wide(cam.intr.x * d * px - eobs.xy.x), with_wide(cam.intr.x * d * py - eobs.xy.y)]
+}))]
+#[derive(Clone)]
+pub struct EObs<T: Float> {
+    #[arael(ref = root.cameras)]
+    pub cam: Ref<ECamera<T>>,
+    #[arael(ref = root.points)]
+    pub pt: Ref<Point<T>>,
+    pub xy: vect2<T>,
+    pub hb: CrossBlock<ECamera<T>, Point<T>, T>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct EScene {
+    pub cameras: refs::Vec<ECamera<f64>>,
+    pub points: refs::Vec<Point<f64>>,
+    pub observations: std::vec::Vec<EObs<f64>>,
+}
+
+#[arael::model]
+#[arael(root, f32, cost_f64)]
+#[derive(Clone)]
+pub struct ESceneF {
+    pub cameras: refs::Vec<ECamera<f32>>,
+    pub points: refs::Vec<Point<f32>>,
+    pub observations: std::vec::Vec<EObs<f32>>,
+}
+
+type EParts<T> = (refs::Vec<ECamera<T>>, refs::Vec<Point<T>>, std::vec::Vec<EObs<T>>);
+
+/// [`consistent_scene`] with the cameras turned by `EulerAngleParam`s.
+fn euler_parts<T: Float>() -> EParts<T> {
+    let (cams, points, obs) = consistent_scene::<T>();
+    let mut cameras = refs::Vec::new();
+    for c in cams.iter() {
+        let ea = c.ea.value;
+        let ea = vect3::new(T::from(ea.x).unwrap(), T::from(ea.y).unwrap(), T::from(ea.z).unwrap());
+        cameras.push(ECamera { t: c.t.clone(), ea: arael::model::EulerAngleParam::new(ea), intr: c.intr.clone(), hb: SelfBlock::new() });
+    }
+    let observations = obs
+        .iter()
+        .map(|o| EObs { cam: cameras.ref_at(o.cam.index() as usize), pt: points.ref_at(o.pt.index() as usize), xy: o.xy, hb: CrossBlock::new() })
+        .collect();
+    (cameras, points, observations)
+}
+
+fn euler_scene() -> EScene {
+    let (cameras, points, observations) = euler_parts::<f64>();
+    EScene { cameras, points, observations }
+}
+
+fn euler_scene_f32() -> ESceneF {
+    let (cameras, points, observations) = euler_parts::<f32>();
+    ESceneF { cameras, points, observations }
+}
+
+/// The parameter values of an [`EScene`], the rotations as their angles.
+fn euler_state(s: &EScene) -> Vec<f64> {
+    let mut v = Vec::new();
+    for c in s.cameras.iter() {
+        let a = c.ea.value;
+        v.extend([c.t.value.x, c.t.value.y, c.t.value.z, a.x, a.y, a.z, c.intr.value.x, c.intr.value.y, c.intr.value.z]);
+    }
+    for p in s.points.iter() {
+        v.extend([p.pos.value.x, p.pos.value.y, p.pos.value.z]);
+    }
+    v
+}
+
+/// Cameras turned by `EulerAngleParam`s assemble on the device as on the
+/// CPU, and the solve re-centres them there and leaves the model where the
+/// CPU's does.
+#[test]
+fn an_euler_scene_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
+    use arael::simple_lm::{LmConfig, SparseFaer};
+    let mut s = euler_scene();
+    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x1 = perturbed(&x);
+    if checks_f64("the Euler scene") {
+        for (wide, tol) in [(Wide::F64, 1e-11), (Wide::Df32, 1e-10)] {
+            let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+        }
+    }
+    let cfg = LmConfig::<f64> { max_iters: 50, ..Default::default() };
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut s = euler_scene();
+        let mut solver = SparseFaer::<f64>::from_options(&options(gpu, true));
+        let r = s.solve_with(&mut solver, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        (r.end_cost, r.iterations, euler_state(&s))
+    };
+    let (cpu, iters, cpu_state) = run(None);
+    assert!(iters > 2, "accepted steps re-centre the rotations: {iters} iterations");
+    for d in devices() {
+        let (device, _, state) = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+        assert_close(&state, &cpu_state, 1e-7, &format!("{}: the solved model", label(&d)));
+    }
+}
+
+/// The f32 twin: the reference rotations are f32 on the device as in the
+/// parameter; the cameras assemble on the device as on the CPU, solve on
+/// every device to the f64 scene's optimum, and the solve writes the
+/// re-centred rotations back: at them, the model costs what the solve
+/// ended at. Not after `serialize`, which seeds each reference from its
+/// angles again: an f32 matrix reference drifts from orthonormal as steps
+/// compose into it (2e-6 after 125 steps here, the CPU's f32 route's as the
+/// device's), and the seeded one costs 1e-5 to 2e-5 more.
+#[test]
+fn an_f32_euler_scene_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::{ReferenceKind, Values, Wide};
+    use arael::simple_lm::SparseFaer;
+    assert!(ReferenceKind::Euler.scalar(Values::f32(Wide::F64)).is_f32(), "the reference in f32");
+    let what = "the f32 Euler scene";
+    f32_twin_assembles_and_solves(euler_scene, euler_scene_f32, |gpu| options(gpu, true), what);
+    for d in f32_devices() {
+        let mut s = euler_scene_f32();
+        let start: Vec<f64> = s.cameras.iter().flat_map(|c| [c.ea.value.x, c.ea.value.y, c.ea.value.z]).map(|a| a as f64).collect();
+        let r = s.solve_with(&mut SparseFaer::<f32>::from_options(&options(Some(&d), true)), &to_the_optimum()).unwrap();
+        let moved = s.cameras.iter().flat_map(|c| [c.ea.value.x, c.ea.value.y, c.ea.value.z]).zip(&start).fold(0.0f64, |m, (a, b)| m.max((a as f64 - b).abs()));
+        assert!(moved > 1e-4, "{what} {}: the rotations moved by {moved}", label(&d));
+        // the parameters as serialize gives them, at the references the solve wrote back
+        let refs: Vec<_> = s.cameras.iter().map(|c| c.ea.ref_rotation).collect();
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        for (c, m) in s.cameras.iter_mut().zip(&refs) {
+            c.ea.ref_rotation = *m;
+        }
+        let (left, end) = (s.calc_cost(&x) as f64, r.end_cost as f64);
+        assert!((left - end).abs() <= 1e-6 * end, "{what} {}: the model left behind costs {left}, the solve ended at {end}", label(&d));
+    }
+}
+
 /// `parts` as a [`SceneW`]: the rotations' state moved into df32.
 fn wide_scene((cams, points, obs): Parts<f32>) -> SceneW {
     let mut cameras = refs::Vec::new();
@@ -1324,8 +1483,8 @@ fn checks_f64(what: &str) -> bool {
 
 /// The device check of an f32 model against its CPU assembly, at its start
 /// and at a point off it, in each wide scalar of `device()`: the cost to
-/// `cost_tol`, the gradient and the Hessian to `deriv_tol` (the CPU sums its
-/// f32 terms in f32, the device in its wide scalar).
+/// `cost_tol`, the gradient and the Hessian to `deriv_tol` (both sum their
+/// f32 terms in f32, the CPU in order, the device in trees).
 fn checks_f32<P: LmProblemInternals<f32> + RootProblem<f32>>(s: &mut P, cost_tol: f64, deriv_tol: f64, what: &str) {
     assert_eq!(LmProblemInternals::<f32>::device_unsupported(s), None, "{what}");
     let mut x = Vec::new();
@@ -1350,8 +1509,8 @@ fn optimum_of<P: LmProblemInternals<f64> + RootProblem<f64>>(mut s: P, opts: &ar
 
 /// An f32 model solved to its optimum ([`to_the_optimum`]) through `opts`,
 /// a fresh `make()` each, on the CPU's f32 route and on every device of
-/// [`f32_devices`]: the device routes, their sums wide, land on `optimum`
-/// (the f64 twin's) to `tol`, the CPU's f32 route to 1e-3; relative to the
+/// [`f32_devices`]: the device routes land on `optimum` (the f64 twin's)
+/// to `tol`, the CPU's f32 route to 1e-3; relative to the
 /// optimum's cost, or to the start's where the optimum's is rounding of
 /// zero.
 fn f32_solves_reach<P: LmProblemInternals<f32> + RootProblem<f32>>(
@@ -2714,7 +2873,10 @@ fn a_robust_bundle_adjustment_assembles_and_solves_on_the_device_as_on_the_cpu()
 }
 
 /// The f32 twin: the robust scene solves on every device to the f64
-/// scene's optimum.
+/// scene's optimum, to the CPU's f32 route's 1e-3. The scene has local
+/// minima within 2e-4 of each other: an f64 solve from where each route
+/// ends stays there (2277.51 to 2277.90, the f64 solve from the start
+/// 2277.65), and which one a route reaches follows its rounding.
 #[test]
 fn an_f32_robust_bundle_adjustment_solves_on_the_device_to_the_optimum() {
     let (cameras, points, observations) = robust_scene::<f64>();
@@ -2723,7 +2885,82 @@ fn an_f32_robust_bundle_adjustment_solves_on_the_device_to_the_optimum() {
         let (cameras, points, observations) = robust_scene::<f32>();
         SceneRF { cameras, points, observations }
     };
-    f32_solves_reach(make, |gpu| options(gpu, true), optimum, 1e-4, "the f32 robust bundle adjustment");
+    f32_solves_reach(make, |gpu| options(gpu, true), optimum, 1e-3, "the f32 robust bundle adjustment");
+}
+
+/// One row, `v * d`, `v` a parameter held at 1: the residual is the datum.
+#[arael::model]
+#[arael(constraint(hb, { [cterm.v * cterm.d] }))]
+#[derive(Clone)]
+pub struct CTerm<T: Float> {
+    pub v: Param<T>,
+    pub d: T,
+    pub hb: SelfBlock<CTerm<T>, T>,
+}
+
+#[arael::model]
+#[arael(root, f32)]
+pub struct CostPlainF32 {
+    pub terms: refs::Vec<CTerm<f32>>,
+}
+
+#[arael::model]
+#[arael(root, f32, cost_kahan)]
+pub struct CostKahanF32 {
+    pub terms: refs::Vec<CTerm<f32>>,
+}
+
+#[arael::model]
+#[arael(root, f32, cost_f64)]
+pub struct CostWideF32 {
+    pub terms: refs::Vec<CTerm<f32>>,
+}
+
+/// 200k rows of data `m / 2^24`, `m` below 2^24 spread over its range:
+/// f32 holds each exactly and the wide scalar its square; the exact sum of
+/// the squares, formed in integers.
+fn cost_terms() -> (refs::Vec<CTerm<f32>>, f64) {
+    const N: u64 = 200_000;
+    let scale = 16_777_216.0f64;
+    let m = |i: u64| (i.wrapping_mul(2_654_435_761) % (1 << 24)) + 1;
+    let mut v = refs::Vec::new();
+    for i in 0..N {
+        v.push(CTerm { v: Param::new(1.0f32), d: (m(i) as f64 / scale) as f32, hb: SelfBlock::new() });
+    }
+    let exact: u128 = (0..N).map(|i| (m(i) as u128) * (m(i) as u128)).sum();
+    (v, exact as f64 / (scale * scale))
+}
+
+/// The device sums an f32 root's cost as the CPU's f32 route does: in f32
+/// (`cost_kahan` too: the device's sums are trees), and with `cost_f64` in
+/// the wide scalar, there to the exact sum. The generated source says
+/// which.
+#[test]
+fn an_f32_root_s_cost_sums_on_the_device_as_its_keywords_say() {
+    use arael::__gpu::DeviceRoot;
+    fn cost_of<P: LmProblemInternals<f32> + RootProblem<f32>>(s: &mut P, wide: arael::__gpu::Wide) -> arael::__gpu::DeviceCheck {
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        arael::__gpu::device_check(s, &x, &x, &device(), wide)
+    }
+    let source = |s: &dyn LmProblemInternals<f32>| s.device_root().unwrap().device_cpp();
+    let (terms, exact) = cost_terms();
+    let mut plain = CostPlainF32 { terms: terms.clone() };
+    let mut kahan = CostKahanF32 { terms: terms.clone() };
+    let mut wide_cost = CostWideF32 { terms };
+    assert!(source(&plain).contains("typedef V CACC;") && source(&kahan).contains("typedef V CACC;"));
+    assert!(source(&wide_cost).contains("typedef W CACC;"));
+    for wide in check_wides() {
+        for (what, c) in [("plain", cost_of(&mut plain, wide).device_cost), ("cost_kahan", cost_of(&mut kahan, wide).device_cost)] {
+            assert_eq!(c as f32 as f64, c, "{what} {wide:?}: an f32 sum");
+            assert!((c - exact).abs() <= 2e-6 * exact, "{what} {wide:?}: {c} against the exact {exact}");
+        }
+        let chk = cost_of(&mut wide_cost, wide);
+        let tol = if wide == arael::__gpu::Wide::F64 { 1e-13 } else { 1e-11 };
+        assert!((chk.device_cost - exact).abs() <= tol * exact, "cost_f64 {wide:?}: {} against the exact {exact}", chk.device_cost);
+        // the CPU's f64 sum rounded to f32
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= 0.5 * f32::EPSILON as f64 * exact, "cost_f64 {wide:?}: {chk:?}");
+    }
 }
 
 /// A point held near where it was seen.
