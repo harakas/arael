@@ -1216,6 +1216,10 @@ fn f32_solves_of_slightly_changed_structures_allocate_nothing() {
     }
 }
 
+/// The log sink is the process's: the tests that capture its lines hold
+/// this while theirs is set, or one's `reset_sink` takes the other's lines.
+static LOG_SINK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// With a device assembly the first linearization is assembled on the
 /// device too (the CPU only brings the model's working copies to the
 /// start, which the layout reads), and the solve still lands on the CPU
@@ -1233,9 +1237,11 @@ fn the_first_linearization_is_assembled_on_the_device() {
     for d in devices() {
         let lines: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
         let sink = lines.clone();
+        let turn = LOG_SINK.lock().unwrap_or_else(|e| e.into_inner());
         arael::log::set_sink(move |_, m| sink.lock().unwrap().push(m.to_string()));
         let device = run(Some(&d), true);
         arael::log::reset_sink();
+        drop(turn);
         let lines = lines.lock().unwrap();
         let name = label(&d);
         assert!(lines.iter().any(|l| l.starts_with("gpu:") && l.contains("its first assembly")), "{name}: {lines:#?}");
@@ -1262,9 +1268,11 @@ fn an_f32_first_linearization_is_assembled_on_the_device() {
     for d in f32_devices() {
         let lines: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
         let sink = lines.clone();
+        let turn = LOG_SINK.lock().unwrap_or_else(|e| e.into_inner());
         arael::log::set_sink(move |_, m| sink.lock().unwrap().push(m.to_string()));
         let device = run(Some(&d), true);
         arael::log::reset_sink();
+        drop(turn);
         let lines = lines.lock().unwrap();
         let name = label(&d);
         assert!(lines.iter().any(|l| l.starts_with("gpu:") && l.contains("its first assembly")), "{name}: {lines:#?}");
