@@ -799,10 +799,11 @@ impl<T: crate::utils::Float> EulerAngleParam<T> {
     pub fn index(&self) -> u32 { self.index }
     /// Write per-component indices into `out`, or `u32::MAX` if fixed.
     pub fn write_indices(&self, out: &mut [u32]) { ParamSlot::write_param_indices(self, out) }
-    /// Absorb current delta into reference rotation and reset delta.
+    /// Absorb current delta into reference rotation and reset delta. The
+    /// composition is re-orthonormalized ([`compose_reference`]), so its
+    /// rounding does not build up over the steps.
     pub fn advance(&mut self) {
-        self.ref_rotation = self.ref_rotation
-            * matrix3::<T>::rotation_from_euler_angles(self.delta);
+        self.ref_rotation = compose_reference(self.ref_rotation, self.delta);
         self.delta = vect3::<T>::default();
     }
     /// Precompute composed rotation and work angles from current delta + ref_rotation.
@@ -887,8 +888,7 @@ impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamT
         if self.index != u32::MAX {
             let i = self.index as usize;
             let dea = <vect3<T> as ParamType>::read_from(&data[i..i + 3]);
-            self.ref_rotation = self.ref_rotation
-                * matrix3::<T>::rotation_from_euler_angles(dea);
+            self.ref_rotation = compose_reference(self.ref_rotation, dea);
             self.value = self.ref_rotation.get_euler_angles();
             self.delta = vect3::<T>::default();
         }
@@ -927,6 +927,19 @@ impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamT
             self.delta = vect3::<T>::default();
         }
     }
+}
+
+/// An Euler-angle reference rotation moved by the step `delta`: `r
+/// R(delta)`, then one Newton step towards the nearest rotation, `m (3 I -
+/// m^T m) / 2`, which squares the product's distance from orthonormal. In
+/// f32 the plain product drifts from orthonormal as steps compose into it
+/// (2e-6 after 125 steps); with the Newton step it stays at f32's rounding.
+/// The device's `euler_advance` (arael-gpu kernels/assembly.cpp) does the
+/// same.
+fn compose_reference<T: crate::utils::Float>(r: matrix3<T>, delta: vect3<T>) -> matrix3<T> {
+    let m = r * matrix3::<T>::rotation_from_euler_angles(delta);
+    let three = T::from(3.0).unwrap();
+    (m * (matrix3::<T>::identity() * three - m.transpose() * m)) * T::half()
 }
 
 /// A 3x3 matrix from its row-major f64 entries.
@@ -1029,10 +1042,10 @@ impl<T: crate::utils::Float, H: crate::utils::Wide<T>> MixedEulerAngleParam<T, H
     pub fn index(&self) -> u32 { self.index }
     /// Write per-component indices into `out`, or `u32::MAX` if fixed.
     pub fn write_indices(&self, out: &mut [u32]) { ParamSlot::write_param_indices(self, out) }
-    /// Absorb current delta into reference rotation and reset delta.
+    /// Absorb current delta into reference rotation and reset delta,
+    /// re-orthonormalized as [`EulerAngleParam::advance`].
     pub fn advance(&mut self) {
-        self.ref_rotation = self.ref_rotation
-            * matrix3::<H>::rotation_from_euler_angles(self.delta);
+        self.ref_rotation = compose_reference(self.ref_rotation, self.delta);
         self.delta = vect3::<H>::default();
     }
     /// Precompute the composed rotation, its `T` narrowing and Jacobian, and
@@ -1120,8 +1133,7 @@ impl<T: crate::utils::Float, H: crate::utils::Wide<T>> Model for MixedEulerAngle
         if self.index != u32::MAX {
             let i = self.index as usize;
             let dea = <vect3<H> as ParamType>::read_from(&data[i..i + 3]);
-            self.ref_rotation = self.ref_rotation
-                * matrix3::<H>::rotation_from_euler_angles(dea);
+            self.ref_rotation = compose_reference(self.ref_rotation, dea);
             self.value = self.ref_rotation.get_euler_angles();
             self.delta = vect3::<H>::default();
         }

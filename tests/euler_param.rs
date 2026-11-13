@@ -376,3 +376,43 @@ fn aerobatics_slam_f32() {
         assert!(err < 3e-3, "pose {} orientation error {} (f32 bound)", i, err);
     }
 }
+
+/// The largest entry of |m m^T - I|.
+fn orthonormality_error(m: &matrix3d) -> f64 {
+    let p = *m * m.transpose();
+    let mut e = 0.0f64;
+    for i in 0..3 {
+        for j in 0..3 {
+            e = e.max((p[i][j] - if i == j { 1.0 } else { 0.0 }).abs());
+        }
+    }
+    e
+}
+
+/// An f32 reference rotation stays orthonormal to f32's rounding over many
+/// composed steps (`advance` re-orthonormalizes each composition) and on
+/// the rotation the same steps compose to in f64; the plain f32 product of
+/// the steps drifts from orthonormal.
+#[test]
+fn an_f32_reference_stays_orthonormal_over_many_steps() {
+    let start = vect3f::new(0.1, -0.2, 0.3);
+    let mut ea = EulerAngleParam::<f32>::new(start);
+    ea.ref_rotation = matrix3f::rotation_from_euler_angles(start);
+    let mut plain = ea.ref_rotation;
+    let mut wide = matrix3d::rotation_from_euler_angles(start.cast());
+    for k in 0..2000 {
+        let k = k as f64;
+        let d = vect3f::new((0.01 * k.sin()) as f32, (0.01 * (1.3 * k).cos()) as f32, (0.01 * (0.7 * k).sin()) as f32);
+        ea.delta = d;
+        ea.advance();
+        plain = plain * matrix3f::rotation_from_euler_angles(d);
+        wide = wide * matrix3d::rotation_from_euler_angles(d.cast());
+    }
+    let (kept, drifted) = (orthonormality_error(&ea.ref_rotation.cast()), orthonormality_error(&plain.cast()));
+    let off = (0..3).flat_map(|i| (0..3).map(move |j| (i, j))).fold(0.0f64, |m, (i, j)| m.max((ea.ref_rotation[i][j] as f64 - wide[i][j]).abs()));
+    // measured 7e-8, 9e-6 and 4e-6
+    let eps = f32::EPSILON as f64;
+    assert!(kept < 2.0 * eps, "the reference {kept} from orthonormal");
+    assert!(drifted > 20.0 * eps, "the plain product {drifted} from orthonormal: the test sees a drift");
+    assert!(off < 2e-5, "the reference {off} off the f64 composition");
+}

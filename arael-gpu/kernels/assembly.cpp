@@ -259,9 +259,11 @@ DEVICE void euler_derivs(GLOBAL const T* RESTRICT refr, GLOBAL const F* RESTRICT
     }
 }
 
-// The reference rotations moved by their steps, one thread per entity:
-// refr = refr R(delta), as EulerAngleParam::advance does after an accepted
-// step; T as euler_values'.
+// The reference rotations moved by their steps, one thread per entity, as
+// EulerAngleParam::advance does after an accepted step (compose_reference,
+// src/model.rs): m = refr R(delta), then refr = m (3 I - m^T m) / 2, one
+// Newton step towards the nearest rotation, so the composition's rounding
+// does not build up; T as euler_values'.
 template <typename T>
 DEVICE void euler_advance(GLOBAL T* RESTRICT refr, GLOBAL const F* RESTRICT ev, GLOBAL const u32* RESTRICT at, u32 n, u32 e) {
     if (e >= n) return;
@@ -280,8 +282,29 @@ DEVICE void euler_advance(GLOBAL T* RESTRICT refr, GLOBAL const F* RESTRICT ev, 
             m[i * 3 + j] = v;
         }
     }
+    // q = 3 I - m^T m
+    T q[9];
+    T zero = 0.0f, three = 3.0f, half = 0.5f;
 #pragma unroll
-    for (u32 i = 0; i < 9; i++) refr[r0 + i] = m[i];
+    for (u32 i = 0; i < 3; i++) {
+#pragma unroll
+        for (u32 j = 0; j < 3; j++) {
+            T p = 0.0f;
+#pragma unroll
+            for (u32 k = 0; k < 3; k++) p += m[k * 3 + i] * m[k * 3 + j];
+            q[i * 3 + j] = (i == j ? three : zero) - p;
+        }
+    }
+#pragma unroll
+    for (u32 i = 0; i < 3; i++) {
+#pragma unroll
+        for (u32 j = 0; j < 3; j++) {
+            T v = 0.0f;
+#pragma unroll
+            for (u32 k = 0; k < 3; k++) v += m[i * 3 + k] * q[k * 3 + j];
+            refr[r0 + i * 3 + j] = v * half;
+        }
+    }
 }
 
 KERNEL_THREADS(256) void k_euler_values(GLOBAL const V* RESTRICT refr, GLOBAL const F* RESTRICT ev,

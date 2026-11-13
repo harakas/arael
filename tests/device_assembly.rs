@@ -728,13 +728,12 @@ fn an_euler_scene_assembles_and_solves_on_the_device_as_on_the_cpu() {
 }
 
 /// The f32 twin: the reference rotations are f32 on the device as in the
-/// parameter; the cameras assemble on the device as on the CPU, solve on
-/// every device to the f64 scene's optimum, and the solve writes the
-/// re-centred rotations back: at them, the model costs what the solve
-/// ended at. Not after `serialize`, which seeds each reference from its
-/// angles again: an f32 matrix reference drifts from orthonormal as steps
-/// compose into it (2e-6 after 125 steps here, the CPU's f32 route's as the
-/// device's), and the seeded one costs 1e-5 to 2e-5 more.
+/// parameter; the cameras assemble on the device as on the CPU and solve on
+/// every device to the f64 scene's optimum. Each route keeps its references
+/// orthonormal to f32's rounding (an accepted step's composition is
+/// re-orthonormalized, on the CPU and on the device), so the model the
+/// solve writes back costs what the solve ended at, after `serialize` seeds
+/// the references from their angles again.
 #[test]
 fn an_f32_euler_scene_assembles_and_solves_on_the_device_as_on_the_cpu() {
     use arael::__gpu::{ReferenceKind, Values, Wide};
@@ -742,21 +741,28 @@ fn an_f32_euler_scene_assembles_and_solves_on_the_device_as_on_the_cpu() {
     assert!(ReferenceKind::Euler.scalar(Values::f32(Wide::F64)).is_f32(), "the reference in f32");
     let what = "the f32 Euler scene";
     f32_twin_assembles_and_solves(euler_scene, euler_scene_f32, |gpu| options(gpu, true), what);
-    for d in f32_devices() {
+    let routes: Vec<Option<GpuDevice>> = std::iter::once(None).chain(f32_devices().into_iter().map(Some)).collect();
+    for gpu in &routes {
+        let name = gpu.as_ref().map_or("the CPU".to_string(), label);
         let mut s = euler_scene_f32();
         let start: Vec<f64> = s.cameras.iter().flat_map(|c| [c.ea.value.x, c.ea.value.y, c.ea.value.z]).map(|a| a as f64).collect();
-        let r = s.solve_with(&mut SparseFaer::<f32>::from_options(&options(Some(&d), true)), &to_the_optimum()).unwrap();
+        let r = s.solve_with(&mut SparseFaer::<f32>::from_options(&options(gpu.as_ref(), true)), &to_the_optimum()).unwrap();
+        assert!(r.accepted_iterations > 100, "{what} {name}: {} accepted steps compose into the references", r.accepted_iterations);
         let moved = s.cameras.iter().flat_map(|c| [c.ea.value.x, c.ea.value.y, c.ea.value.z]).zip(&start).fold(0.0f64, |m, (a, b)| m.max((a as f64 - b).abs()));
-        assert!(moved > 1e-4, "{what} {}: the rotations moved by {moved}", label(&d));
-        // the parameters as serialize gives them, at the references the solve wrote back
-        let refs: Vec<_> = s.cameras.iter().map(|c| c.ea.ref_rotation).collect();
-        let mut x = Vec::new();
-        s.serialize(&mut x);
-        for (c, m) in s.cameras.iter_mut().zip(&refs) {
-            c.ea.ref_rotation = *m;
+        assert!(moved > 1e-4, "{what} {name}: the rotations moved by {moved}");
+        // the largest entry of |R R^T - I| over the references written back
+        let mut off = 0.0f64;
+        for c in s.cameras.iter() {
+            let m = c.ea.ref_rotation;
+            for i in 0..3 {
+                for j in 0..3 {
+                    let p: f64 = (0..3).map(|k| m[i][k] as f64 * m[j][k] as f64).sum();
+                    off = off.max((p - if i == j { 1.0 } else { 0.0 }).abs());
+                }
+            }
         }
-        let (left, end) = (s.calc_cost(&x) as f64, r.end_cost as f64);
-        assert!((left - end).abs() <= 1e-6 * end, "{what} {}: the model left behind costs {left}, the solve ended at {end}", label(&d));
+        assert!(off < 4.0 * f32::EPSILON as f64, "{what} {name}: the references {off} from orthonormal");
+        left_behind_costs(&mut s, &r, &format!("{what} {name}"));
     }
 }
 
