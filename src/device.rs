@@ -1101,7 +1101,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
 
     /// `n` values of H or the gradient zeroed, in [`values`](Self::values).
     fn zero_values(&self, t: Target<'_, D::Block>, n: usize) -> Result<(), GpuError> {
-        self.run(&self.kernels.zero_values, n, &[Arg::Block(t.0, t.1), Arg::U32(n as u32)])
+        self.run(&self.kernels.zero_values, n.div_ceil(4), &[Arg::Block(t.0, t.1), Arg::U32(n as u32)])
     }
 
     /// The entities' parameter values and the referenced fields' values at

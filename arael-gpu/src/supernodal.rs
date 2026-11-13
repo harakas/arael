@@ -510,7 +510,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let factor = Arg::Block(&self.work, self.sec.factor);
         let fail = Arg::Block(fail.0, fail.1);
         let flen = self.factor_vals as u32;
-        self.run(&self.k.zero, flen.div_ceil(THREADS).max(1), THREADS, 0, &[factor, Arg::U32(flen)])?;
+        self.run(&self.k.zero, flen.div_ceil(4).div_ceil(THREADS).max(1), THREADS, 0, &[factor, Arg::U32(flen)])?;
         let seed_args = [list(self.tiles), Arg::Block(vals.0, vals.1), factor, Arg::U32(self.ntiles)];
         self.run(seed, self.ntiles.max(1), self.seed_lanes, 0, &seed_args)?;
         for step in &self.steps {

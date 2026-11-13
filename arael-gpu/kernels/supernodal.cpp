@@ -20,9 +20,15 @@
 
 typedef SCALAR F;
 
+// n values of buf zeroed, 4 a thread as k_zero_values (assembly.cpp), over
+// ceil(n / 4) threads.
 KERNEL_THREADS(THREADS) void k_zero(GLOBAL F* RESTRICT buf, u32 n) {
+    u32 m = (n + 3) / 4;
     u32 i = global_x();
-    if (i < n) buf[i] = F(0);
+    if (i >= m) return;
+#pragma unroll
+    for (u32 k = 0; k < 4; k++)
+        if (i + k * m < n) buf[i + k * m] = F(0);
 }
 
 KERNEL_THREADS(THREADS) void k_zero_u32(GLOBAL u32* RESTRICT buf, u32 n) {

@@ -661,14 +661,21 @@ KERNEL_THREADS(256) void k_unitvec_advance(GLOBAL V* RESTRICT refr, GLOBAL const
 }
 
 // n values of x zeroed: an assembly's targets before the sums add into them
-// (the cost in W; H and the gradient in V).
+// (the cost in W; H and the gradient in V). k_zero_values, for H's
+// millions, takes 4 values a thread, i, i + m, i + 2m and i + 3m with
+// m = ceil(n / 4) (launched over m): one a thread left an Apple GPU
+// writing f32 at under half its bandwidth.
 KERNEL_THREADS(256) void k_zero_wide(GLOBAL W* RESTRICT x, u32 n) {
     u32 i = global_x();
     if (i < n) x[i] = 0.0f;
 }
 KERNEL_THREADS(256) void k_zero_values(GLOBAL V* RESTRICT x, u32 n) {
+    u32 m = (n + 3) / 4;
     u32 i = global_x();
-    if (i < n) x[i] = 0.0f;
+    if (i >= m) return;
+#pragma unroll
+    for (u32 k = 0; k < 4; k++)
+        if (i + k * m < n) x[i + k * m] = 0.0f;
 }
 
 // The steps of x zeroed, one thread per entity: the len global indices at
