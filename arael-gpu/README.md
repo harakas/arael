@@ -36,9 +36,17 @@ let mut f = GpuFactor::new(&dev, GpuPrecision::F32, &sn_of_s, &schur_sym.s, &Def
 let stats = g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut delta)?;
 ```
 
-`Wide` is the scalar the device keeps and sums H, the gradient, the cost,
-the reduction and the LM vectors in: `f64`, or `df32` (two f32, about 48
-bits, f32 arithmetic only) for cards whose f64 is slow.
+`Wide` is the scalar the device keeps and sums the cost and the
+reduction in: `f64`, or `df32` (two f32, about 48 bits, f32 arithmetic
+only) for cards whose f64 is slow. `Values` is the scalar of H, the
+gradient, the step and the LM vectors: the root's, as the CPU keeps them,
+f32 for an f32 root, else the wide scalar. A `Wide` converts to the
+values of an f64 root.
+
+```rust,ignore
+// an f32 root's H and gradient, on a device without fast f64
+let mut g = GpuSchur::new(&dev, &schur_sym, h.symbolic(), Values::f32(Wide::Df32))?;
+```
 
 Every device has a stream of its own and a pool of device memory: a block
 that is dropped goes back to the pool and is handed out again, and a
@@ -237,6 +245,7 @@ takes a tile of S per lockstep unit (a warp or a wavefront):
 - `f32_reduction`: whether the reduction computes in f32, as the CPU's f32
   route (the eliminated blocks' factors, W, S, the reduced right-hand side
   and the eliminated blocks' step), for a solve with an f32 factor that
-  does not refine against S. Off: in the wide scalar. arael turns it on
-  for an f32 solve, unless `GpuDevice::with_wide_schur` keeps the wide
-  scalar.
+  does not refine against S. The factors, W, S, the reduced right-hand
+  side and the kept blocks' solution are stored in f32. Off: in the wide
+  scalar. arael turns it on for an f32 solve, unless
+  `GpuDevice::with_wide_schur` keeps the wide scalar.

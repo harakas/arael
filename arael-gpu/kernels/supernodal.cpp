@@ -1665,11 +1665,11 @@ KERNEL_THREADS_REGS(THREADS) void k_bwd_chain(GLOBAL const u32* RESTRICT gate, G
     }
 }
 
-// The right-hand side into the factor's ordering and scalar: one thread per
-// permuted block.
-KERNEL_THREADS(THREADS) void k_perm_in(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT x, GLOBAL F* RESTRICT xb, u32 nb) {
+// The right-hand side x (T: W, or f32 for an f32 reduction's kept
+// solution) into the factor's ordering and scalar: one thread per permuted
+// block, k the thread's.
+template <typename T> DEVICE void perm_in(GLOBAL const u32* gate, GLOBAL const u32* plan, GLOBAL const T* x, GLOBAL F* xb, u32 nb, u32 k) {
     if (gate[0] == 0) return;
-    u32 k = global_x();
     if (k < nb) {
         u32 old = plan[plan[H_ORDER] + k];
         u32 w = plan[plan[H_BLK_WIDTH] + k];
@@ -1678,16 +1678,27 @@ KERNEL_THREADS(THREADS) void k_perm_in(GLOBAL const u32* RESTRICT gate, GLOBAL c
         for (u32 i = 0; i < w; i++) xb[dst + i] = (F)x[src + i];
     }
 }
+KERNEL_THREADS(THREADS) void k_perm_in(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT x, GLOBAL F* RESTRICT xb, u32 nb) {
+    perm_in(gate, plan, x, xb, nb, global_x());
+}
+KERNEL_THREADS(THREADS) void k_perm_in_f32(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const float* RESTRICT x, GLOBAL F* RESTRICT xb, u32 nb) {
+    perm_in(gate, plan, x, xb, nb, global_x());
+}
 
-// The solution back into the matrix's ordering, in the wide scalar.
-KERNEL_THREADS(THREADS) void k_perm_out(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT xb, GLOBAL W* RESTRICT x, u32 nb) {
+// The solution back into the matrix's ordering, in T (as perm_in's).
+template <typename T> DEVICE void perm_out(GLOBAL const u32* gate, GLOBAL const u32* plan, GLOBAL const F* xb, GLOBAL T* x, u32 nb, u32 k) {
     if (gate[0] == 0) return;
-    u32 k = global_x();
     if (k < nb) {
         u32 old = plan[plan[H_ORDER] + k];
         u32 w = plan[plan[H_BLK_WIDTH] + k];
         u32 src = plan[plan[H_SC_START] + k];
         u32 dst = plan[plan[H_PART] + old];
-        for (u32 i = 0; i < w; i++) x[dst + i] = (W)xb[src + i];
+        for (u32 i = 0; i < w; i++) x[dst + i] = (T)xb[src + i];
     }
+}
+KERNEL_THREADS(THREADS) void k_perm_out(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT xb, GLOBAL W* RESTRICT x, u32 nb) {
+    perm_out(gate, plan, xb, x, nb, global_x());
+}
+KERNEL_THREADS(THREADS) void k_perm_out_f32(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT xb, GLOBAL float* RESTRICT x, u32 nb) {
+    perm_out(gate, plan, xb, x, nb, global_x());
 }

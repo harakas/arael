@@ -99,6 +99,8 @@ struct Kernels<K> {
     bwd_chain: K,
     perm_in: K,
     perm_out: K,
+    perm_in_f32: K,
+    perm_out_f32: K,
     tile_inv: K,
     fwd_trsv_wide: K,
     bwd_trsv_wide: K,
@@ -408,12 +410,12 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let seed_lanes = dev.arch().warp;
         let defines = format!("{}{}", wide.defines(), defines(F::CPP, fs, lu, seed_lanes, sizes));
         let source = format!("{WIDE}\n{SOURCE}");
-        let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out", "k_tile_inv", "k_fwd_trsv_wide", "k_bwd_trsv_wide", "k_big_pair"];
+        let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out", "k_perm_in_f32", "k_perm_out_f32", "k_tile_inv", "k_fwd_trsv_wide", "k_bwd_trsv_wide", "k_big_pair"];
         let kernels = dev.compile_many(&source, &defines, &entries)?;
         let seed_f64 = if dev.arch().has_f64 { Some(dev.compile(&source, &defines, "k_seed_f64")?) } else { None };
-        let [zero, zero_u32, seed_f32, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv, fwd_trsv_wide, bwd_trsv_wide, big_pair]: [D::Kernel; 23] =
+        let [zero, zero_u32, seed_f32, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, perm_in_f32, perm_out_f32, tile_inv, fwd_trsv_wide, bwd_trsv_wide, big_pair]: [D::Kernel; 25] =
             kernels.try_into().ok().expect("a kernel per entry point");
-        let k = Kernels { zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, tile_inv, fwd_trsv_wide, bwd_trsv_wide, big_pair };
+        let k = Kernels { zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out, perm_in_f32, perm_out_f32, tile_inv, fwd_trsv_wide, bwd_trsv_wide, big_pair };
         Ok(GpuSupernodal {
             dev: dev.clone(),
             k,
@@ -494,6 +496,12 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     /// caller zeroes it, and reads it with its result).
     pub fn factorize_device(&self, vals: (&D::Block, usize), fail: (&D::Block, usize)) -> Result<(), GpuError> {
         self.factorize_with(vals, &self.k.seed_wide, fail)
+    }
+
+    /// [`factorize_device`](Self::factorize_device) from f32 tile values (S
+    /// formed by an f32 reduction).
+    pub fn factorize_device_f32(&self, vals: (&D::Block, usize), fail: (&D::Block, usize)) -> Result<(), GpuError> {
+        self.factorize_with(vals, &self.k.seed_f32, fail)
     }
 
     fn factorize_with(&self, vals: (&D::Block, usize), seed: &D::Kernel, fail: (&D::Block, usize)) -> Result<(), GpuError> {
@@ -596,7 +604,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         self.host_bytes.clear();
         self.wide.encode_into(&self.host_x, &mut self.host_bytes);
         self.dev.write(&mut self.work, at, &self.host_bytes)?;
-        self.solve_with((&self.work, at), (&self.ints, self.on))?;
+        self.solve_with((&self.work, at), (&self.ints, self.on), false)?;
         self.dev.read(&self.work, at, &mut self.host_bytes)?;
         self.wide.decode(&self.host_bytes, &mut self.host_x);
         for (dst, &v) in rhs.iter_mut().zip(&self.host_x) {
@@ -610,16 +618,25 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     /// without waiting: the permutation into the factor's ordering and
     /// scalar and back, and the level-set solve between.
     pub fn solve_device(&self, x: (&D::Block, usize)) -> Result<(), GpuError> {
-        self.solve_with(x, (&self.ints, self.on))
+        self.solve_with(x, (&self.ints, self.on), false)
+    }
+
+    /// [`solve_device`](Self::solve_device) on a vector of f32 values (an
+    /// f32 reduction's, [`GpuSchurParams::f32_reduction`](crate::GpuSchurParams::f32_reduction)).
+    pub fn solve_device_f32(&self, x: (&D::Block, usize)) -> Result<(), GpuError> {
+        self.solve_with(x, (&self.ints, self.on), true)
     }
 
     /// [`solve_device`](Self::solve_device) when the `u32` at `gate` is
     /// nonzero, as the device finds it; otherwise its kernels do nothing.
     pub fn solve_device_if(&self, x: (&D::Block, usize), gate: (&D::Block, usize)) -> Result<(), GpuError> {
-        self.solve_with(x, gate)
+        self.solve_with(x, gate, false)
     }
 
-    fn solve_with(&self, x: (&D::Block, usize), gate: (&D::Block, usize)) -> Result<(), GpuError> {
+    /// The solve of `x`, in the wide scalar or, `f32_x`, in f32, when the
+    /// `u32` at `gate` is nonzero.
+    fn solve_with(&self, x: (&D::Block, usize), gate: (&D::Block, usize), f32_x: bool) -> Result<(), GpuError> {
+        let (perm_in, perm_out) = if f32_x { (&self.k.perm_in_f32, &self.k.perm_out_f32) } else { (&self.k.perm_in, &self.k.perm_out) };
         let gate = Arg::Block(gate.0, gate.1);
         let plan = Arg::Block(&self.ints, 0);
         let list = |at: usize| Arg::Block(&self.ints, at);
@@ -628,7 +645,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let xb = Arg::Block(&self.work, self.sec.xb);
         let x = Arg::Block(x.0, x.1);
         let blocks = self.nb.div_ceil(THREADS).max(1);
-        self.run(&self.k.perm_in, blocks, THREADS, 0, &[gate, plan, x, xb, Arg::U32(self.nb)])?;
+        self.run(perm_in, blocks, THREADS, 0, &[gate, plan, x, xb, Arg::U32(self.nb)])?;
         for step in &self.solve_steps {
             let l = match *step {
                 Step::Chain { records, n, shared } => {
@@ -665,7 +682,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 self.run(&self.k.bwd_trsv, l.n_narrow, THREADS, l.narrow_shared, &[gate, list(l.narrow), plan, factor, inv, xb])?;
             }
         }
-        self.run(&self.k.perm_out, blocks, THREADS, 0, &[gate, plan, xb, x, Arg::U32(self.nb)])
+        self.run(perm_out, blocks, THREADS, 0, &[gate, plan, xb, x, Arg::U32(self.nb)])
     }
 
     /// The factor's values, panel by panel in the symbolic's layout, read
@@ -779,11 +796,27 @@ impl<D: Device> GpuFactor<D> {
         }
     }
 
+    /// As [`GpuSupernodal::factorize_device_f32`].
+    pub fn factorize_device_f32(&self, vals: (&D::Block, usize), fail: (&D::Block, usize)) -> Result<(), GpuError> {
+        match self {
+            GpuFactor::F32(f) => f.factorize_device_f32(vals, fail),
+            GpuFactor::F64(f) => f.factorize_device_f32(vals, fail),
+        }
+    }
+
     /// As [`GpuSupernodal::solve_device`].
     pub fn solve_device(&self, x: (&D::Block, usize)) -> Result<(), GpuError> {
         match self {
             GpuFactor::F32(f) => f.solve_device(x),
             GpuFactor::F64(f) => f.solve_device(x),
+        }
+    }
+
+    /// As [`GpuSupernodal::solve_device_f32`].
+    pub fn solve_device_f32(&self, x: (&D::Block, usize)) -> Result<(), GpuError> {
+        match self {
+            GpuFactor::F32(f) => f.solve_device_f32(x),
+            GpuFactor::F64(f) => f.solve_device_f32(x),
         }
     }
 
@@ -886,7 +919,7 @@ fn defines(scalar: &str, scalar_bytes: usize, lu: usize, seed_lanes: u32, sizes:
 #[cfg(all(test, any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple"))))]
 mod tests {
     use super::*;
-    use crate::TestDevice;
+    use crate::{TestDevice, Values};
     use crate::test_util::{grid_spd, grid_spd_sparse, has_f64, rel_residual, wide};
     use arael_faer::bsc::SparseBlockColMat;
     use arael_faer::supernodal::{SupernodalContext, SupernodalParams, nd_block_order, supernodal_factorize, supernodal_solve};
@@ -1473,7 +1506,21 @@ mod tests {
 
         dev.write(&mut block, at_x, &rhs_w).unwrap();
         g.solve_device((&block, at_x)).unwrap();
-        assert!(rel_residual(&dense, n, &read_x(&block), &rhs) < 1e-4);
+        let x_wide = read_x(&block);
+        assert!(rel_residual(&dense, n, &x_wide, &rhs) < 1e-4);
+
+        // an f32 vector (an f32 reduction's): the f32 factor's solve, in f32
+        let f32s = Values::f32(w);
+        dev.write(&mut block, at_x, &f32s.encode(&rhs)).unwrap();
+        g.solve_device_f32((&block, at_x)).unwrap();
+        let mut bytes = vec![0u8; n * 4];
+        dev.read(&block, at_x, &mut bytes).unwrap();
+        let mut x32 = vec![0.0f64; n];
+        f32s.decode(&bytes, &mut x32);
+        assert!(rel_residual(&dense, n, &x32, &rhs) < 1e-4);
+        let xmax = x_wide.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let dx = x32.iter().zip(&x_wide).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        assert!(dx <= 4.0 * f32::EPSILON as f64 * xmax, "the f32 vector's solve against the wide one's: {dx} of {xmax}");
     }
 
 }

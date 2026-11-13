@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use crate::{Arg, Device, GpuError, Launch, Layout, WIDE, Wide, define_u32s};
+use crate::{Arg, Device, GpuError, Launch, Layout, Values, WIDE, Wide, define_u32s};
 
 /// The scalars buffer's slots.
 pub const S_COST_X: usize = 0;
@@ -125,20 +125,22 @@ struct Sections {
     x_try: usize,
     diag: usize,
     damp: usize,
-    /// The damping of the next attempt, one f64.
+    /// The damping of the next attempt, one value.
     lambda: usize,
     lin: usize,
     att: usize,
     scalars: usize,
 }
 
-/// The Levenberg-Marquardt loop's vectors on a [`Device`], in the route's
-/// [`Wide`] scalar, in one block: the parameters `x` and the trial point, H's undamped
-/// diagonal and the damping scale, and the [`Scalars`](crate::lm::Scalars)
-/// the loop decides on. H and the gradient are the caller's (a
-/// [`GpuSchur`](crate::GpuSchur)'s targets).
+/// The Levenberg-Marquardt loop's vectors on a [`Device`], in one block:
+/// the parameters `x` and the trial point, H's undamped diagonal, the
+/// damping scale and lambda, in the route's [`Values`], and the
+/// [`Scalars`](crate::lm::Scalars) the loop decides on, in its [`Wide`]
+/// scalar. H, the gradient and the step are the caller's (a
+/// [`GpuSchur`](crate::GpuSchur)'s targets), in the route's values.
 pub struct LmVectors<D: Device> {
     dev: Arc<D>,
+    values: Values,
     wide: Wide,
     k: Kernels<D::Kernel>,
     n: usize,
@@ -153,21 +155,24 @@ fn blocks(n: usize) -> u32 {
 }
 
 impl<D: Device> LmVectors<D> {
-    /// The vectors of `pos.len()` parameters in `wide`, H's diagonal at
-    /// `pos` in its values. [`GpuError::Unavailable`] for [`Wide::F64`] on a
-    /// device without f64.
-    pub fn new(dev: &Arc<D>, pos: &[u32], wide: Wide) -> Result<Self, GpuError> {
+    /// The vectors of `pos.len()` parameters of a route of `values`, H's
+    /// diagonal at `pos` in its values. [`GpuError::Unavailable`] for
+    /// [`Wide::F64`] on a device without f64.
+    pub fn new(dev: &Arc<D>, pos: &[u32], values: impl Into<Values>) -> Result<Self, GpuError> {
+        let values = values.into();
+        let wide = values.wide();
         crate::check_f64(dev.arch(), wide == Wide::F64, "Wide::F64")?;
         let n = pos.len();
         let parts = blocks(n) as usize;
+        let vb = values.bytes();
         let mut l = Layout::new();
         let sec = Sections {
             pos: l.take(n * 4),
-            x: l.take(n * 8),
-            x_try: l.take(n * 8),
-            diag: l.take(n * 8),
-            damp: l.take(n * 8),
-            lambda: l.take(8),
+            x: l.take(n * vb),
+            x_try: l.take(n * vb),
+            diag: l.take(n * vb),
+            damp: l.take(n * vb),
+            lambda: l.take(vb),
             lin: l.take(parts * LIN_PARTIALS * 8),
             att: l.take(parts * ATTEMPT_PARTIALS * 8),
             scalars: l.take(N_SCALARS * 8),
@@ -176,7 +181,7 @@ impl<D: Device> LmVectors<D> {
         if n > 0 {
             dev.write(&mut block, sec.pos, bytemuck::cast_slice(pos))?;
         }
-        let mut defines = wide.defines().to_string();
+        let mut defines = values.defines();
         define_u32s(
             &mut defines,
             &[
@@ -199,7 +204,7 @@ impl<D: Device> LmVectors<D> {
         let [gather_diag, lin_pass, damp, attempt_pass, combine_lin, combine_attempt, copy, zero_steps]: [D::Kernel; 8] =
             dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
         let k = Kernels { gather_diag, lin_pass, damp, attempt_pass, combine_lin, combine_attempt, copy, zero_steps };
-        Ok(LmVectors { dev: dev.clone(), wide, k, n, block, sec })
+        Ok(LmVectors { dev: dev.clone(), values, wide, k, n, block, sec })
     }
 
     /// The parameter count.
@@ -212,21 +217,27 @@ impl<D: Device> LmVectors<D> {
         self.n == 0
     }
 
-    /// The scalar the vectors are kept in.
+    /// The scalar the [`scalars`](Self::scalars) are kept in.
     pub fn wide(&self) -> Wide {
         self.wide
+    }
+
+    /// The scalar of the vectors, H, the gradient and the step.
+    pub fn values(&self) -> Values {
+        self.values
     }
 
     /// Write the parameters (no wait).
     pub fn write_x(&mut self, x: &[f64]) -> Result<(), GpuError> {
         assert_eq!(x.len(), self.n);
         if self.n > 0 {
-            self.dev.write(&mut self.block, self.sec.x, &self.wide.encode(x))?;
+            self.dev.write(&mut self.block, self.sec.x, &self.values.encode(x))?;
         }
         Ok(())
     }
 
-    /// The parameters on the device (block, byte offset), `len` values.
+    /// The parameters on the device (block, byte offset), `len` values of
+    /// [`values`](Self::values).
     pub fn x(&self) -> (&D::Block, usize) {
         (&self.block, self.sec.x)
     }
@@ -278,7 +289,7 @@ impl<D: Device> LmVectors<D> {
             self.at(s.pos),
             self.at(s.diag),
             self.at(s.damp),
-            self.wide.arg(floor.unwrap_or(0.0)),
+            self.values.arg(floor.unwrap_or(0.0)),
             Arg::U32(floor.is_some() as u32),
             self.at(s.lin),
             Arg::U32(self.n as u32),
@@ -290,7 +301,7 @@ impl<D: Device> LmVectors<D> {
     /// The damping of the next [`damp`](Self::damp) and
     /// [`step`](Self::step), written to the device (no wait).
     pub fn set_lambda(&mut self, lambda: f64) -> Result<(), GpuError> {
-        self.dev.write(&mut self.block, self.sec.lambda, &self.wide.bits(lambda).to_le_bytes())
+        self.dev.write(&mut self.block, self.sec.lambda, &self.values.encode(&[lambda]))
     }
 
     /// H's diagonal damped, `diag + lambda damp`, in its values at `h`.
@@ -426,6 +437,70 @@ mod tests {
         }
         v.accept().unwrap();
         assert_eq!(readw(&dev, v.x(), n, wide), xt);
+    }
+
+    /// An f32 root's route (f32 [`Values`]): H, the gradient, the step and
+    /// the vectors in f32, the passes' arithmetic in f32 as the CPU's f32
+    /// route's, the sums of squares in the wide scalar.
+    #[test]
+    fn the_passes_run_in_f32_for_f32_values() {
+        let dev = device();
+        let Fixture { n, pos, h, g, x, step } = fixture();
+        let f32_of = |v: &[f64]| v.iter().map(|&a| a as f32).collect::<Vec<f32>>();
+        let wide_of = |v: &[f32]| v.iter().map(|&a| a as f64).collect::<Vec<f64>>();
+        // the fixture's H and gradient are exact in f32, x and the step are not
+        let (x32, s32, g32) = (f32_of(&x), f32_of(&step), f32_of(&g));
+        let lambda = 0.3f32;
+        let diag32: Vec<f32> = pos.iter().map(|&p| h[p as usize] as f32).collect();
+        for wide in wides(&*dev) {
+            let values = Values::f32(wide);
+            let up_values = |v: &[f64]| {
+                let bytes = values.encode(v);
+                let mut b = dev.alloc(bytes.len()).unwrap();
+                dev.write(&mut b, 0, &bytes).unwrap();
+                b
+            };
+            let read_values = |at: (&TestBlock, usize), n: usize| {
+                let mut bytes = vec![0u8; 4 * n];
+                dev.read(at.0, at.1, &mut bytes).unwrap();
+                let mut v = vec![0.0f64; n];
+                values.decode(&bytes, &mut v);
+                v
+            };
+            let (hd, gd, sd) = (up_values(&h), up_values(&g), up_values(&step));
+            let mut v = LmVectors::new(&dev, &pos, values).unwrap();
+            assert_eq!(v.values(), values);
+            v.write_x(&x).unwrap();
+            v.linearized((&gd, 0), (&hd, 0), None).unwrap();
+            v.set_lambda(lambda as f64).unwrap();
+            v.damp((&hd, 0)).unwrap();
+            v.step((&sd, 0), (&gd, 0)).unwrap();
+            let s = scalars(&dev, &v);
+            assert_eq!(read_values(v.diag(), n), wide_of(&diag32), "{wide:?}");
+            assert_eq!(s.grad_max, g.iter().fold(0.0f64, |m, v| m.max(v.abs())), "{wide:?}");
+            let gs = (0..n).fold(0.0f32, |m, i| m.max(g32[i].abs() / diag32[i].sqrt()));
+            assert!((s.grad_scaled - gs as f64).abs() <= 2.0 * f32::EPSILON as f64 * gs as f64, "{wide:?}: {} {gs}", s.grad_scaled);
+            assert_eq!(s.fault, None);
+            let damped = read_values((&hd, 0), h.len());
+            for (i, &p) in pos.iter().enumerate() {
+                let want = diag32[i] + lambda * diag32[i];
+                assert!((damped[p as usize] - want as f64).abs() <= want as f64 * f32::EPSILON as f64, "{wide:?} entry {i}: {} against {want}", damped[p as usize]);
+            }
+            // the trial point: one f32 subtraction, correctly rounded
+            let xt32: Vec<f32> = (0..n).map(|i| x32[i] - s32[i]).collect();
+            assert_eq!(read_values(v.x_try(), n), wide_of(&xt32), "{wide:?}");
+            // the sums of squares of the f32 values, in the wide scalar
+            let step2: f64 = s32.iter().map(|&d| d as f64 * d as f64).sum();
+            let try2: f64 = xt32.iter().map(|&t| t as f64 * t as f64).sum();
+            let rel = |a: f64, b: f64| (a - b).abs() / b.abs();
+            assert!(rel(s.step2, step2) < 1e-12 && rel(s.try2, try2) < 1e-12, "{wide:?}: {} {step2}, {} {try2}", s.step2, s.try2);
+            // the predicted reduction summed in f32: to f32's rounding of its terms
+            let terms: Vec<f64> = (0..n).map(|i| (s32[i] * (g32[i] + lambda * diag32[i] * s32[i])) as f64).collect();
+            let (pr, mag) = (0.5 * terms.iter().sum::<f64>(), 0.5 * terms.iter().map(|t| t.abs()).sum::<f64>());
+            assert!((s.predicted - pr).abs() <= 1e-5 * mag, "{wide:?}: {} {pr}", s.predicted);
+            v.accept().unwrap();
+            assert_eq!(read_values(v.x(), n), wide_of(&xt32), "{wide:?}");
+        }
     }
 
     /// The fault's code is exact in df32, and its no-fault value reads as none.

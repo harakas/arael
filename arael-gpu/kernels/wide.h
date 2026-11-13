@@ -1,6 +1,7 @@
-// wide.h: W, the wide scalar of a device route: what H, the gradient, the
-// cost, the Schur reduction and the LM loop's vectors are kept and summed
-// in. `double`, or with ARAEL_WIDE_DF32 defined `df32`, a value as the sum
+// wide.h: W, the wide scalar of a device route: what an f64 root's values
+// (H, the gradient, the step, the LM loop's vectors, the references), the
+// cost and the Schur reduction are kept and summed in (an f32 root's values
+// are f32: V and sin_cos, at the end). `double`, or with ARAEL_WIDE_DF32 defined `df32`, a value as the sum
 // of two floats (about 48 bits of significand, f32's exponent range), for
 // devices without fast f64 (consumer cards, where f64 runs at 1/32 to 1/64
 // of f32) or without f64 at all (Metal).
@@ -294,4 +295,28 @@ DEVICE double wide_fma(double acc, double x, double y) { return fma(x, y, acc); 
 DEVICE double wide_max(double a, double b) { return isnan(a) ? b : isnan(b) ? a : a >= b ? a : b; }
 DEVICE double wide_min(double a, double b) { return isnan(a) ? b : isnan(b) ? a : a <= b ? a : b; }
 
+#endif
+
+// sin_cos(x): x's sine and cosine in x's scalar, f32 or W (wide_sin_cos).
+template <typename T> struct SinCos {
+    T s, c;
+};
+DEVICE SinCos<float> sin_cos(float x) { return SinCos<float>{sin(x), cos(x)}; }
+DEVICE SinCos<W> sin_cos(W x) {
+    WidePair p = wide_sin_cos(x);
+    return SinCos<W>{p.s, p.c};
+}
+
+// V: the scalar of a route's values (H and the gradient), the root's as
+// the CPU's route keeps them: f32 with VALUES_F32 1 (an f32 root's route),
+// else W. v_fma(acc, x, y): acc + x y in V.
+#ifndef VALUES_F32
+#define VALUES_F32 0
+#endif
+#if VALUES_F32
+typedef float V;
+DEVICE float v_fma(float acc, float x, float y) { return fma(x, y, acc); }
+#else
+typedef W V;
+template <typename X, typename Y> DEVICE W v_fma(W acc, X x, Y y) { return wide_fma(acc, x, y); }
 #endif

@@ -2,7 +2,9 @@
 // reduced solve (docs/dev/GPU.md, E2 and E9), launched by
 // arael-gpu/src/schur.rs over its plan.
 //
-// In W, the route's wide scalar (wide.h). Compiled per EWX (the widest
+// H, the gradient and the step are in V, the route's values (wide.h); the
+// reduction computes in R (below) and keeps its vectors in R; the
+// refinement's norms and state are in W, the route's wide scalar. Compiled per EWX (the widest
 // eliminated block), EW (it rounded up to 4, 8, 16, 32 or 64), KW (the
 // widest kept block, rounded likewise), TILE_LANES (k_schur_tiles' threads
 // per unit: the device's lockstep width, 32 or 64), TILE_WARPS (its units
@@ -29,28 +31,26 @@
 // R: the scalar the reduction computes in. W itself with SCHUR_F32 0; f32
 // with SCHUR_F32 1, as the CPU's f32 route, for a solve whose factor is f32
 // and that does not refine against S: the inputs (H, the gradient, the kept
-// blocks' solution) are rounded to f32 as read, the eliminated blocks'
-// factors, z and W are kept in f32, and S, the reduced right-hand side and
-// the eliminated blocks' step are f32 values stored in W.
+// blocks' solution) are rounded to f32 as read (an f32 root's H and
+// gradient already are), and the eliminated blocks' factors, z, W, S, the
+// reduced right-hand side and the kept blocks' solution are kept in f32.
 #if SCHUR_F32
 typedef float R;
 #define R_DF32 0
-DEVICE R to_r(W v) {
-    return (float)v;
-}
 DEVICE R r_fma(R acc, R x, R y) {
     return fma(x, y, acc);
 }
 #else
 typedef W R;
 #define R_DF32 ARAEL_WIDE_DF32
-DEVICE R to_r(W v) {
-    return v;
-}
 DEVICE R r_fma(R acc, R x, R y) {
     return wide_fma(acc, x, y);
 }
 #endif
+// v in R: a value of H or the gradient (V), or of a vector (W).
+template <typename T> DEVICE R to_r(T v) {
+    return (R)v;
+}
 
 KERNEL_THREADS(PLANE) void k_zero_u32(GLOBAL u32* RESTRICT buf, u32 n) {
     u32 i = global_x();
@@ -59,7 +59,7 @@ KERNEL_THREADS(PLANE) void k_zero_u32(GLOBAL u32* RESTRICT buf, u32 n) {
 
 // C[i][k] of an observer's coupling tile at `ca`, wo x we, in either storage
 // orientation.
-DEVICE W coupling(GLOBAL const W* h, u32 ca, u32 trans, u32 wo, u32 we, u32 i, u32 k) {
+DEVICE V coupling(GLOBAL const V* h, u32 ca, u32 trans, u32 wo, u32 we, u32 i, u32 k) {
     return trans != 0 ? h[ca + k + i * we] : h[ca + i + k * wo];
 }
 
@@ -102,7 +102,7 @@ DEVICE void ldlt_solve(GLOBAL const R* f, u32 w, THREAD R* v) {
 // diagonal tile (upper-stored) into `dfac` (see ldlt_solve), from its
 // Cholesky factor, and z = D^-1 b. A pivot that is not positive sets
 // fail[0] to the block's slot plus one and continues with 1.
-KERNEL_THREADS_REGS(THREADS) void k_schur_elim(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const W* RESTRICT rhs, GLOBAL R* RESTRICT dfac, GLOBAL R* RESTRICT z, GLOBAL u32* RESTRICT fail, u32 ne) {
+KERNEL_THREADS_REGS(THREADS) void k_schur_elim(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL R* RESTRICT dfac, GLOBAL R* RESTRICT z, GLOBAL u32* RESTRICT fail, u32 ne) {
     u32 e = global_x();
     if (e >= ne) return;
     u32 w = plan[plan[SE_W] + e];
@@ -161,7 +161,7 @@ KERNEL_THREADS_REGS(THREADS) void k_schur_elim(GLOBAL const u32* RESTRICT plan, 
 // idle): row i of W_o = C_o D_e^-1, row-major wo x we, the row of C_o
 // solved with D's factor (ldlt_solve). Neighbouring threads read and write
 // neighbouring rows.
-KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const R* RESTRICT dfac, GLOBAL R* RESTRICT w, u32 no) {
+KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const R* RESTRICT dfac, GLOBAL R* RESTRICT w, u32 no) {
     u32 x = global_x();
     u32 o = x / KW;
     u32 i = x - o * KW;
@@ -261,7 +261,7 @@ DEVICE_INLINE void tile_products(THREAD R* acc, THREAD const u32* ij, u32 n, u32
 #else
 #define TILES_ENTRY KERNEL_THREADS(TILE_LANES * TILE_WARPS)
 #endif
-TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const R* RESTRICT w, GLOBAL W* RESTRICT s) {
+TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const R* RESTRICT w, GLOBAL R* RESTRICT s) {
     // the launch's shared memory (schur.rs, tiles_shared_bytes): the groups'
     // W_oa, their C_ob, the units' sums of a split tile, in R
     DYNAMIC_SHARED(R, ws_all);
@@ -393,7 +393,7 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* 
                 u32 j = ij[m] >> 16;
                 R zero = 0.0f;
                 R v = (copy != NONE ? to_r(h[copy + i + j * wr]) : zero) - acc[m];
-                s[val + i + j * wr] = W(v);
+                s[val + i + j * wr] = v;
             }
         }
     }
@@ -401,7 +401,7 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* 
         for (u32 x = lane; x < wr * wr; x += TILE_LANES) {
             u32 j = x / wr;
             u32 i = x - j * wr;
-            if (i > j) s[val + x] = 0.0f;
+            if (i > j) s[val + x] = R(0.0f);
         }
     }
 }
@@ -409,7 +409,7 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const W* 
 // Stage 4, one block of PLANE threads per kept block: rhs_kept = b_k - sum
 // over the block's observers of C_o z_e, the lanes over the observers, a
 // warp sum per row.
-KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const W* RESTRICT rhs, GLOBAL const R* RESTRICT z, GLOBAL W* RESTRICT out) {
+KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL const R* RESTRICT z, GLOBAL R* RESTRICT out) {
     u32 o_ew = plan[SE_W];
     u32 o_z = plan[SE_Z_OFF];
     u32 o_ca = plan[SO_CA_OFF];
@@ -447,26 +447,26 @@ KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, GLOBAL c
     for (u32 i = 0; i < KW; i++) {
         if (i < wk) {
             R tot = warp_sum(acc[i]);
-            if (lane == 0) out[s_off + i] = W(to_r(rhs[orig + i]) - tot);
+            if (lane == 0) out[s_off + i] = to_r(rhs[orig + i]) - tot;
         }
     }
 }
 
-// The kept blocks of the reduced solution into the full vector, one thread
-// per kept block.
-KERNEL_THREADS(THREADS) void k_scatter_kept(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT xk, GLOBAL W* RESTRICT x, u32 nk) {
+// The kept blocks of the reduced solution (R) into the full vector (V), one
+// thread per kept block.
+KERNEL_THREADS(THREADS) void k_scatter_kept(GLOBAL const u32* RESTRICT plan, GLOBAL const R* RESTRICT xk, GLOBAL V* RESTRICT x, u32 nk) {
     u32 k = global_x();
     if (k >= nk) return;
     u32 s_off = plan[plan[SK_S_OFF] + k];
     u32 orig = plan[plan[SK_ORIG_OFF] + k];
     u32 wk = plan[plan[SK_W] + k];
-    for (u32 i = 0; i < wk; i++) x[orig + i] = xk[s_off + i];
+    for (u32 i = 0; i < wk; i++) x[orig + i] = (V)xk[s_off + i];
 }
 
 // Back-substitution, one thread per eliminated block: x_e = D_e^-1 (b_e -
 // sum_a C_a^T x_a) over its observers (ldlt_solve), the kept slices of `x`
 // in place.
-KERNEL_THREADS(THREADS) void k_schur_backsub(GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT h, GLOBAL const W* RESTRICT rhs, GLOBAL const R* RESTRICT dfac, GLOBAL W* RESTRICT x, u32 ne) {
+KERNEL_THREADS(THREADS) void k_schur_backsub(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL const R* RESTRICT dfac, GLOBAL V* RESTRICT x, u32 ne) {
     u32 e = global_x();
     if (e >= ne) return;
     u32 o_ca = plan[SO_CA_OFF];
@@ -499,7 +499,7 @@ KERNEL_THREADS(THREADS) void k_schur_backsub(GLOBAL const u32* RESTRICT plan, GL
     ldlt_solve(dfac + doff, w, t);
 #pragma unroll
     for (u32 i = 0; i < EW; i++)
-        if (i < w) x[orig + i] = W(t[i]);
+        if (i < w) x[orig + i] = (V)t[i];
 }
 
 // r -= S x over the tiles of S (upper block storage, diagonal tiles
@@ -508,7 +508,7 @@ KERNEL_THREADS(THREADS) void k_schur_backsub(GLOBAL const u32* RESTRICT plan, GL
 // a tile index times 2 plus 1 when k is its column block, whose transpose
 // then gives the rows), a warp sum per row; nothing unless gate[0] is
 // nonzero. No two blocks write the same entry.
-KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const u32* RESTRICT kt_ptr, GLOBAL const u32* RESTRICT kt, GLOBAL const W* RESTRICT s, GLOBAL const W* RESTRICT x, GLOBAL W* RESTRICT r) {
+KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const u32* RESTRICT kt_ptr, GLOBAL const u32* RESTRICT kt, GLOBAL const R* RESTRICT s, GLOBAL const R* RESTRICT x, GLOBAL R* RESTRICT r) {
     if (gate[0] == 0) return;
     u32 k = block_x();
     u32 lane = thread_x();
@@ -532,7 +532,7 @@ KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL co
             for (u32 i = 0; i < KW; i++) {
                 if (i < wk) {
                     W v = 0.0f;
-                    for (u32 j = 0; j < wc; j++) v = wide_fma(v, a == b && i > j ? s[val + j + i * wr] : s[val + i + j * wr], x[b_off + j]);
+                    for (u32 j = 0; j < wc; j++) v = wide_fma(v, W(a == b && i > j ? s[val + j + i * wr] : s[val + i + j * wr]), W(x[b_off + j]));
                     acc[i] += v;
                 }
             }
@@ -543,7 +543,7 @@ KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL co
             for (u32 j = 0; j < KW; j++) {
                 if (j < wk) {
                     W v = 0.0f;
-                    for (u32 i2 = 0; i2 < wr; i2++) v = wide_fma(v, s[val + i2 + j * wr], x[a_off + i2]);
+                    for (u32 i2 = 0; i2 < wr; i2++) v = wide_fma(v, W(s[val + i2 + j * wr]), W(x[a_off + i2]));
                     acc[j] += v;
                 }
             }
@@ -554,22 +554,23 @@ KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL co
     for (u32 i = 0; i < KW; i++) {
         if (i < wk) {
             W tot = warp_sum(acc[i]);
-            if (lane == 0) r[k_off + i] -= tot;
+            if (lane == 0) r[k_off + i] = (R)(W(r[k_off + i]) - tot);
         }
     }
 }
 
-// dst = src when gate[0] is nonzero.
-KERNEL_THREADS(THREADS) void k_copy_f64(GLOBAL const u32* RESTRICT gate, GLOBAL W* RESTRICT dst, GLOBAL const W* RESTRICT src, u32 n) {
+// dst = src (R) when gate[0] is nonzero.
+KERNEL_THREADS(THREADS) void k_copy_r(GLOBAL const u32* RESTRICT gate, GLOBAL R* RESTRICT dst, GLOBAL const R* RESTRICT src, u32 n) {
     u32 i = global_x();
     if (gate[0] != 0 && i < n) dst[i] = src[i];
 }
 
-// The sum of squares of x[0..n) by one block of THREADS threads, returned to
-// every thread; `sh` is THREADS words of shared memory, t the thread.
-DEVICE W block_sumsq(GLOBAL const W* x, u32 n, SHARED_PTR W* sh, u32 t) {
+// The sum of squares of x[0..n) (R) in W by one block of THREADS threads,
+// returned to every thread; `sh` is THREADS words of shared memory, t the
+// thread.
+DEVICE W block_sumsq(GLOBAL const R* x, u32 n, SHARED_PTR W* sh, u32 t) {
     W acc = 0.0f;
-    for (u32 i = t; i < n; i += THREADS) acc = wide_fma(acc, x[i], x[i]);
+    for (u32 i = t; i < n; i += THREADS) acc = wide_fma(acc, W(x[i]), W(x[i]));
     // a previous call's readers are done with the shared words first
     BARRIER();
     sh[t] = acc;
@@ -584,7 +585,7 @@ DEVICE W block_sumsq(GLOBAL const W* x, u32 n, SHARED_PTR W* sh, u32 t) {
 // The refinement's start, one block, after the first solve's residual r of
 // the right-hand side b: the norms, the tolerance tol_rel ||b||, and whether
 // a step is due.
-KERNEL_THREADS(THREADS) void k_refine_start(GLOBAL const W* RESTRICT b, GLOBAL const W* RESTRICT r, GLOBAL W* RESTRICT st, GLOBAL u32* RESTRICT flags, u32 n, W tol_rel) {
+KERNEL_THREADS(THREADS) void k_refine_start(GLOBAL const R* RESTRICT b, GLOBAL const R* RESTRICT r, GLOBAL W* RESTRICT st, GLOBAL u32* RESTRICT flags, u32 n, W tol_rel) {
     SHARED W sh[THREADS];
     W bn = sqrt(block_sumsq(b, n, sh, thread_x()));
     W rn = sqrt(block_sumsq(r, n, sh, thread_x()));
@@ -601,7 +602,7 @@ KERNEL_THREADS(THREADS) void k_refine_start(GLOBAL const W* RESTRICT b, GLOBAL c
 
 // A refinement step's update, one thread per entry, when the step is due:
 // x kept in x_prev, the correction d added to it.
-KERNEL_THREADS(THREADS) void k_refine_apply(GLOBAL const u32* RESTRICT flags, GLOBAL W* RESTRICT x, GLOBAL W* RESTRICT x_prev, GLOBAL const W* RESTRICT d, u32 n) {
+KERNEL_THREADS(THREADS) void k_refine_apply(GLOBAL const u32* RESTRICT flags, GLOBAL R* RESTRICT x, GLOBAL R* RESTRICT x_prev, GLOBAL const R* RESTRICT d, u32 n) {
     u32 i = global_x();
     if (flags[F_ACTIVE] != 0 && i < n) {
         x_prev[i] = x[i];
@@ -613,7 +614,7 @@ KERNEL_THREADS(THREADS) void k_refine_apply(GLOBAL const u32* RESTRICT flags, GL
 // updated iterate: a step that did not reduce the residual's norm is to be
 // undone and ends the refinement; otherwise the norm is kept and the
 // refinement goes on while it is above the tolerance.
-KERNEL_THREADS(THREADS) void k_refine_judge(GLOBAL const W* RESTRICT r, GLOBAL W* RESTRICT st, GLOBAL u32* RESTRICT flags, u32 n) {
+KERNEL_THREADS(THREADS) void k_refine_judge(GLOBAL const R* RESTRICT r, GLOBAL W* RESTRICT st, GLOBAL u32* RESTRICT flags, u32 n) {
     SHARED W sh[THREADS];
     // every thread reads the flag before the first barrier, thread 0 writes
     // it after the last
@@ -633,7 +634,7 @@ KERNEL_THREADS(THREADS) void k_refine_judge(GLOBAL const W* RESTRICT r, GLOBAL W
 }
 
 // The iterate before a rejected step back, one thread per entry.
-KERNEL_THREADS(THREADS) void k_refine_revert(GLOBAL const u32* RESTRICT flags, GLOBAL W* RESTRICT x, GLOBAL const W* RESTRICT x_prev, u32 n) {
+KERNEL_THREADS(THREADS) void k_refine_revert(GLOBAL const u32* RESTRICT flags, GLOBAL R* RESTRICT x, GLOBAL const R* RESTRICT x_prev, u32 n) {
     u32 i = global_x();
     if (flags[F_REVERT] != 0 && i < n) x[i] = x_prev[i];
 }

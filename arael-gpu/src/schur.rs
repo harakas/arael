@@ -2,8 +2,9 @@
 //! widths, with the reduced system kept on the device for the factorization,
 //! the refinement and the back-substitution.
 //!
-//! Formed in the route's wide scalar ([`Wide`]: `f64` or df32) whatever the
-//! matrix's scalar, as an f32 factor's refinement measures its residuals
+//! From H and the gradient in the route's [`Values`] (f32 for an f32 root,
+//! else the wide scalar), formed in the route's wide scalar ([`Wide`]:
+//! `f64` or df32), as an f32 factor's refinement measures its residuals
 //! against S, or in f32 for an f32 solve that does not refine, as the CPU's
 //! f32 route ([`GpuSchurParams::f32_reduction`]).
 //! Per reduction, from the Hessian's tile values and the gradient:
@@ -36,7 +37,7 @@ use arael_faer::schur::{SchurReal, SchurSymbolic};
 
 use crate::plan::SparseIndex;
 use crate::supernodal::{GpuFactor, Packer};
-use crate::{Arg, Device, GpuError, Launch, Layout, WIDE, Wide, define_u32s};
+use crate::{Arg, Device, GpuError, Launch, Layout, Values, WIDE, Wide, define_u32s};
 
 /// No kept-kept tile behind a tile of S.
 const NONE: u32 = u32::MAX;
@@ -101,11 +102,12 @@ pub struct GpuSchurParams {
     /// adjustment; four slower than two on both).
     pub tile_groups: Option<u32>,
     /// Whether the reduction computes in f32, as the CPU's f32 route: the
-    /// eliminated blocks' factors, W, S, the reduced right-hand side and the
-    /// eliminated blocks' step, from the inputs rounded to f32, the values
-    /// stored in the wide scalar's buffers. For a solve whose factor is f32
-    /// and that does not refine against S: a refined solve panics. Off: in
-    /// the wide scalar.
+    /// eliminated blocks' factors, W, S, the reduced right-hand side, the
+    /// kept blocks' solution and the eliminated blocks' step, from the
+    /// inputs rounded to f32 (an f32 root's [`Values`] already are), all
+    /// stored in f32 (the step in the route's values). For a solve whose
+    /// factor is f32 and that does not refine against S: a refined solve
+    /// panics. Off: in the wide scalar.
     pub f32_reduction: bool,
 }
 
@@ -182,9 +184,10 @@ struct Elimination<'a> {
     pairs: usize,
 }
 
-/// Where the status starts in a solve's output, after the step's `n` f64.
-pub(crate) fn status_at(n: usize) -> usize {
-    (n * core::mem::size_of::<f64>()).div_ceil(256) * 256
+/// Where the status starts in a solve's output, after the step's `n`
+/// values of `bytes` bytes.
+pub(crate) fn status_at(n: usize, bytes: usize) -> usize {
+    (n * bytes).div_ceil(256) * 256
 }
 
 /// The outcome of a solve with refinement `refine` from its status bytes,
@@ -554,7 +557,7 @@ struct Kernels<K> {
 
 /// Byte offsets of the work block's sections.
 struct Sections {
-    /// The Hessian's tile values and the gradient, f64.
+    /// The Hessian's tile values and the gradient, in the route's values.
     h: usize,
     rhs: usize,
     dfac: usize,
@@ -565,8 +568,8 @@ struct Sections {
     x_kept: usize,
     x_prev: usize,
     r: usize,
-    /// What a solve reads back, in one copy: the full step (`n` f64), then
-    /// at `status_at` from here the refinement's state and the flags.
+    /// What a solve reads back, in one copy: the full step (`n` values),
+    /// then at `status_at` from here the refinement's state and the flags.
     out: usize,
     bytes: usize,
 }
@@ -578,13 +581,13 @@ struct Sections {
 /// solution. Every device buffer is made in [`new`](Self::new): the plan in
 /// one block, uploaded in one copy, and the rest in a work block.
 pub struct GpuSchur<D: Device> {
-    /// The scalar of H, the gradient, S and the reduction's vectors.
     /// The last attempt's launches as a graph, with what it was captured
     /// against; first, so it is dropped before the blocks it records.
     graph: Option<(GraphKey, D::Graph)>,
     graphs: bool,
     replayed: bool,
     dev: Arc<D>,
+    values: Values,
     wide: Wide,
     /// [`GpuSchurParams::f32_reduction`].
     f32_reduction: bool,
@@ -617,7 +620,7 @@ pub struct GpuSchur<D: Device> {
     nh: usize,
     s_len: usize,
     elim_blk: Vec<u32>,
-    /// The inputs encoded in the wide scalar.
+    /// The inputs encoded in the route's values.
     conv: Vec<u8>,
     /// The step and the status as a solve reads them.
     host_out: Vec<u8>,
@@ -627,9 +630,9 @@ pub struct GpuSchur<D: Device> {
 impl<D: Device> GpuSchur<D> {
     /// The device plan of `sym`, the reduction of a matrix with the block
     /// structure `hsym`, uploaded to `dev`, with the reduction's blocks and
-    /// kernels, in `wide`.
-    pub fn new(dev: &Arc<D>, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> Result<Self, GpuError> {
-        Self::with_params(dev, sym, hsym, wide, &GpuSchurParams::default())
+    /// kernels, for a route of `values` (a [`Wide`] for an f64 root's).
+    pub fn new(dev: &Arc<D>, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, values: impl Into<Values>) -> Result<Self, GpuError> {
+        Self::with_params(dev, sym, hsym, values, &GpuSchurParams::default())
     }
 
     /// [`new`](Self::new) with the work cut by `params`.
@@ -638,24 +641,36 @@ impl<D: Device> GpuSchur<D> {
     /// let params = GpuSchurParams { tile_groups: Some(1), ..Default::default() };
     /// let g = GpuSchur::with_params(&dev, &sym, h.symbolic(), Wide::F64, &params)?;
     /// ```
-    pub fn with_params(dev: &Arc<D>, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide, params: &GpuSchurParams) -> Result<Self, GpuError> {
-        Self::build(dev, SchurPlan::reduction(sym, hsym), hsym.val_count(), wide, params)
+    pub fn with_params(dev: &Arc<D>, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, values: impl Into<Values>, params: &GpuSchurParams) -> Result<Self, GpuError> {
+        Self::build(dev, SchurPlan::reduction(sym, hsym), hsym.val_count(), values.into(), params)
     }
 
     /// [`new`](Self::new) with nothing eliminated: S is H, and a solve is
     /// the whole system's.
-    pub fn whole(dev: &Arc<D>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> Result<Self, GpuError> {
-        Self::build(dev, SchurPlan::whole(hsym), hsym.val_count(), wide, &GpuSchurParams::default())
+    pub fn whole(dev: &Arc<D>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, values: impl Into<Values>) -> Result<Self, GpuError> {
+        Self::whole_with_params(dev, hsym, values, &GpuSchurParams::default())
     }
 
-    fn build(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide, params: &GpuSchurParams) -> Result<Self, GpuError> {
-        crate::check_f64(dev.arch(), wide == Wide::F64, "Wide::F64")?;
-        Self::build_lanes(dev, p, nh, wide, dev.arch().warp.max(PLANE), params)
+    /// [`whole`](Self::whole) with `params`: with
+    /// [`GpuSchurParams::f32_reduction`], S (H) and the solve's vectors in
+    /// f32, as the CPU's f32 route.
+    ///
+    /// ```ignore
+    /// let params = GpuSchurParams { f32_reduction: true, ..Default::default() };
+    /// let g = GpuSchur::whole_with_params(&dev, h.symbolic(), Values::f32(Wide::Df32), &params)?;
+    /// ```
+    pub fn whole_with_params(dev: &Arc<D>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, values: impl Into<Values>, params: &GpuSchurParams) -> Result<Self, GpuError> {
+        Self::build(dev, SchurPlan::whole(hsym), hsym.val_count(), values.into(), params)
+    }
+
+    fn build(dev: &Arc<D>, p: SchurPlan, nh: usize, values: Values, params: &GpuSchurParams) -> Result<Self, GpuError> {
+        crate::check_f64(dev.arch(), values.wide() == Wide::F64, "Wide::F64")?;
+        Self::build_lanes(dev, p, nh, values, dev.arch().warp.max(PLANE), params)
     }
 
     /// [`build`](Self::build) with `lanes` threads per unit of
     /// `k_schur_tiles` (the device's lockstep width in `build`).
-    fn build_lanes(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide, lanes: u32, params: &GpuSchurParams) -> Result<Self, GpuError> {
+    fn build_lanes(dev: &Arc<D>, p: SchurPlan, nh: usize, values: Values, lanes: u32, params: &GpuSchurParams) -> Result<Self, GpuError> {
         // k_schur_w's threads per observer, a row of W each
         let w_rows = p.kw_cap as u32;
         // a unit wider than the device's lockstep width takes a block alone:
@@ -666,7 +681,7 @@ impl<D: Device> GpuSchur<D> {
         let widths = TileWidths { kw_cap: p.kw_cap, ew_cap: p.ew_cap, kw_max: p.kw_max, ew_max: p.ew_max, lanes, elem };
         let set = (params.tile_warps.is_some() && lanes == dev.arch().warp, params.tile_groups.is_some());
         let (tile_warps, tile_groups, tile_shared) = fit_tiles(&widths, (warps, groups), set, dev.arch().shared_bytes)?;
-        let defines = format!("{}#define SCHUR_F32 {}\n{}", wide.defines(), params.f32_reduction as u32, defines(&p, lanes, tile_warps, tile_groups));
+        let defines = format!("{}#define SCHUR_F32 {}\n{}", values.defines(), params.f32_reduction as u32, defines(&p, lanes, tile_warps, tile_groups));
         let (kt_ptr_words, kt_words) = tiles_by_kept_block(&p);
         let mut pk = Packer { words: p.words };
         let blocks = tile_blocks(&pk.words, p.nt as usize, tile_warps as usize, params.split_pairs);
@@ -678,26 +693,25 @@ impl<D: Device> GpuSchur<D> {
         let kt = 4 * pk.push(&kt_words);
         let mut ints = dev.alloc(pk.words.len() * 4)?;
         dev.write(&mut ints, 0, bytemuck::cast_slice(&pk.words))?;
-        let status_at = status_at(p.n);
-        let f = core::mem::size_of::<f64>();
+        let status_at = status_at(p.n, values.bytes());
         let mut l = Layout::new();
         let sec = Sections {
-            h: l.take(nh * f),
-            rhs: l.take(p.n * f),
+            h: l.take(nh * values.bytes()),
+            rhs: l.take(p.n * values.bytes()),
             dfac: l.take(p.dfac_len * elem),
             z: l.take(p.z_len * elem),
             w: l.take(p.w_len * elem),
-            s: l.take(p.s_len * f),
-            rhs_kept: l.take(p.nks * f),
-            x_kept: l.take(p.nks * f),
-            x_prev: l.take(p.nks * f),
-            r: l.take(p.nks * f),
+            s: l.take(p.s_len * elem),
+            rhs_kept: l.take(p.nks * elem),
+            x_kept: l.take(p.nks * elem),
+            x_prev: l.take(p.nks * elem),
+            r: l.take(p.nks * elem),
             out: l.take(status_at + STATUS_BYTES),
             bytes: l.bytes(),
         };
         let work = dev.alloc(sec.bytes)?;
         let source = format!("{WIDE}\n{SOURCE}");
-        let entries = ["k_zero_u32", "k_schur_elim", "k_schur_w", "k_schur_tiles", "k_schur_rhs", "k_scatter_kept", "k_schur_backsub", "k_symv_sub", "k_copy_f64", "k_refine_start", "k_refine_apply", "k_refine_judge", "k_refine_revert"];
+        let entries = ["k_zero_u32", "k_schur_elim", "k_schur_w", "k_schur_tiles", "k_schur_rhs", "k_scatter_kept", "k_schur_backsub", "k_symv_sub", "k_copy_r", "k_refine_start", "k_refine_apply", "k_refine_judge", "k_refine_revert"];
         let [zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert]: [D::Kernel; 13] =
             dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
         let k = Kernels { zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert };
@@ -706,7 +720,8 @@ impl<D: Device> GpuSchur<D> {
             graphs: true,
             replayed: false,
             dev: dev.clone(),
-            wide,
+            values,
+            wide: values.wide(),
             f32_reduction: params.f32_reduction,
             k,
             ints,
@@ -766,14 +781,21 @@ impl<D: Device> GpuSchur<D> {
     }
 
     /// S's values on the device (block, byte offset) and their count, in the
-    /// storage order of the symbolic's `s`, as the last reduction left them.
+    /// storage order of the symbolic's `s`, as the last reduction left them,
+    /// in [`reduced`](Self::reduced).
     pub fn s_values(&self) -> ((&D::Block, usize), usize) {
         ((&self.work, self.sec.s), self.s_len)
     }
 
-    /// The scalar of H, the gradient, S and the reduction's vectors.
+    /// The route's wide scalar: the refinement's state's, and the
+    /// reduction's without [`GpuSchurParams::f32_reduction`].
     pub fn wide(&self) -> Wide {
         self.wide
+    }
+
+    /// The route's values: H's, the gradient's and the step's scalar.
+    pub fn values(&self) -> Values {
+        self.values
     }
 
     /// Whether the reduction computes in f32
@@ -782,13 +804,14 @@ impl<D: Device> GpuSchur<D> {
         self.f32_reduction
     }
 
-    /// The reduced right-hand side on the device, [`kept_size`](Self::kept_size) values.
+    /// The reduced right-hand side on the device, [`kept_size`](Self::kept_size)
+    /// values of [`reduced`](Self::reduced).
     pub fn rhs_kept(&self) -> (&D::Block, usize) {
         (&self.work, self.sec.rhs_kept)
     }
 
     /// Where [`launch`](Self::launch) reads the Hessian's tile values: the
-    /// structure's value count, in [`wide`](Self::wide), for a device
+    /// structure's value count, in [`values`](Self::values), for a device
     /// assembly to write.
     pub fn h_target(&self) -> (&D::Block, usize) {
         (&self.work, self.sec.h)
@@ -799,7 +822,8 @@ impl<D: Device> GpuSchur<D> {
         (&self.work, self.sec.rhs)
     }
 
-    /// The step of the last solve: [`dim`](Self::dim) values.
+    /// The step of the last solve: [`dim`](Self::dim) values of
+    /// [`values`](Self::values).
     pub fn step_view(&self) -> (&D::Block, usize) {
         (&self.work, self.sec.out)
     }
@@ -813,20 +837,32 @@ impl<D: Device> GpuSchur<D> {
     /// The Hessian's tile values as the last upload or device assembly left
     /// them, read back (for diagnostics).
     pub fn h_values(&self) -> Result<Vec<f64>, GpuError> {
-        self.read_values(self.sec.h, self.nh)
+        let mut bytes = vec![0u8; self.values.bytes() * self.nh];
+        self.dev.read(&self.work, self.sec.h, &mut bytes)?;
+        let mut v = vec![0.0f64; self.nh];
+        self.values.decode(&bytes, &mut v);
+        Ok(v)
     }
 
     /// S's values and the reduced right-hand side read back (for tests).
     pub fn download(&self) -> Result<(Vec<f64>, Vec<f64>), GpuError> {
-        Ok((self.read_values(self.sec.s, self.s_len)?, self.read_values(self.sec.rhs_kept, self.nks)?))
+        Ok((self.read_reduced(self.sec.s, self.s_len)?, self.read_reduced(self.sec.rhs_kept, self.nks)?))
     }
 
-    /// `n` values of the work block from byte `at` on, read back.
-    fn read_values(&self, at: usize, n: usize) -> Result<Vec<f64>, GpuError> {
-        let mut bytes = vec![0u8; 8 * n];
+    /// The scalar the reduction computes and keeps S and its vectors in: f32
+    /// with [`GpuSchurParams::f32_reduction`], else the wide scalar.
+    pub fn reduced(&self) -> Values {
+        Values::of(if self.f32_reduction { 4 } else { 8 }, self.wide)
+    }
+
+    /// `n` values of [`reduced`](Self::reduced) of the work block from byte
+    /// `at` on, read back.
+    fn read_reduced(&self, at: usize, n: usize) -> Result<Vec<f64>, GpuError> {
+        let r = self.reduced();
+        let mut bytes = vec![0u8; r.bytes() * n];
         self.dev.read(&self.work, at, &mut bytes)?;
         let mut v = vec![0.0f64; n];
-        self.wide.decode(&bytes, &mut v);
+        r.decode(&bytes, &mut v);
         Ok(v)
     }
 
@@ -837,17 +873,17 @@ impl<D: Device> GpuSchur<D> {
 
     /// Write the Hessian's tile values (`hsym`'s value count) and the
     /// gradient at [`h_target`](Self::h_target) and
-    /// [`rhs_target`](Self::rhs_target), in [`wide`](Self::wide), for
+    /// [`rhs_target`](Self::rhs_target), in [`values`](Self::values), for
     /// [`launch`](Self::launch) (no wait).
     pub fn upload<M: SchurReal + 'static>(&mut self, hvals: &[M], rhs: &[M]) -> Result<(), GpuError> {
         assert_eq!(hvals.len(), self.nh, "the Hessian's values, in the structure the reduction was built for");
         assert_eq!(rhs.len(), self.n);
-        let wide = self.wide;
+        let values = self.values;
         self.conv.clear();
-        self.conv.extend(hvals.iter().flat_map(|v| wide.bits(v.to_f64()).to_le_bytes()));
+        hvals.iter().for_each(|v| values.push(v.to_f64(), &mut self.conv));
         self.dev.write(&mut self.work, self.sec.h, &self.conv)?;
         self.conv.clear();
-        self.conv.extend(rhs.iter().flat_map(|v| wide.bits(v.to_f64()).to_le_bytes()));
+        rhs.iter().for_each(|v| values.push(v.to_f64(), &mut self.conv));
         self.dev.write(&mut self.work, self.sec.rhs, &self.conv)
     }
 
@@ -918,7 +954,11 @@ impl<D: Device> GpuSchur<D> {
         self.launch_reduce()?;
         let (s, plan) = (&self.sec, Arg::Block(&self.ints, 0));
         let w = |at: usize| Arg::Block(&self.work, at);
-        factor.factorize_device((&self.work, s.s), (&self.work, self.flag_at(F_FACTOR)))?;
+        if self.f32_reduction {
+            factor.factorize_device_f32((&self.work, s.s), (&self.work, self.flag_at(F_FACTOR)))?;
+        } else {
+            factor.factorize_device((&self.work, s.s), (&self.work, self.flag_at(F_FACTOR)))?;
+        }
         let nks = self.nks as u32;
         let per_entry = nks.div_ceil(THREADS);
         let on = Arg::Block(&self.ints, self.on);
@@ -934,7 +974,11 @@ impl<D: Device> GpuSchur<D> {
             self.run(&self.k.symv_sub, self.nk, PLANE, &[gate, plan, kt_ptr, kt, w(s.s), w(s.x_kept), w(s.r)])
         };
         copy(on, s.x_kept, s.rhs_kept)?;
-        factor.solve_device((&self.work, s.x_kept))?;
+        if self.f32_reduction {
+            factor.solve_device_f32((&self.work, s.x_kept))?;
+        } else {
+            factor.solve_device((&self.work, s.x_kept))?;
+        }
         if max_steps > 0 {
             residual(on)?;
             self.run(&self.k.refine_start, 1, THREADS, &[w(s.rhs_kept), w(s.r), state, flags, Arg::U32(nks), self.wide.arg(tol_rel)])?;
@@ -979,7 +1023,7 @@ impl<D: Device> GpuSchur<D> {
         self.enqueue(factor, refine)?;
         self.dev.read(&self.work, self.sec.out, &mut self.host_out)?;
         let stats = self.outcome(&self.host_out[self.status_at..], refine)?;
-        self.wide.decode(&self.host_out[..8 * self.n], &mut self.step);
+        self.values.decode(&self.host_out[..self.values.bytes() * self.n], &mut self.step);
         for (d, &v) in delta.iter_mut().zip(&self.step) {
             *d = M::from_f64(v);
         }
@@ -1430,7 +1474,15 @@ mod tests {
         let h64: Vec<f64> = h32.iter().map(|&v| v as f64).collect();
         let r64: Vec<f64> = r32.iter().map(|&v| v as f64).collect();
         g.reduce(&h64, &r64).unwrap();
-        assert_eq!(s32, g.download().unwrap().0, "f32 inputs are their f64 twins");
+        let s64 = g.download().unwrap().0;
+        assert_eq!(s32, s64, "f32 inputs are their f64 twins");
+        // f32 values (an f32 root's) reduced in the wide scalar: as f32
+        // inputs widened, and held as f32
+        let mut g32 = GpuSchur::new(&dev, &sym, h.symbolic(), Values::f32(wide)).unwrap();
+        g32.reduce(&h32, &r32).unwrap();
+        assert_eq!(g32.h_values().unwrap(), h64, "{wide:?}: H in f32");
+        let es = err_max(&g32.download().unwrap().0, &s64);
+        assert!(es < 1e-13, "{wide:?}: S from f32 values, err/max {es} against the wide inputs'");
     }
 
     /// Point blocks of condition numbers near 1e8, a direction of each
@@ -1534,8 +1586,9 @@ mod tests {
     /// The f32 reduction is the CPU's f32 route: from f32 inputs, S and the
     /// reduced right-hand side are f32 values, the CPU's f32 reduction's to
     /// its rounding and the exact reduction's to single precision, on split
-    /// and grouped tiles and on wide blocks, in either wide scalar; a solve
-    /// through them solves the system to single precision.
+    /// and grouped tiles and on wide blocks, in either wide scalar, the
+    /// inputs held in it or in f32; a solve through them solves the system
+    /// to single precision.
     #[test]
     fn the_f32_reduction_reduces_as_the_cpu_in_f32() {
         let dev = device();
@@ -1555,13 +1608,16 @@ mod tests {
             let mut s_exact = sym.alloc_s::<f64>();
             let mut rhs_exact = vec![0.0f64; sym.kept_size()];
             schur_reduce(&sym, &h64, &r64, &mut SchurContext::new(), &mut s_exact, &mut rhs_exact).unwrap();
-            for wide in wides(&*dev) {
+            // the inputs in the wide scalar or in f32 (an f32 root's values)
+            let values = wides(&*dev).into_iter().flat_map(|w| [Values::from(w), Values::f32(w)]);
+            for values in values {
+                let wide = values.wide();
                 for (groups, split_pairs) in [(1, 128), (2, 128), (1, 1)] {
                     let params = GpuSchurParams { f32_reduction: true, tile_groups: Some(groups), split_pairs, ..Default::default() };
-                    let mut g = GpuSchur::with_params(&dev, &sym, h.symbolic(), wide, &params).unwrap();
+                    let mut g = GpuSchur::with_params(&dev, &sym, h.symbolic(), values, &params).unwrap();
                     g.reduce(h32.vals(), &r32).unwrap();
                     let (s, r) = g.download().unwrap();
-                    let at = (fixture, wide, groups, split_pairs);
+                    let at = (fixture, values, groups, split_pairs);
                     assert!(s.iter().chain(&r).all(|&v| v as f32 as f64 == v), "{at:?}: S and the right-hand side hold f32 values");
                     let (es, er) = (err_max(&s, &s_cpu32), err_max(&r, &rhs_cpu32));
                     assert!(es < 1e-6 && er < 1e-6, "{at:?}: against the CPU's f32 reduction, S err/max {es}, rhs err/max {er}");
@@ -1574,6 +1630,9 @@ mod tests {
                         g.solve(&mut f, h64.vals(), &r64, None, &mut delta).unwrap();
                         let res = rel_residual(&dense, n, &delta, &rhs);
                         assert!(res < 1e-5, "{at:?}: residual {res}");
+                        if values.is_f32() {
+                            assert!(delta.iter().all(|&v| v as f32 as f64 == v), "{at:?}: the step in f32");
+                        }
                     }
                 }
             }
@@ -1722,7 +1781,7 @@ mod tests {
                 let reduce = |lanes| {
                     let p = SchurPlan::reduction(&sym, h.symbolic());
                     let params = GpuSchurParams { tile_groups: Some(groups), ..Default::default() };
-                    let mut g = GpuSchur::build_lanes(&dev, p, h.symbolic().val_count(), wide, lanes, &params).unwrap();
+                    let mut g = GpuSchur::build_lanes(&dev, p, h.symbolic().val_count(), wide.into(), lanes, &params).unwrap();
                     g.reduce(h.vals(), &rhs).unwrap();
                     g.download().unwrap()
                 };
@@ -1767,6 +1826,34 @@ mod tests {
     fn nothing_eliminated_solves_the_whole_system() {
         for wide in wides(&*device()) {
             nothing_eliminated_solves_the_whole_system_in(wide);
+        }
+    }
+
+    /// An f32 root's whole system (f32 values, the f32 reduction): S is H
+    /// in f32, and the f32 factor solves it to single precision, the step
+    /// in f32.
+    #[test]
+    fn an_f32_whole_system_solves_in_f32() {
+        let (h, dense, rhs, _) = ba_like(30, 200, 5);
+        let n = h.symbolic().ncols();
+        let h32: Vec<f32> = h.vals().iter().map(|&v| v as f32).collect();
+        let r32: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
+        let sn = SupernodalSymbolic::new(h.symbolic(), Some(&nd_block_order(h.symbolic())), &SupernodalParams::default()).unwrap();
+        let dev = device();
+        for wide in wides(&*dev) {
+            let params = GpuSchurParams { f32_reduction: true, ..Default::default() };
+            let mut g = GpuSchur::whole_with_params(&dev, h.symbolic(), Values::f32(wide), &params).unwrap();
+            assert!(g.f32_reduction() && g.reduced().is_f32());
+            g.reduce(&h32, &r32).unwrap();
+            let (s, r) = g.download().unwrap();
+            assert!(s.iter().chain(&r).all(|&v| v as f32 as f64 == v), "{wide:?}: S and the right-hand side in f32");
+            assert_eq!(r, r32.iter().map(|&v| v as f64).collect::<Vec<_>>(), "{wide:?}: the right-hand side is the gradient");
+            let mut f = factor(&dev, GpuPrecision::F32, &sn, h.symbolic(), wide);
+            let mut delta = vec![0.0f32; n];
+            g.solve(&mut f, &h32, &r32, None, &mut delta).unwrap();
+            let delta: Vec<f64> = delta.iter().map(|&v| v as f64).collect();
+            let res = rel_residual(&dense, n, &delta, &rhs);
+            assert!(res < 1e-5, "{wide:?}: residual {res}");
         }
     }
 

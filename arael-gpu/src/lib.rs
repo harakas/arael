@@ -10,8 +10,10 @@
 //! On a device: [`GpuSupernodal`] (the block supernodal Cholesky and its
 //! level-set solve), [`GpuSchur`] (the Schur reduction, the refinement and
 //! the back-substitution around a [`GpuFactor`]) and [`LmVectors`] (the
-//! LM loop's vector passes). The symbolic analysis stays on the CPU in
-//! arael-faer. A sequence of launches records as a graph with
+//! LM loop's vector passes). H, the gradient, the step and the LM vectors
+//! are in the route's [`Values`] (f32 for an f32 root), the cost and the
+//! reduction in its [`Wide`] scalar. The symbolic analysis stays on the
+//! CPU in arael-faer. A sequence of launches records as a graph with
 //! [`Device::capture`] and runs again with [`Device::replay`].
 //!
 //! ```ignore
@@ -183,6 +185,108 @@ impl Wide {
     /// `v` as a kernel argument of type `W`.
     pub fn arg<'a, B>(self, v: f64) -> Arg<'a, B> {
         Arg::Bits(self.bits(v))
+    }
+}
+
+/// The scalars of a device route: the values' (`V` in the kernels: H, the
+/// gradient, the step, the LM loop's vectors) and the wide one (`W`,
+/// [`Wide`]). An f32 root's values are f32, as the CPU's route keeps them;
+/// an f64 root's are in the wide scalar. A [`Wide`] converts to the values
+/// of an f64 root.
+///
+/// ```
+/// use arael_gpu::{Values, Wide};
+/// let v = Values::of(4, Wide::F64);
+/// assert_eq!((v.is_f32(), v.wide(), v.bytes()), (true, Wide::F64, 4));
+/// let mut back = [0.0; 2];
+/// v.decode(&v.encode(&[0.5, 0.25]), &mut back);
+/// assert_eq!(back, [0.5, 0.25]);
+/// assert_eq!(Values::from(Wide::Df32).bytes(), 8);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Values {
+    f32: bool,
+    wide: Wide,
+}
+
+impl From<Wide> for Values {
+    fn from(wide: Wide) -> Self {
+        Values { f32: false, wide }
+    }
+}
+
+impl Values {
+    /// f32 values on a route of wide scalar `wide`.
+    pub fn f32(wide: Wide) -> Self {
+        Values { f32: true, wide }
+    }
+
+    /// The values of a root of `scalar_bytes`-byte scalars (4 or 8) on a
+    /// route of wide scalar `wide`.
+    pub fn of(scalar_bytes: usize, wide: Wide) -> Self {
+        Values { f32: scalar_bytes == 4, wide }
+    }
+
+    /// Whether the values are f32 (else in the wide scalar).
+    pub fn is_f32(self) -> bool {
+        self.f32
+    }
+
+    /// The route's wide scalar.
+    pub fn wide(self) -> Wide {
+        self.wide
+    }
+
+    /// Bytes a value takes: 4 or 8.
+    pub fn bytes(self) -> usize {
+        if self.f32 { 4 } else { 8 }
+    }
+
+    /// The `#define`s a source including [`WIDE`] is compiled with: the wide
+    /// scalar's and `VALUES_F32`.
+    pub fn defines(self) -> String {
+        format!("{}#define VALUES_F32 {}\n", self.wide.defines(), self.f32 as u32)
+    }
+
+    /// `v` as an array of values.
+    pub fn encode(self, v: &[f64]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.bytes() * v.len());
+        self.encode_into(v, &mut out);
+        out
+    }
+
+    /// [`encode`](Self::encode) appended to `out`.
+    pub fn encode_into(self, v: &[f64], out: &mut Vec<u8>) {
+        for &x in v {
+            self.push(x, out);
+        }
+    }
+
+    /// `v` appended to `out` as one value.
+    pub fn push(self, v: f64, out: &mut Vec<u8>) {
+        if self.f32 {
+            out.extend((v as f32).to_le_bytes());
+        } else {
+            out.extend(self.wide.bits(v).to_le_bytes());
+        }
+    }
+
+    /// An array of values into `out`, `bytes.len()` over
+    /// [`bytes`](Self::bytes) of them.
+    pub fn decode(self, bytes: &[u8], out: &mut [f64]) {
+        if self.f32 {
+            assert_eq!(bytes.len(), 4 * out.len());
+            for (o, c) in out.iter_mut().zip(bytes.as_chunks::<4>().0) {
+                *o = f32::from_le_bytes(*c) as f64;
+            }
+        } else {
+            self.wide.decode(bytes, out);
+        }
+    }
+
+    /// `v` as a kernel argument of type `V`.
+    pub fn arg<'a, B>(self, v: f64) -> Arg<'a, B> {
+        if self.f32 { Arg::F32(v as f32) } else { self.wide.arg(v) }
     }
 }
 
