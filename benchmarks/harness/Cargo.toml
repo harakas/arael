@@ -25,6 +25,9 @@ factrs = ["dep:factrs", "dep:faer23"]
 gpu-cuda = ["arael/gpu-cuda"]
 gpu-hip = ["arael/gpu-hip"]
 gpu-metal = ["arael/gpu-metal"]
+# The CPU device (ARAEL_GPU=cpu) and the device trace (ARAEL_GPU_TRACE), for tools/devmap.
+gpu-cpu = ["arael/gpu-cpu"]
+gpu-trace = ["arael/gpu-trace"]
 
 # Added by cargo-arael. Model code generation runs inside the arael
 # proc-macros at compile time, and cargo builds proc-macros unoptimized

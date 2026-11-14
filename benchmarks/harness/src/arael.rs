@@ -94,7 +94,8 @@ pub fn mixed_precision() -> Option<arael::simple_lm::MixedPrecision> {
 }
 
 /// ARAEL_GPU puts the supernodal block route on a GPU: `cuda`, `hip` or
-/// `metal`, or any with a device index (`cuda:1`). With ARAEL_F32_FACTOR
+/// `metal`, or any with a device index (`cuda:1`); `cpu` is the CPU device
+/// (feature `gpu-cpu`), which runs the GPU route's kernels on the CPU. With ARAEL_F32_FACTOR
 /// the factor is f32 there, refined the same way (Metal needs it for an
 /// f64 model). ARAEL_GPU_WIDE=df32 keeps the device's wide values in df32
 /// (`GpuWide::Df32`), `f64` in f64, unset the device's default (df32 on
@@ -112,12 +113,13 @@ pub fn gpu() -> Option<arael::simple_lm::GpuDevice> {
         .get_or_init(|| {
             let v = std::env::var("ARAEL_GPU").ok()?;
             let (name, index) = v.split_once(':').unwrap_or((v.as_str(), "0"));
-            let expected = "expected cuda[:index], hip[:index] or metal[:index]";
+            let expected = "expected cuda[:index], hip[:index], metal[:index] or cpu";
             let index: usize = index.parse().unwrap_or_else(|_| panic!("ARAEL_GPU={}: {}", v, expected));
             let device = match name {
                 "cuda" => arael::simple_lm::GpuDevice::cuda(index),
                 "hip" => arael::simple_lm::GpuDevice::hip(index),
                 "metal" => arael::simple_lm::GpuDevice::metal(index),
+                "cpu" => arael::simple_lm::GpuDevice::cpu(),
                 _ => panic!("ARAEL_GPU={}: {}", v, expected),
             };
             let wide = match std::env::var("ARAEL_GPU_WIDE").as_deref() {
