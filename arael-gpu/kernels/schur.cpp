@@ -584,7 +584,8 @@ DEVICE W block_sumsq(GLOBAL const R* x, u32 n, SHARED_PTR W* sh, u32 t) {
 
 // The refinement's start, one block, after the first solve's residual r of
 // the right-hand side b: the norms, the tolerance tol_rel ||b||, and whether
-// a step is due.
+// a step is due. A norm that is not a number starts no step; the host reads
+// it as short of the tolerance.
 KERNEL_THREADS(THREADS) void k_refine_start(GLOBAL const R* RESTRICT b, GLOBAL const R* RESTRICT r, GLOBAL W* RESTRICT st, GLOBAL u32* RESTRICT flags, u32 n, W tol_rel) {
     SHARED W sh[THREADS];
     W bn = sqrt(block_sumsq(b, n, sh, thread_x()));
@@ -611,9 +612,10 @@ KERNEL_THREADS(THREADS) void k_refine_apply(GLOBAL const u32* RESTRICT flags, GL
 }
 
 // A due refinement step's judgement, one block, from the residual r of the
-// updated iterate: a step that did not reduce the residual's norm is to be
-// undone and ends the refinement; otherwise the norm is kept and the
-// refinement goes on while it is above the tolerance.
+// updated iterate: a step that did not reduce the residual's norm (a norm
+// that is not a number included) is to be undone and ends the refinement;
+// otherwise the norm is kept and the refinement goes on while it is above
+// the tolerance.
 KERNEL_THREADS(THREADS) void k_refine_judge(GLOBAL const R* RESTRICT r, GLOBAL W* RESTRICT st, GLOBAL u32* RESTRICT flags, u32 n) {
     SHARED W sh[THREADS];
     // every thread reads the flag before the first barrier, thread 0 writes
@@ -622,7 +624,7 @@ KERNEL_THREADS(THREADS) void k_refine_judge(GLOBAL const R* RESTRICT r, GLOBAL W
     W next = sqrt(block_sumsq(r, n, sh, thread_x()));
     if (thread_x() == 0) {
         flags[F_STEPS] += 1;
-        if (next >= st[R_RNORM]) {
+        if (!(next < st[R_RNORM])) {
             // the factor is too far off for the correction to help
             flags[F_REVERT] = 1;
             flags[F_ACTIVE] = 0;

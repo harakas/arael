@@ -5711,9 +5711,10 @@ impl Refine {
             steps += 1;
             let next = residual_into(a, &self.x64, &self.b64, &mut self.r, threads, &mut self.mv);
             lap(t_residual);
-            if next >= rnorm {
-                // The factor is too far off for the correction to help: the
-                // iterate before it is the best one.
+            if !(next < rnorm) {
+                // The factor is too far off for the correction to help (a
+                // norm that is not a number included): the iterate before
+                // it is the best one.
                 self.x64.copy_from_slice(&self.x_prev);
                 break;
             }
@@ -5722,7 +5723,8 @@ impl Refine {
         for (xi, &v) in x.iter_mut().zip(&self.x64) {
             *xi = <T as SchurReal>::from_f64(v);
         }
-        let short = rnorm > tol;
+        // a norm that is not a number is short of any tolerance
+        let short = !(rnorm <= tol);
         self.steps += steps;
         if short {
             self.shortfalls += 1;
@@ -9248,6 +9250,41 @@ pub(crate) fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut 
 #[cfg(test)]
 mod tests {
     use super::{ordering_for, ReducedOrdering};
+
+    /// A residual norm that is not a number is not a converged refinement:
+    /// with a NaN in the right-hand side no step is taken and the solve is
+    /// short of its tolerance, and a correction that turns the residual
+    /// into one is undone.
+    #[test]
+    fn a_nan_residual_leaves_the_refinement_short() {
+        use arael_faer::bsc::{SparseBlockColMat, SymbolicSparseBlockColMat};
+        // a = diag(2, 4)
+        let part: Vec<super::SparseIndex> = vec![0, 1, 2];
+        let (sym, pos) = SymbolicSparseBlockColMat::from_scalar_coords(part.clone(), part, 2, |k| (k, k));
+        let mut a = SparseBlockColMat::<super::SparseIndex, f64>::zeroed(sym);
+        a.vals_mut()[pos[0] as usize] = 2.0;
+        a.vals_mut()[pos[1] as usize] = 4.0;
+        let mp = super::MixedPrecision { max_refinements: 5, tol: 1e-10 };
+        let mut lap = |_: &mut f64| {};
+        let (mut ts, mut tr) = (0.0, 0.0);
+
+        let mut rf = super::Refine::default();
+        let mut x = [1.0f64, 1.0];
+        let (steps, rnorm, _, short) = rf.refine(&a, &[2.0, f64::NAN], &mut x, mp, 1, &mut lap, &mut ts, &mut tr, |_| Ok(())).unwrap();
+        assert!(steps == 0 && rnorm.is_nan() && short && rf.shortfalls == 1, "a NaN in b: {steps} steps, norm {rnorm}, short {short}");
+
+        // x off the solution (1, 1) of b = (2, 4) by (0.5, 0): the residual is (1, 0)
+        let mut rf = super::Refine::default();
+        let mut x = [0.5f64, 1.0];
+        let (steps, rnorm, _, short) = rf
+            .refine(&a, &[2.0, 4.0], &mut x, mp, 1, &mut lap, &mut ts, &mut tr, |r| {
+                r[0] = f64::NAN;
+                Ok(())
+            })
+            .unwrap();
+        assert!(steps == 1 && rnorm == 1.0 && short, "a NaN correction: {steps} steps, norm {rnorm}, short {short}");
+        assert_eq!(x, [0.5, 1.0], "the step is undone");
+    }
 
     /// The device factor is in the solver's scalar, or f32 under mixed
     /// precision: an f32 solver never gets an f64 device factor.

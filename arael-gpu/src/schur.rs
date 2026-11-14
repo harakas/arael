@@ -156,7 +156,8 @@ pub(crate) const FLAGS_AT: usize = 64;
 pub const STATUS_BYTES: usize = FLAGS_AT + 4 * N_FLAGS;
 
 /// What a refined solve took: steps, the final and the right-hand side's
-/// norm, and whether it stayed above the tolerance.
+/// norm, and whether it stayed above the tolerance (`short`; a norm that is
+/// not a number is).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RefineStats {
     pub steps: usize,
@@ -206,7 +207,8 @@ pub(crate) fn decode_status(status: &[u8], elim_blk: &[u32], refine: Option<(usi
     let mut stats = RefineStats::default();
     if refine.is_some_and(|r| r.0 > 0) {
         let st = |i: usize| real(8 * i);
-        stats = RefineStats { steps: flag(F_STEPS) as usize, rnorm: st(ST_RNORM), bnorm: st(ST_BNORM), short: st(ST_RNORM) > st(ST_TOL) };
+        // a norm that is not a number is short of any tolerance
+        stats = RefineStats { steps: flag(F_STEPS) as usize, rnorm: st(ST_RNORM), bnorm: st(ST_BNORM), short: !(st(ST_RNORM) <= st(ST_TOL)) };
     }
     Ok(stats)
 }
@@ -1962,6 +1964,24 @@ mod tests {
     fn the_refinement_stops_on_the_device() {
         for wide in wides(&*device()) {
             the_refinement_stops_on_the_device_in(wide);
+        }
+    }
+
+    /// A residual norm that is not a number is not a converged solve: a
+    /// right-hand side with a NaN leaves the refinement short of its
+    /// tolerance, whatever the comparisons with a NaN say.
+    #[test]
+    fn a_nan_residual_is_not_a_converged_refinement() {
+        for wide in wides(&*device()) {
+            let (h, _, mut rhs, _, sym, sn) = setup(40, 300, 9);
+            let n = h.symbolic().ncols();
+            let dev = device();
+            let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+            let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
+            rhs[n / 2] = f64::NAN;
+            let mut delta = vec![0.0f64; n];
+            let stats = g.solve(&mut f, h.vals(), &rhs, Some((12, 1e-10)), &mut delta).unwrap();
+            assert!(stats.short && stats.rnorm.is_nan(), "{wide:?}: {stats:?}");
         }
     }
 
