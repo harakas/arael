@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use crate::{Arg, Device, GpuError, Launch, Layout, Values, WIDE, Wide, define_u32s};
+use crate::{Arg, Device, GpuError, Launch, Layout, Section, Values, WIDE, Wide, define_u32s};
 
 /// The scalars buffer's slots.
 pub const S_COST_X: usize = 0;
@@ -204,7 +204,28 @@ impl<D: Device> LmVectors<D> {
         let [gather_diag, lin_pass, damp, attempt_pass, combine_lin, combine_attempt, copy, zero_steps]: [D::Kernel; 8] =
             dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
         let k = Kernels { gather_diag, lin_pass, damp, attempt_pass, combine_lin, combine_attempt, copy, zero_steps };
-        Ok(LmVectors { dev: dev.clone(), values, wide, k, n, block, sec })
+        let v = LmVectors { dev: dev.clone(), values, wide, k, n, block, sec };
+        v.dev.describe(&v.block, "lm", &|| v.sections());
+        Ok(v)
+    }
+
+    /// The block's sections, for the tools that inspect a device's work
+    /// ([`Device::describe`]).
+    fn sections(&self) -> Vec<Section> {
+        let (s, n, v, w) = (&self.sec, self.n, self.values, self.wide);
+        let parts = blocks(n) as usize;
+        vec![
+            Section::u32s("pos", s.pos, n).doc("per parameter: the position of its diagonal entry in H's values"),
+            Section::values("x", s.x, n, v).doc("the parameters"),
+            Section::values("x_try", s.x_try, n, v).doc("the trial point, x - step"),
+            Section::values("diag", s.diag, n, v).doc("H's undamped diagonal"),
+            Section::values("damp", s.damp, n, v).doc("the damping scale: the diagonal, floored when a floor is set"),
+            Section::values("lambda", s.lambda, 1, v).doc("the damping of the next attempt"),
+            Section::wide("lin", s.lin, parts * LIN_PARTIALS, w).doc("k_lin_pass's partials per block: gradient max, scaled gradient max, fault"),
+            Section::wide("att", s.att, parts * ATTEMPT_PARTIALS, w).doc("k_attempt_pass's partials per block: step^2, trial^2, predicted reduction"),
+            Section::wide("scalars", s.scalars, N_SCALARS, w)
+                .doc("what the loop decides on: cost at x, cost at the trial point, gradient max, scaled gradient max, fault, step^2, trial^2, predicted reduction"),
+        ]
     }
 
     /// The parameter count.

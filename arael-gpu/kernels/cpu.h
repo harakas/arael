@@ -116,4 +116,30 @@ int launch(void (*k)(A...), void** p, const unsigned* l, const char** error) {
 
 ARAEL_CPU_EXPORT void arael_cpu_init(const arael_cpu::Runtime* rt) { arael_cpu::rt = rt; }
 
+// The access probe (arael_gpu's cpu_probe.rs): with ARAEL_CPU_PROBE the
+// library is compiled with clang's load and store tracing, which calls the
+// hooks below with the address of every access; they hand it to the
+// device's probe, set when the library is loaded.
+#ifdef ARAEL_CPU_PROBE
+namespace arael_cpu {
+typedef void (*Probe)(const void*, unsigned);
+static Probe probe = nullptr;
+} // namespace arael_cpu
+ARAEL_CPU_EXPORT void arael_cpu_probe_init(arael_cpu::Probe p) { arael_cpu::probe = p; }
+#define ARAEL_CPU_PROBE_HOOKS(n)                                                                \
+    extern "C" __attribute__((no_sanitize("coverage"))) void __sanitizer_cov_load##n(void* a) { \
+        if (arael_cpu::probe) arael_cpu::probe(a, n);                                           \
+    }                                                                                           \
+    extern "C" __attribute__((no_sanitize("coverage"))) void __sanitizer_cov_store##n(void* a) { \
+        if (arael_cpu::probe) arael_cpu::probe(a, n | 0x100);                                   \
+    }
+ARAEL_CPU_PROBE_HOOKS(1)
+ARAEL_CPU_PROBE_HOOKS(2)
+ARAEL_CPU_PROBE_HOOKS(4)
+ARAEL_CPU_PROBE_HOOKS(8)
+ARAEL_CPU_PROBE_HOOKS(16)
+extern "C" __attribute__((no_sanitize("coverage"))) void __sanitizer_cov_trace_pc_guard(unsigned*) {}
+extern "C" __attribute__((no_sanitize("coverage"))) void __sanitizer_cov_trace_pc_guard_init(unsigned*, unsigned*) {}
+#endif
+
 #endif

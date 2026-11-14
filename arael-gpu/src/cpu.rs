@@ -213,7 +213,7 @@ fn runtime() -> Result<&'static Runtime, GpuError> {
     RUNTIME
         .get_or_init(|| {
             let source = format!("#define ARAEL_CPU_RUNTIME 1\n{CPU_H}\n{RUNTIME_SOURCE}");
-            let (lib, _) = library(DiskCache::open("cpu-runtime").as_ref(), "arael_cpu_runtime", &source)?;
+            let (lib, _) = library(DiskCache::open("cpu-runtime").as_ref(), "arael_cpu_runtime", &source, false)?;
             // SAFETY: the runtime's entry, of this type.
             let table = unsafe { lib.get::<unsafe extern "C" fn() -> *const c_void>(b"arael_cpu_runtime\0") }
                 .map_err(|e| GpuError::Driver(format!("the CPU runtime: {e}")))?;
@@ -227,20 +227,24 @@ fn runtime() -> Result<&'static Runtime, GpuError> {
         .map_err(Clone::clone)
 }
 
-/// What a library of `source` depends on.
-fn cache_key(source: &str) -> Result<String, GpuError> {
+/// What a library of `source` depends on; `probe`: compiled for the access
+/// probe (its source says so too).
+fn cache_key(source: &str, probe: bool) -> Result<String, GpuError> {
+    if probe {
+        return Ok(format!("{} {} {}\n{source}", crate::cpu_probe::compiler(), OPTIONS.join(" "), crate::cpu_probe::OPTIONS.join(" ")));
+    }
     Ok(format!("{} {}\n{}\n{source}", compiler(), OPTIONS.join(" "), compiler_version()?))
 }
 
 /// The library of `source`, and whether it was compiled: from `disk`, else
 /// compiled (`entry` names it in the compiler's messages) and stored there.
 /// A cached entry the loader refuses is compiled again and written over.
-fn library(disk: Option<&DiskCache>, entry: &str, source: &str) -> Result<(libloading::Library, bool), GpuError> {
-    let key = cache_key(source)?;
+fn library(disk: Option<&DiskCache>, entry: &str, source: &str, probe: bool) -> Result<(libloading::Library, bool), GpuError> {
+    let key = cache_key(source, probe)?;
     if let Some(lib) = disk.and_then(|d| d.load(key.as_bytes())).and_then(|lib| load(&lib).ok()) {
         return Ok((lib, false));
     }
-    let lib = compile(entry, source)?;
+    let lib = compile(entry, source, probe)?;
     if let Some(d) = disk {
         d.store(key.as_bytes(), &lib);
     }
@@ -273,6 +277,8 @@ struct Recorded {
     kernel: CpuKernel,
     launch: Launch,
     slots: [u64; MAX_ARGS],
+    /// With the access probe: the block arguments (index, address, bytes).
+    blocks: Vec<(usize, usize, usize)>,
 }
 
 /// The launches a capture recorded, run again by a replay.
@@ -301,11 +307,31 @@ pub struct CpuDevice {
     forks: crate::Forks,
     pool: Arc<Pool<Mem>>,
     host_pool: Arc<Pool<Mem>>,
+    /// The access probe, when on ([`with_probe`](Self::with_probe)).
+    probe: Option<Mutex<crate::cpu_probe::Probe>>,
 }
 
 impl CpuDevice {
-    /// The CPU device; `index` is 0 (there is one).
+    /// The CPU device; `index` is 0 (there is one). Its access probe is on
+    /// when the environment variable `ARAEL_CPU_PROBE` is set (to anything
+    /// but `0`).
     pub fn new(index: usize) -> Result<Self, GpuError> {
+        Self::with_probe(index, std::env::var("ARAEL_CPU_PROBE").is_ok_and(|v| v != "0"))
+    }
+
+    /// [`new`](Self::new) with the access probe on or off. With it the
+    /// kernels are compiled by clang (`ARAEL_CPU_PROBE_CXX`, else
+    /// `clang++`) with its load and store tracing, and every launch's
+    /// reads and writes of its blocks are counted per section
+    /// ([`Device::describe`], [`Device::take_accesses`]); launches run
+    /// several times slower.
+    ///
+    /// ```ignore
+    /// let dev = CpuDevice::with_probe(0, true)?;
+    /// dev.launch(&k, launch, &[Arg::Block(&x, 0)])?;
+    /// let accesses = dev.take_accesses(); // one Vec<Access> per launch
+    /// ```
+    pub fn with_probe(index: usize, probe: bool) -> Result<Self, GpuError> {
         if index != 0 {
             return Err(GpuError::Unavailable(format!("the CPU device has index 0 only, not {index}")));
         }
@@ -330,7 +356,17 @@ impl CpuDevice {
             forks: crate::Forks::default(),
             pool: Arc::new(Pool::new()),
             host_pool: Arc::new(Pool::new()),
+            // SAFETY: the runtime's table starts with its `current` (cpu.h's Runtime).
+            probe: probe.then(|| Mutex::new(crate::cpu_probe::Probe::new(unsafe { *(runtime().expect("checked above").0 as *const unsafe extern "C" fn() -> *const u32) }))),
         })
+    }
+
+    /// One launch run, its accesses counted when the probe is on.
+    fn run(&self, kernel: &CpuKernel, launch: &Launch, slots: &[u64; MAX_ARGS], blocks: &[(usize, usize, usize)]) -> Result<(), GpuError> {
+        match &self.probe {
+            Some(p) => p.lock().unwrap_or_else(|e| e.into_inner()).launch(blocks, || run(kernel, launch, slots)),
+            None => run(kernel, launch, slots),
+        }
     }
 
     /// Whether the calling thread has a capture open.
@@ -357,7 +393,7 @@ impl CpuDevice {
         if let Some(module) = self.modules.lock().unwrap_or_else(|e| e.into_inner()).get(&source) {
             return Ok(module.clone());
         }
-        let (lib, compiled) = library(DiskCache::open(Self::RUNTIME).as_ref(), entry, &source)?;
+        let (lib, compiled) = library(DiskCache::open(Self::RUNTIME).as_ref(), entry, &source, self.probe.is_some())?;
         if compiled {
             COMPILES.fetch_add(1, Ordering::Relaxed);
         }
@@ -366,19 +402,47 @@ impl CpuDevice {
             .map_err(|e| GpuError::Driver(format!("the CPU device's library of `{entry}`: {e}")))?;
         // SAFETY: the runtime's table, which outlives the library.
         unsafe { init(runtime()?.0) };
+        if self.probe.is_some() {
+            type Hook = unsafe extern "C" fn(*const c_void, u32);
+            // SAFETY: cpu.h's probe setter, of this type.
+            let set = unsafe { lib.get::<unsafe extern "C" fn(Hook)>(b"arael_cpu_probe_init\0") }
+                .map_err(|e| GpuError::Driver(format!("the CPU device's probed library of `{entry}`: {e}")))?;
+            // SAFETY: the hook lives as long as the process.
+            unsafe { set(crate::cpu_probe::hook) };
+        }
         let module = Arc::new(Module { lib });
         self.modules.lock().unwrap_or_else(|e| e.into_inner()).insert(source, module.clone());
         Ok(module)
     }
 }
 
-/// `source` compiled into a shared library's bytes.
-fn compile(entry: &str, source: &str) -> Result<Vec<u8>, GpuError> {
+/// `source` compiled into a shared library's bytes; `probe`: by clang with
+/// its access tracing, the object first and the link without a sanitizer
+/// option, so it needs none of clang's runtime libraries.
+fn compile(entry: &str, source: &str, probe: bool) -> Result<Vec<u8>, GpuError> {
     let (src, out) = (temporary("cpp"), temporary("so"));
     let io = |e: std::io::Error| GpuError::Driver(format!("the CPU device's compile of `{entry}`: {e}"));
     std::fs::write(&src, source).map_err(io)?;
-    let cxx = compiler();
-    let run = Command::new(&cxx).args(OPTIONS).arg(&src).arg("-o").arg(&out).output();
+    let cxx = if probe { crate::cpu_probe::compiler() } else { compiler() };
+    let run = if probe {
+        let obj = temporary("o");
+        let compiled = Command::new(&cxx)
+            .args(OPTIONS.iter().filter(|o| **o != "-shared"))
+            .args(crate::cpu_probe::OPTIONS)
+            .arg("-c")
+            .arg(&src)
+            .arg("-o")
+            .arg(&obj)
+            .output();
+        let linked = match compiled {
+            Ok(c) if c.status.success() => Command::new(&cxx).args(["-shared", "-fPIC"]).arg(&obj).arg("-o").arg(&out).output(),
+            other => other,
+        };
+        let _ = std::fs::remove_file(&obj);
+        linked
+    } else {
+        Command::new(&cxx).args(OPTIONS).arg(&src).arg("-o").arg(&out).output()
+    };
     let _ = std::fs::remove_file(&src);
     let run = run.map_err(|e| GpuError::Unavailable(format!("the CPU device's compiler `{cxx}`: {e}")))?;
     if !run.status.success() {
@@ -462,6 +526,9 @@ impl Device for CpuDevice {
         };
         // SAFETY: the allocation holds at least `bytes`.
         unsafe { core::ptr::write_bytes(mem.ptr.as_ptr(), 0, bytes) };
+        if let Some(p) = &self.probe {
+            p.lock().unwrap_or_else(|e| e.into_inner()).forget(mem.ptr.as_ptr() as usize);
+        }
         Ok(CpuBlock { mem: Some(mem), len: bytes, pool: self.pool.clone() })
     }
 
@@ -557,7 +624,8 @@ impl Device for CpuDevice {
     /// cpu.h (ahead of `defines`, which its system headers must not see),
     /// `defines`, [`HEADER`], `source`.
     fn unit(&self, source: &str, defines: &str) -> String {
-        format!("#define ARAEL_CPU_TARGET 1\n{}{CPU_H}\n{defines}\n{HEADER}\n{source}\n", self.arch.defines())
+        let probe = if self.probe.is_some() { "#define ARAEL_CPU_PROBE 1\n" } else { "" };
+        format!("#define ARAEL_CPU_TARGET 1\n{probe}{}{CPU_H}\n{defines}\n{HEADER}\n{source}\n", self.arch.defines())
     }
 
     fn launch(&self, kernel: &CpuKernel, launch: Launch, args: &[Arg<'_, CpuBlock>]) -> Result<(), GpuError> {
@@ -577,18 +645,22 @@ impl Device for CpuDevice {
                 Arg::Bits(v) => v,
             };
         }
+        let blocks: Vec<(usize, usize, usize)> = match &self.probe {
+            Some(_) => args.iter().enumerate().filter_map(|(i, a)| if let Arg::Block(b, _) = a { Some((i, b.ptr() as usize, b.len)) } else { None }).collect(),
+            None => Vec::new(),
+        };
         {
             let me = std::thread::current().id();
             let mut capture = self.capture.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((t, recorded)) = capture.as_mut()
                 && *t == me
             {
-                recorded.push(Recorded { kernel: kernel.clone(), launch, slots });
+                recorded.push(Recorded { kernel: kernel.clone(), launch, slots, blocks });
                 return Ok(());
             }
         }
         let _stream = self.stream();
-        run(kernel, &launch, &slots)
+        self.run(kernel, &launch, &slots, &blocks)
     }
 
     fn launch_on(&self, lane: Lane, kernel: &CpuKernel, launch: Launch, args: &[Arg<'_, CpuBlock>]) -> Result<(), GpuError> {
@@ -649,9 +721,22 @@ impl Device for CpuDevice {
         self.not_capturing("a replay")?;
         let _stream = self.stream();
         for l in &graph.launches {
-            run(&l.kernel, &l.launch, &l.slots)?;
+            self.run(&l.kernel, &l.launch, &l.slots, &l.blocks)?;
         }
         Ok(())
+    }
+
+    fn describe(&self, block: &CpuBlock, _name: &str, sections: &dyn Fn() -> Vec<crate::Section>) {
+        if let Some(p) = &self.probe {
+            p.lock().unwrap_or_else(|e| e.into_inner()).describe(block.ptr() as usize, block.len, &sections());
+        }
+    }
+
+    fn take_accesses(&self) -> Vec<Vec<crate::Access>> {
+        match &self.probe {
+            Some(p) => p.lock().unwrap_or_else(|e| e.into_inner()).take(),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -718,11 +803,11 @@ KERNEL void block_sum(GLOBAL const float* x, GLOBAL float* out, u32 n) {
         let has_thread_locals = |lib: &[u8]| SECTIONS.iter().any(|s| lib.windows(s.len()).any(|w| w == *s));
         let dev = CpuDevice::new(0).unwrap();
         let source = format!("{}\n{}\n{BLOCK_SUM}", crate::WIDE, crate::ASSEMBLY);
-        let lib = compile("block_sum", &dev.unit(&source, &format!("{}#define SCALAR float\n", crate::Wide::Df32.defines()))).unwrap();
+        let lib = compile("block_sum", &dev.unit(&source, &format!("{}#define SCALAR float\n", crate::Wide::Df32.defines())), false).unwrap();
         assert!(!has_thread_locals(&lib), "a kernel library with thread-locals");
         // the check sees a thread-local where there is one
         const TL: &str = "KERNEL void tl(GLOBAL u32* out) { static thread_local u32 v; v++; out[0] = v; }";
-        assert!(has_thread_locals(&compile("tl", &dev.unit(TL, "")).unwrap()));
+        assert!(has_thread_locals(&compile("tl", &dev.unit(TL, ""), false).unwrap()));
     }
 
     /// A thread that has returned no longer takes part in a barrier, as on
@@ -876,15 +961,15 @@ KERNEL void put(GLOBAL float* out) {
         let disk = DiskCache::at(dir.clone());
         let source = "ARAEL_CPU_EXPORT int arael_cpu_answer() { return 42; }";
         let source = format!("#define ARAEL_CPU_RUNTIME 1\n{CPU_H}\n{source}");
-        let key = cache_key(&source).unwrap();
+        let key = cache_key(&source, false).unwrap();
         disk.store(key.as_bytes(), b"not a library");
-        let (lib, compiled) = library(Some(&disk), "answer", &source).unwrap();
+        let (lib, compiled) = library(Some(&disk), "answer", &source, false).unwrap();
         assert!(compiled);
         // SAFETY: the function above, of this type.
         assert_eq!(unsafe { lib.get::<unsafe extern "C" fn() -> i32>(b"arael_cpu_answer\0").unwrap()() }, 42);
         assert_ne!(disk.load(key.as_bytes()).expect("the entry written over"), b"not a library");
         // which the next load finds
-        let (_, compiled) = library(Some(&disk), "answer", &source).unwrap();
+        let (_, compiled) = library(Some(&disk), "answer", &source, false).unwrap();
         assert!(!compiled);
         std::fs::remove_dir_all(dir).unwrap();
     }

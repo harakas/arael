@@ -37,7 +37,7 @@ use arael_faer::schur::{SchurReal, SchurSymbolic};
 
 use crate::plan::SparseIndex;
 use crate::supernodal::{GpuFactor, Packer};
-use crate::{Arg, Device, GpuError, Launch, Layout, Values, WIDE, Wide, define_u32s};
+use crate::{Arg, Device, GpuError, Launch, Layout, Scope, Section, Values, WIDE, Wide, define_u32s};
 
 /// No kept-kept tile behind a tile of S.
 const NONE: u32 = u32::MAX;
@@ -715,6 +715,35 @@ impl<D: Device> GpuSchur<D> {
         let [zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert]: [D::Kernel; 13] =
             dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
         let k = Kernels { zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert };
+        dev.describe(&ints, "schur.plan", &|| {
+            let mut v = plan_sections(&pk.words[..at_blocks]);
+            v.extend([
+                Section::u32s("tile_blocks", 4 * at_blocks, blocks.len()).doc("k_schur_tiles' blocks: per block its units' tiles (and split parts)"),
+                Section::u32s("on", on, 1).doc("a word holding 1: the gate of kernels that always run"),
+                Section::u32s("kt_ptr", kt_ptr, kt_ptr_words.len()).doc("per kept block: where its tiles of S start in kt"),
+                Section::u32s("kt", kt, kt_words.len()).doc("the tiles of S touching each kept block (tile index * 2, +1 when the block is the tile's column)"),
+            ]);
+            v
+        });
+        dev.describe(&work, "schur.work", &|| {
+            let reduced = if params.f32_reduction { "f32" } else { values.wide().name() };
+            let r = |name: &str, at: usize, count: usize| Section::new(name, at, count * elem, elem, reduced).role("R");
+            vec![
+                Section::values("h", sec.h, nh, values).doc("H's tile values: assembled or uploaded, its diagonal damped in place"),
+                Section::values("rhs", sec.rhs, p.n, values).doc("the gradient"),
+                r("dfac", sec.dfac, p.dfac_len).doc("the eliminated blocks' Cholesky factors"),
+                r("z", sec.z, p.z_len).doc("per eliminated block: z = D^-1 b"),
+                r("w", sec.w, p.w_len).doc("per observer: W = C D^-1"),
+                r("s", sec.s, p.s_len).doc("S's tile values: the reduced system"),
+                r("rhs_kept", sec.rhs_kept, p.nks).doc("the reduced right-hand side"),
+                r("x_kept", sec.x_kept, p.nks).doc("the kept blocks' solution"),
+                r("x_prev", sec.x_prev, p.nks).doc("the refinement's previous iterate"),
+                r("r", sec.r, p.nks).doc("the refinement's residual"),
+                Section::values("step", sec.out, p.n, values).doc("the full step, what a solve reads back"),
+                Section::wide("state", sec.out + status_at, FLAGS_AT / 8, values.wide()).doc("the refinement's state: norms and tolerance"),
+                Section::u32s("flags", sec.out + status_at + FLAGS_AT, N_FLAGS).doc("the solve's flags: refinement active, steps, revert, failed eliminated block, failed pivot"),
+            ]
+        });
         Ok(GpuSchur {
             graph: None,
             graphs: true,
@@ -951,13 +980,19 @@ impl<D: Device> GpuSchur<D> {
     /// and refinement, which is what makes it a graph.
     fn launch_attempt(&self, factor: &GpuFactor<D>, max_steps: usize, tol_rel: f64) -> Result<(), GpuError> {
         assert!(!(self.f32_reduction && max_steps > 0), "a refinement measures its residuals against S, which GpuSchurParams::f32_reduction forms in f32");
-        self.launch_reduce()?;
+        {
+            let _scope = Scope::new(&*self.dev, "reduce");
+            self.launch_reduce()?;
+        }
         let (s, plan) = (&self.sec, Arg::Block(&self.ints, 0));
         let w = |at: usize| Arg::Block(&self.work, at);
-        if self.f32_reduction {
-            factor.factorize_device_f32((&self.work, s.s), (&self.work, self.flag_at(F_FACTOR)))?;
-        } else {
-            factor.factorize_device((&self.work, s.s), (&self.work, self.flag_at(F_FACTOR)))?;
+        {
+            let _scope = Scope::new(&*self.dev, "factorize");
+            if self.f32_reduction {
+                factor.factorize_device_f32((&self.work, s.s), (&self.work, self.flag_at(F_FACTOR)))?;
+            } else {
+                factor.factorize_device((&self.work, s.s), (&self.work, self.flag_at(F_FACTOR)))?;
+            }
         }
         let nks = self.nks as u32;
         let per_entry = nks.div_ceil(THREADS);
@@ -973,13 +1008,17 @@ impl<D: Device> GpuSchur<D> {
             let (kt_ptr, kt) = (Arg::Block(&self.ints, self.kt_ptr), Arg::Block(&self.ints, self.kt));
             self.run(&self.k.symv_sub, self.nk, PLANE, &[gate, plan, kt_ptr, kt, w(s.s), w(s.x_kept), w(s.r)])
         };
-        copy(on, s.x_kept, s.rhs_kept)?;
-        if self.f32_reduction {
-            factor.solve_device_f32((&self.work, s.x_kept))?;
-        } else {
-            factor.solve_device((&self.work, s.x_kept))?;
+        {
+            let _scope = Scope::new(&*self.dev, "solve");
+            copy(on, s.x_kept, s.rhs_kept)?;
+            if self.f32_reduction {
+                factor.solve_device_f32((&self.work, s.x_kept))?;
+            } else {
+                factor.solve_device((&self.work, s.x_kept))?;
+            }
         }
         if max_steps > 0 {
+            let _scope = Scope::new(&*self.dev, "refine");
             residual(on)?;
             self.run(&self.k.refine_start, 1, THREADS, &[w(s.rhs_kept), w(s.r), state, flags, Arg::U32(nks), self.wide.arg(tol_rel)])?;
             for _ in 0..max_steps {
@@ -991,6 +1030,7 @@ impl<D: Device> GpuSchur<D> {
             self.run(&self.k.refine_revert, per_entry, THREADS, &[flags, w(s.x_kept), w(s.x_prev), Arg::U32(nks)])?;
         }
         // the kept blocks into the full vector, then the eliminated ones
+        let _scope = Scope::new(&*self.dev, "backsub");
         self.run(&self.k.scatter_kept, self.nk.div_ceil(THREADS), THREADS, &[plan, w(s.x_kept), w(s.out), Arg::U32(self.nk)])?;
         self.run(&self.k.backsub, self.ne.div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.rhs), w(s.dfac), w(s.out), Arg::U32(self.ne)])
     }
@@ -1085,6 +1125,42 @@ impl<D: Device> GpuSchur<D> {
         }
         Ok(decode_status(&f64_status, &self.elim_blk, refine)?)
     }
+}
+
+/// The plan words' sections, for [`Device::describe`]: the header, then
+/// the array of each of its slots.
+fn plan_sections(words: &[u32]) -> Vec<Section> {
+    let slots = [
+        (SE_DIAG_OFF, "SE_DIAG_OFF", "per eliminated block: the value offset of its diagonal tile in h"),
+        (SE_W, "SE_W", "per eliminated block: its width"),
+        (SE_ORIG_OFF, "SE_ORIG_OFF", "per eliminated block: its scalar offset in the gradient and the step"),
+        (SE_OBS_PTR, "SE_OBS_PTR", "per eliminated block: its first observer"),
+        (SE_DFAC_OFF, "SE_DFAC_OFF", "per eliminated block: the value offset of its square in dfac"),
+        (SE_Z_OFF, "SE_Z_OFF", "per eliminated block: its value offset in z"),
+        (SO_CA_OFF, "SO_CA_OFF", "per observer: the value offset of its coupling tile in h"),
+        (SO_TRANS, "SO_TRANS", "per observer: 1 when the coupling tile is stored (eliminated, kept)"),
+        (SO_W, "SO_W", "per observer: the width of its kept block"),
+        (SO_E, "SO_E", "per observer: its eliminated slot"),
+        (SO_ORIG_OFF, "SO_ORIG_OFF", "per observer: the scalar offset of its kept block in the step"),
+        (SO_W_OFF, "SO_W_OFF", "per observer: the value offset of W_o in w"),
+        (ST_VAL_OFF, "ST_VAL_OFF", "per tile of S: its value offset in s"),
+        (ST_WR, "ST_WR", "per tile of S: its rows"),
+        (ST_WC, "ST_WC", "per tile of S: its columns"),
+        (ST_A, "ST_A", "per tile of S: its row kept block"),
+        (ST_B, "ST_B", "per tile of S: its column kept block"),
+        (ST_A_OFF, "ST_A_OFF", "per tile of S: the scalar offset of its row block in the reduced vector"),
+        (ST_B_OFF, "ST_B_OFF", "per tile of S: the scalar offset of its column block in the reduced vector"),
+        (ST_COPY_OFF, "ST_COPY_OFF", "per tile of S: the value offset in h of the kept-kept tile behind it, or NONE"),
+        (ST_PAIR_PTR, "ST_PAIR_PTR", "per tile of S: its first pair"),
+        (SP_OA, "SP_OA", "per pair: its observer oa, the pairs grouped by tile"),
+        (SP_OB, "SP_OB", "per pair: its observer ob"),
+        (SK_OBS_PTR, "SK_OBS_PTR", "per kept block: its first entry in SK_OBS"),
+        (SK_OBS, "SK_OBS", "the observers grouped by kept block"),
+        (SK_S_OFF, "SK_S_OFF", "per kept block: its scalar offset in the reduced vector"),
+        (SK_ORIG_OFF, "SK_ORIG_OFF", "per kept block: its scalar offset in the step"),
+        (SK_W, "SK_W", "per kept block: its width"),
+    ];
+    crate::plan_sections(words, SHEADER, &slots)
 }
 
 /// Per kept block, the tiles of S touching it, for `k_symv_sub`: `(ptr, tiles)`

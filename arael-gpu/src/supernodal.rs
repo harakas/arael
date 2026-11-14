@@ -12,7 +12,7 @@ use arael_faer::schur::SchurReal;
 use arael_faer::supernodal::SupernodalSymbolic;
 
 use crate::plan::{self, GpuSupernodalParams, NB, Plan, SparseIndex, build_levels};
-use crate::{Arg, Device, GpuError, Lane, Launch, Scalar, WIDE, Wide, is_f64, scalar_bytes};
+use crate::{Arg, Device, GpuError, Lane, Launch, Scalar, Section, WIDE, Wide, is_f64, scalar_bytes};
 
 /// Arrays packed into one block, each starting on a 256-byte boundary.
 #[derive(Default)]
@@ -406,6 +406,48 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let n_inv = plan.inv_tiles().len() / 2;
         let sec = Sections::new(plan.factor_vals * fs, plan.n * fs, nvals * 8, plan.n * 8, n_inv * plan::INV_TILE * fs);
         let work = dev.alloc(sec.bytes)?;
+        dev.describe(&ints, "factor.plan", &|| {
+            let slots = [
+                (plan::H_DIMS, "dims", "per supernode: columns q and rows h"),
+                (plan::H_VAL_PTR, "val_ptr", "per supernode: its panel's offset in the factor"),
+                (plan::H_SUP_BEGIN, "sup_begin", "per supernode: its first permuted block"),
+                (plan::H_SC_START, "sc_start", "per permuted block: its first permuted scalar"),
+                (plan::H_PAIR_PTR, "pair_ptr", "per target supernode: its first pair"),
+                (plan::H_PR_D, "pr_d", "per pair: the descendant supernode"),
+                (plan::H_PR_R0, "pr_r0", "per pair: its first row in the descendant's panel"),
+                (plan::H_PR_RMAP, "pr_rmap", "per pair: its offset into rmap"),
+                (plan::H_PR_CMAP, "pr_cmap", "per pair: its offset into cmap"),
+                (plan::H_RMAP, "rmap", "per pair row: the target panel's row"),
+                (plan::H_CMAP, "cmap", "per pair column: the target panel's column"),
+                (plan::H_ROW_SC, "row_sc", "per row below a diagonal block: its index in xb"),
+                (plan::H_ROW_SC_OFF, "row_sc_off", "per supernode: its offset into row_sc"),
+                (plan::H_ORDER, "order", "per permuted block: the original block"),
+                (plan::H_BLK_WIDTH, "blk_width", "per permuted block: its scalar width"),
+                (plan::H_PART, "part", "per original block: its first scalar"),
+                (plan::H_SOLVE_HEAD, "solve_head", "per supernode, for the solve: q, h, first column, panel, row_sc offset, first inverted tile"),
+                (plan::H_INV_TILES, "inv_tiles", "per inverted diagonal tile: its supernode and first column"),
+            ];
+            let mut v = crate::plan_sections(&pk.words[..at_tiles], plan::HEADER, &slots);
+            v.extend([
+                Section::u32s("tiles", 4 * at_tiles, plan.tiles.len()).doc("per stored tile of the matrix: where it lands in the factor (the seed's list)"),
+                Section::u32s("on", 4 * at_on, 1).doc("a word holding 1: the gate of solves that always run"),
+                Section::u32s("lists", 4 * (at_on + 1), pk.words.len() - (at_on + 1))
+                    .doc("per level: the update pieces and items, the supernode lists, the solve's gather rows and items; then the chains' records"),
+            ]);
+            v
+        });
+        dev.describe(&work, "factor.work", &|| {
+            let f = if fs == 4 { "f32" } else { "f64" };
+            let ff = |name: &str, at: usize, count: usize| Section::new(name, at, count * fs, fs, f).role("F");
+            vec![
+                ff("factor", sec.factor, plan.factor_vals).doc("the factor's values, panel by panel"),
+                ff("xb", sec.xb, plan.n).doc("the solve's working vector, in the factor's scalar and ordering"),
+                Section::u32s("fail", sec.fail, 1).doc("the pivot flag of a host factorization"),
+                Section::new("vals", sec.vals, nvals * 8, 8, "bytes").doc("the matrix's values from the host, f32 or f64 as given"),
+                Section::wide("rhs", sec.rhs, plan.n, wide).doc("the right-hand side and solution of a host solve"),
+                ff("inv", sec.inv, n_inv * plan::INV_TILE).doc("the inverted diagonal tiles of the factor"),
+            ]
+        });
         // the seed's threads per stored tile: the device's lockstep width
         let seed_lanes = dev.arch().warp;
         let defines = format!("{}{}", wide.defines(), defines(F::CPP, fs, lu, seed_lanes, sizes));

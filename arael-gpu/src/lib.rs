@@ -14,7 +14,9 @@
 //! are in the route's [`Values`] (f32 for an f32 root), the cost and the
 //! reduction in its [`Wide`] scalar. The symbolic analysis stays on the
 //! CPU in arael-faer. A sequence of launches records as a graph with
-//! [`Device::capture`] and runs again with [`Device::replay`].
+//! [`Device::capture`] and runs again with [`Device::replay`]. A device's
+//! work can be traced ([`trace`]), and the CPU device can count every read
+//! and write of its kernels (`cpu::CpuDevice::with_probe`).
 //!
 //! ```ignore
 //! use arael_gpu::{cuda::CudaDevice, Arg, Device, Launch};
@@ -39,6 +41,8 @@ pub mod hip;
 mod hip_sys;
 #[cfg(feature = "cpu")]
 pub mod cpu;
+#[cfg(feature = "cpu")]
+mod cpu_probe;
 #[doc(hidden)]
 pub mod fault;
 pub mod lm;
@@ -49,6 +53,7 @@ pub mod plan;
 mod pool;
 pub mod schur;
 pub mod supernodal;
+pub mod trace;
 /// Synthetic block systems for the tests and the examples (not API).
 #[doc(hidden)]
 pub mod test_util;
@@ -240,6 +245,11 @@ impl Values {
     /// Bytes a value takes: 4 or 8.
     pub fn bytes(self) -> usize {
         if self.f32 { 4 } else { 8 }
+    }
+
+    /// The stored scalar's name: `f32`, `f64` or `df32`.
+    pub fn ty(self) -> &'static str {
+        if self.f32 { "f32" } else { self.wide.name() }
     }
 
     /// The `#define`s a source including [`WIDE`] is compiled with: the wide
@@ -456,6 +466,150 @@ impl Launch {
     }
 }
 
+/// A named run of a device block's bytes, for the tools that inspect a
+/// device's work ([`Device::describe`]: the trace, the CPU device's access
+/// probe).
+///
+/// ```
+/// use arael_gpu::Section;
+/// let s = Section::new("x", 64, 400, 4, "f32").role("V").doc("the parameters");
+/// assert_eq!((s.at, s.bytes / s.elem, s.ty.as_str()), (64, 100, "f32"));
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Section {
+    pub name: String,
+    /// Byte offset in the block.
+    pub at: usize,
+    pub bytes: usize,
+    /// Bytes of one element.
+    pub elem: usize,
+    /// The stored scalar: `u32`, `u64`, `f32`, `f64`, `df32`, `bytes`.
+    pub ty: String,
+    /// The kernels' typedef for it (`V`, `W`, `R`, `F`), or empty.
+    pub role: String,
+    /// A label grouping a block's sections (`structure`, `values`), or empty.
+    pub group: String,
+    pub doc: String,
+    /// Elements per record, where the elements come in records (a tile's
+    /// base, stride and first index: 3); 1 otherwise.
+    pub record: usize,
+}
+
+impl Section {
+    /// `bytes` bytes from byte `at` on, of `elem`-byte elements stored as `ty`.
+    pub fn new(name: impl Into<String>, at: usize, bytes: usize, elem: usize, ty: &str) -> Self {
+        Section { name: name.into(), at, bytes, elem, ty: ty.to_string(), role: String::new(), group: String::new(), doc: String::new(), record: 1 }
+    }
+
+    /// `count` u32 words from byte `at` on.
+    pub fn u32s(name: impl Into<String>, at: usize, count: usize) -> Self {
+        Self::new(name, at, 4 * count, 4, "u32")
+    }
+
+    /// `count` values of `values` (the kernels' `V`) from byte `at` on.
+    pub fn values(name: impl Into<String>, at: usize, count: usize, values: Values) -> Self {
+        Self::new(name, at, values.bytes() * count, values.bytes(), values.ty()).role("V")
+    }
+
+    /// `count` values of the wide scalar `wide` (the kernels' `W`) from byte `at` on.
+    pub fn wide(name: impl Into<String>, at: usize, count: usize, wide: Wide) -> Self {
+        Self::new(name, at, 8 * count, 8, wide.name()).role("W")
+    }
+
+    pub fn role(mut self, role: &str) -> Self {
+        self.role = role.to_string();
+        self
+    }
+
+    pub fn group(mut self, group: &str) -> Self {
+        self.group = group.to_string();
+        self
+    }
+
+    pub fn doc(mut self, doc: impl Into<String>) -> Self {
+        self.doc = doc.into();
+        self
+    }
+
+    /// The elements come in records of `elems` each.
+    ///
+    /// ```
+    /// # use arael_gpu::Section;
+    /// // 49 tiles of (base, stride, first index)
+    /// let tiles = Section::u32s("E0_TILE", 0, 3 * 49).record(3);
+    /// assert_eq!((tiles.bytes, tiles.elem, tiles.record), (588, 4, 3));
+    /// ```
+    pub fn record(mut self, elems: usize) -> Self {
+        self.record = elems;
+        self
+    }
+}
+
+/// The sections of a plan's words ([`Device::describe`]): a header of
+/// `header` words, then the arrays its `slots` (slot, name, doc) hold the
+/// word offsets of, each running to the next array's offset or the plan's
+/// end. Arrays at one offset (all but one empty) are one section named
+/// after them all.
+pub(crate) fn plan_sections(words: &[u32], header: usize, slots: &[(usize, &str, &str)]) -> Vec<Section> {
+    let mut arrays: Vec<(usize, &str, &str)> = slots.iter().map(|&(slot, name, doc)| (words[slot] as usize, name, doc)).collect();
+    arrays.sort_by_key(|a| a.0);
+    let mut out = vec![Section::u32s("header", 0, header).doc("the word offsets of the plan's arrays, a slot each")];
+    let mut i = 0;
+    while i < arrays.len() {
+        let at = arrays[i].0;
+        let mut j = i;
+        while j + 1 < arrays.len() && arrays[j + 1].0 == at {
+            j += 1;
+        }
+        let end = arrays.get(j + 1).map_or(words.len(), |a| a.0);
+        let name: Vec<&str> = arrays[i..=j].iter().map(|a| a.1).collect();
+        if end > at && at >= header {
+            out.push(Section::u32s(name.join("|"), 4 * at, end - at).doc(arrays[j].2));
+        }
+        i = j + 1;
+    }
+    out
+}
+
+/// What one launch read or wrote of one section, as the CPU device's probe
+/// counts it ([`Access`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Touch {
+    /// Accesses, and the bytes they moved.
+    pub n: u64,
+    pub bytes: u64,
+    /// Distinct elements touched.
+    pub unique: u64,
+    /// The first and the last byte touched, relative to the section.
+    pub lo: u64,
+    pub hi: u64,
+    /// Device threads that touched it.
+    pub threads: u64,
+    /// Accesses right after the same thread's previous access to the
+    /// section (`seq`), or at its address again (`same`).
+    pub seq: u64,
+    pub same: u64,
+    /// Threads whose first access is right after the previous thread's
+    /// first (`adjacent`), or at its address (`shared`).
+    pub adjacent: u64,
+    pub shared: u64,
+    /// The access widths seen, a bit per width: 1, 2, 4, 8, 16 bytes.
+    pub sizes: u8,
+}
+
+/// One launch's accesses to one section of one of its block arguments,
+/// measured ([`Device::take_accesses`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Access {
+    /// The launch's first argument that points into the block.
+    pub arg: usize,
+    /// The section's index in the block's [`Device::describe`] list;
+    /// `None` for bytes outside every section, or in a block not described.
+    pub section: Option<usize>,
+    pub read: Touch,
+    pub write: Touch,
+}
+
 /// The stream a launch is queued on ([`Device::launch_on`]): the device's
 /// own, or the side stream, whose work overlaps it between a
 /// [`Device::fork`] and the [`Device::join`] after it.
@@ -650,6 +804,51 @@ pub trait Device: Send + Sync {
 
     /// Queues `graph`'s launches, in their recorded order.
     fn replay(&self, graph: &Self::Graph) -> Result<(), GpuError>;
+
+    /// Names `block` and its sections for the tools that inspect a device's
+    /// work: [`trace::Traced`](crate::trace::Traced) records them, the CPU
+    /// device's probe counts accesses by them. A device that inspects
+    /// nothing ignores the call and does not run `sections`.
+    ///
+    /// ```ignore
+    /// dev.describe(&block, "lm", &|| vec![Section::u32s("pos", 0, n), Section::values("x", at_x, n, values)]);
+    /// ```
+    fn describe(&self, _block: &Self::Block, _name: &str, _sections: &dyn Fn() -> Vec<Section>) {}
+
+    /// Opens a named scope around the operations up to the matching
+    /// [`scope_end`](Self::scope_end), for a trace; nothing otherwise.
+    fn scope_begin(&self, _name: &str) {}
+
+    /// Closes the scope the last [`scope_begin`](Self::scope_begin) opened.
+    fn scope_end(&self) {}
+
+    /// The accesses of each launch run since the last call, in their order,
+    /// when the device measures them (the CPU device with its probe on);
+    /// empty otherwise.
+    fn take_accesses(&self) -> Vec<Vec<Access>> {
+        Vec::new()
+    }
+}
+
+/// A scope of a device's operations ([`Device::scope_begin`]), closed when
+/// dropped.
+///
+/// ```ignore
+/// let _scope = Scope::new(&*dev, "attempt");
+/// ```
+pub struct Scope<'a, D: Device + ?Sized>(&'a D);
+
+impl<'a, D: Device + ?Sized> Scope<'a, D> {
+    pub fn new(dev: &'a D, name: &str) -> Self {
+        dev.scope_begin(name);
+        Scope(dev)
+    }
+}
+
+impl<D: Device + ?Sized> Drop for Scope<'_, D> {
+    fn drop(&mut self) {
+        self.0.scope_end();
+    }
 }
 
 /// [`GpuError::Unavailable`] when `uses_f64` and the device has no f64

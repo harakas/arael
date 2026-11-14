@@ -122,6 +122,30 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
 `examples/concurrent_solves.rs` spreads a fixed set of small solves over
 1, 2, 4 and 8 threads, a device each, and prints the solves per second.
 
+## Tracing a device's work
+
+`trace::Traced` wraps a device and writes every operation into a trace
+file, one JSON object per line: allocations, copies, launches with their
+arguments, graph captures and replays. Each owner of a block names its
+sections (`Device::describe`), and the solver opens named scopes
+(`Device::scope_begin`). An index section (u32 or u64) is read back when
+it is described: the trace says what kind of sequence its words are and
+keeps the first and the last of them. `tools/devmap` turns a trace into a
+browsable map of a solve.
+
+```rust,ignore
+arael_gpu::trace::start("solve.trace")?;           // or ARAEL_GPU_TRACE=<file>
+let dev = arael_gpu::trace::traced(&Arc::new(CudaDevice::new(0)?));
+```
+
+The CPU device can also measure what each launch reads and writes
+(`CpuDevice::with_probe`, or `ARAEL_CPU_PROBE=1`): its kernels are
+compiled by clang with load and store tracing, and every access is
+counted per launch and section (`Device::take_accesses`): how many, how
+many distinct elements, and whether neighbouring threads touch
+neighbouring elements, the same one, or neither. A traced probed device
+writes the counts into the trace.
+
 ## Knobs
 
 `GpuSupernodalParams`:
