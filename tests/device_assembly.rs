@@ -1874,6 +1874,44 @@ fn an_edge_from_a_pose_to_itself_assembles_on_the_device_as_on_the_cpu() {
     checks_f32(&mut Graph2DF { poses, edges, prior }, 1e-5, 1e-4, "an f32 edge from a pose to itself");
 }
 
+/// [`pose_graph`] of `n` poses with pose 7 fixed whole and an edge from
+/// pose 0 to itself, the self edge first in the edge list or last.
+fn self_edge_beside_a_fixed_pose<T: Float>(n: usize, first: bool) -> Graph2DParts<T> {
+    let c = |v: f64| T::from(v).unwrap();
+    let (mut poses, mut edges, prior) = pose_graph::<T>(n, 3);
+    let fixed = &mut poses[7usize];
+    (fixed.pos.optimize, fixed.th.optimize) = (false, false);
+    let own = Edge2D { a: poses.ref_at(0), b: poses.ref_at(0), dx: c(0.01), dy: c(-0.02), dth: c(0.03), w: c(5.0), hb: CrossBlock::new() };
+    edges.insert(if first { 0 } else { edges.len() }, own);
+    (poses, edges, prior)
+}
+
+/// An edge from the first pose to itself lands on that pose's own tile,
+/// which starts H's values (base 0); the cross slots of the edges to a
+/// fixed pose have no tile, written (0, 0, 0). The two are not one tile:
+/// the self edge's sums reach H whichever comes first in the edge list.
+#[test]
+fn a_self_edge_on_the_first_pose_is_not_grouped_with_the_slots_of_a_fixed_pose() {
+    use arael::__gpu::Wide;
+    for first in [false, true] {
+        if checks_f64("a self edge on the first pose beside a fixed pose") {
+            for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+                let (poses, edges, prior) = self_edge_beside_a_fixed_pose::<f64>(20, first);
+                let mut s = Graph2D { poses, edges, prior };
+                assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+                let mut x = Vec::new();
+                s.serialize(&mut x);
+                let x1 = perturbed(&x);
+                let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+                assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}, self edge first {first}: {chk:?}");
+                assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}, self edge first {first}: {chk:?}");
+            }
+        }
+        let (poses, edges, prior) = self_edge_beside_a_fixed_pose::<f32>(20, first);
+        checks_f32(&mut Graph2DF { poses, edges, prior }, 1e-5, 1e-4, "an f32 self edge on the first pose beside a fixed pose");
+    }
+}
+
 /// The pose graph's whole-system solve through the device assembly reaches
 /// the CPU route's optimum.
 #[test]

@@ -712,13 +712,16 @@ fn launch_n(n: usize) -> Launch {
 }
 
 /// Per cross slot of the tables `tiles` (`(base, stride, flip)` each), the
-/// first slot whose tile starts at the same value of H.
+/// first slot whose tile starts at the same value of H. A slot without a
+/// tile (stride 0: a side fixed throughout, or no instance names it) is its
+/// own: its `(0, 0, 0)` is not the tile that starts H's values, which an
+/// edge from the first entity to itself has.
 fn tile_owners(tiles: &[u32]) -> Vec<u32> {
     let n = tiles.len() / 3;
     // (base, slot) in one word, so the sort compares plain integers
-    let mut keys: Vec<u64> = (0..n).map(|s| (tiles[3 * s] as u64) << 32 | s as u64).collect();
+    let mut keys: Vec<u64> = (0..n).filter(|&s| tiles[3 * s + 1] != 0).map(|s| (tiles[3 * s] as u64) << 32 | s as u64).collect();
     keys.sort_unstable();
-    let mut owner = vec![0u32; n];
+    let mut owner: Vec<u32> = (0..n as u32).collect();
     let mut first = 0u32;
     for (k, &key) in keys.iter().enumerate() {
         let s = key as u32;
