@@ -22,6 +22,7 @@ from `file://` with no server. `gen/devmap.py` writes both; without
     problem: "bal Ladybug-49", model: "f32", runtime: "cpu", device: "cpu",
     wide: "f64",          // the route's wide scalar: f64 or df32
     probe: true,          // measured access data present (CPU device)
+    timed: true,          // the launches were timed on the device (time_us in the steps)
     patterns_from: "bal-49-f32-cpu",   // optional, a case without measured accesses: the probed
                                        // case its borrowed patterns come from
     commit: "faf42737", generated: "2026-11-13",
@@ -161,7 +162,8 @@ A STEP is one of:
            pattern: "serial" },   // coalesced, serial, gather, scatter, broadcast, strided, mixed
       w: null }
   ],
-  time_us: 12.5 }                 // optional: profiled time per launch
+  time_us: 12.5 }                 // optional (a timed trace): the mean device time of one of its
+                                  // launches, in microseconds, over the phase's occurrences
 
 // host to device copy
 { id: "s3", kind: "upload", scope: ["start"], block: 4, section: 1, at: 16, bytes: 19332,

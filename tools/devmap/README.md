@@ -13,6 +13,10 @@ top left; generate the cases first (Regenerating, about 16 minutes).
 - Overview: the phases of a solve (setup, linearize, attempt, ...) between
   host and device, with the uploads, the read-backs (where the host waits)
   and the totals.
+- Shares: what each kernel takes of an iteration (or of a phase, or of the
+  whole solve), by area: a treemap of phase, stage and kernel, and the same
+  kernels ranked with their figures. The area is the device time on a
+  timed case (a GPU's), or the bytes read or written on a probed one.
 - Pipeline: the steps of a phase in order, with the dataflow between them.
   Click a step for the kernel's documentation, arguments, measured
   accesses and source.
@@ -39,7 +43,7 @@ repository (see Regenerating): until they are there, the viewer shows
 | case | what it shows |
 |---|---|
 | `*-cpu` | The CPU device with its access probe: every read and write of every launch is measured (counts, distinct elements, pattern). Small problems. |
-| `*-cuda`, `*-hip` | A GPU at the benchmark's size: the launch sequence, the buffers and their sizes. A GPU does not count accesses: which sections a kernel reads or writes is from its signature, amounts read `n/m` (not measured). |
+| `*-cuda`, `*-hip` | A GPU at the benchmark's size: the launch sequence, the buffers and their sizes, and each launch's time on the device. A GPU does not count accesses: which sections a kernel reads or writes is from its signature, amounts read `n/m` (not measured). |
 
 A GPU's case borrows its access patterns from the probed case of the same
 bench and model (`gen/devmap.py --patterns-from`): the pattern measured
@@ -53,6 +57,12 @@ The measured counts are those of the host compiler's code (clang, no
 vectorization): a GPU compiler may keep in a register what this one
 reloads, or the reverse. Patterns and volumes carry over; exact counts do
 not.
+
+A GPU's launches are timed one at a time (`ARAEL_GPU_TRACE_TIME=1`,
+`Device::time_launches`): each runs alone between two device events, a
+captured graph's launches one by one. A kernel's time is its own; the
+solve's wall time, where launches overlap and the host works in between,
+is not their sum.
 
 ## Regenerating
 

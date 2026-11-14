@@ -245,7 +245,7 @@ class Builder:
         items, stack = [], []
         blocks = self.blocks
 
-        def launch(e, acc, graph):
+        def launch(e, acc, graph, us=None):
             a = []
             for x in acc or []:
                 b = x["b"] if "b" in x else e["args"][x["arg"]].get("b", 0)
@@ -253,7 +253,7 @@ class Builder:
             if acc is not None:
                 self.probe = True
             items.append({"kind": "launch", "k": e["k"], "unit": e["unit"], "grid": e["grid"], "threads": e["threads"], "shared": e["shared"],
-                          "lane": e["lane"], "args": e["args"], "acc": a if acc is not None else None, "scope": list(stack), "graph": graph})
+                          "lane": e["lane"], "args": e["args"], "acc": a if acc is not None else None, "scope": list(stack), "graph": graph, "us": us})
 
         for e in self.events[lo:hi]:
             t = e["e"]
@@ -268,9 +268,9 @@ class Builder:
                 if stack:
                     stack.pop()
             elif t == "launch":
-                launch(e, e.get("acc"), False)
+                launch(e, e.get("acc"), False, e.get("us"))
             elif t == "replay":
-                acc = e.get("acc")
+                acc, us = e.get("acc"), e.get("us")
                 n = 0
                 for ge in self.graphs.get(e["graph"], []):
                     if ge["e"] == "scope":
@@ -278,7 +278,7 @@ class Builder:
                     elif ge["e"] == "end":
                         stack.pop()
                     elif ge["e"] == "launch":
-                        launch(ge, acc[n] if acc is not None and n < len(acc) else None, True)
+                        launch(ge, acc[n] if acc is not None and n < len(acc) else None, True, us[n] if us is not None and n < len(us) else None)
                         n += 1
             elif t == "write":
                 items.append({"kind": "upload", "block": e["block"], "at": e["at"], "bytes": e["bytes"], "via": e["via"], "scope": list(stack)})
@@ -622,9 +622,12 @@ def build_case(args):
                     e["r" if p["const"] else "w"] = {"pattern": "unknown"}
         return {"kind": "launch", "kernel": it["k"], "scope": it["scope"], "launches": 1, "grid": [g for g in it["grid"] if g > 1] or [1],
                 "threads": [t for t in it["threads"] if t > 1] or [1], "shared": it["shared"], "geoms": {(tuple(it["grid"]), tuple(it["threads"]))},
-                "lane": it["lane"], "graph": it["graph"], "args": sargs, "access": access}
+                "lane": it["lane"], "graph": it["graph"], "args": sargs, "access": access,
+                # microseconds of the step's launches together, when the trace timed them
+                "time": it.get("us")}
 
     def merge(a, c):
+        a["time"] = a["time"] + c["time"] if a["time"] is not None and c["time"] is not None else None
         a["launches"] += c["launches"]
         a["geoms"] |= c["geoms"]
         a["graph"] = a["graph"] or c["graph"]
@@ -731,6 +734,11 @@ def build_case(args):
         else:
             best = max(variants.values(), key=len)
             steps, times, nvar = best[-1], len(phase_occ[name]), len(variants)
+            # a step's time: its mean over the occurrences of this sequence
+            for i, s in enumerate(steps):
+                took = [occ[i]["time"] for occ in best if occ[i].get("time") is not None]
+                if took:
+                    s["time"] = sum(took) / len(took)
         out_steps = []
         for s in steps:
             s = dict(s)
@@ -738,6 +746,10 @@ def build_case(args):
             sid += 1
             if s["kind"] == "launch":
                 s["geoms"] = len(s["geoms"])
+                # per launch, as the viewer multiplies by the launches
+                took = s.pop("time", None)
+                if took is not None:
+                    s["time_us"] = round(took / s["launches"], 3)
                 acc = []
                 for (bid, sec), e in s["access"].items():
                     elem = by_id[bid]["sections"][sec]["elem"] if sec < len(by_id[bid]["sections"]) else 4
@@ -953,13 +965,15 @@ def build_case(args):
         pass
     dev = b.device
     notes = ["solve %d of %d in the trace" % (pick + 1, len(bounds))]
+    if dev.get("timed"):
+        notes.append("launches timed on the device, one at a time: a kernel's time is its own; the solve's wall time, with its overlaps and its host work, is not their sum")
     if b.probe:
         notes.append("accesses measured on the CPU device (clang, no vectorization): counts are of the host compiler's code")
     else:
         notes.append("no measured accesses: reads and writes are from the kernels' parameter types and COL macros")
     return {"schema": 1, "id": args.id, "title": args.title or args.id,
             "meta": {"problem": args.problem or "", "model": args.model or "", "runtime": dev.get("runtime", ""), "device": dev.get("name", ""),
-                     "target": dev.get("target", ""), "warp": dev.get("warp", 0), "wide": wide, "probe": b.probe, "commit": commit,
+                     "target": dev.get("target", ""), "warp": dev.get("warp", 0), "wide": wide, "probe": b.probe, "timed": bool(dev.get("timed")), "commit": commit,
                      "generated": datetime.date.today().isoformat(), "notes": notes},
             "units": units, "kernels": kernels, "blocks": out_blocks, "copies": copies, "scopes": scopes, "phases": phases, "flow": flow, "edges": edges, "findings": findings}
 

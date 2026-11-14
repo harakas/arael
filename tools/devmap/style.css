@@ -38,6 +38,12 @@
   --ty-bytes: 137, 135, 129;
   --ty-other: 82, 81, 78;
 
+  /* the Shares view: linearization, attempt, the other phases (a pair
+     validated for colour-blind readers on both surfaces) */
+  --sh-lin: 27, 175, 122;
+  --sh-att: 98, 80, 214;
+  --sh-oth: 137, 135, 129;
+
   --bug: 208, 59, 59;
   --warn: 250, 178, 25;
   --bug-ink: #a32020;
@@ -74,6 +80,10 @@
     --ty-u64: 0, 131, 0;
     --ty-bytes: 137, 135, 129;
     --ty-other: 195, 194, 183;
+
+    --sh-lin: 25, 158, 112;
+    --sh-att: 144, 133, 233;
+    --sh-oth: 137, 135, 129;
 
     --bug-ink: #f08a8a;
   }
@@ -609,3 +619,53 @@ table.mx { border-collapse: separate; border-spacing: 0; table-layout: fixed; fo
 .fx-group > summary { cursor: pointer; padding: 2px 0; }
 .fx-gtitle { margin: 0 8px; font-weight: 600; }
 .fx-gn { font-family: var(--mono); color: var(--muted); }
+
+/* ------------------------------------------------------------ Shares */
+
+.view-shares { padding: 10px 12px; }
+.sh { display: flex; gap: 16px; align-items: flex-start; }
+.hue-lin { --hue: var(--sh-lin); }
+.hue-att { --hue: var(--sh-att); }
+.hue-oth { --hue: var(--sh-oth); }
+.sw.hue-lin, .sw.hue-att, .sw.hue-oth { background: rgb(var(--hue)); }
+
+/* the treemap: phase > stage > kernel, positions in pixels */
+.tm { position: relative; flex: none; }
+.tm-phase, .tm-stage, .tm-leaf { position: absolute; box-sizing: border-box; overflow: hidden; }
+.tm-phase { border: 1px solid rgba(var(--hue), 0.9); border-radius: 4px; background: var(--panel); }
+.tm-head {
+  position: absolute; left: 0; right: 0; top: 0; height: 18px; padding: 0 6px; display: flex; gap: 8px; align-items: center;
+  font-size: 11.5px; white-space: nowrap; color: var(--ink); background: rgba(var(--hue), 0.16);
+}
+.tm-head .tm-x { color: var(--ink-2); font: 10.5px var(--mono); }
+.tm-head .tm-share { font: 600 11px var(--mono); }
+.tm-head .tm-amt { margin-left: auto; color: var(--ink-2); font: 10.5px var(--mono); }
+.tm-stage { border-radius: 3px; }
+.tm-shead {
+  position: absolute; left: 0; right: 0; top: 0; height: 14px; padding: 0 4px; display: flex; gap: 6px; align-items: center;
+  font-size: 10.5px; white-space: nowrap; color: var(--ink-2);
+}
+.tm-shead .tm-sname { font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
+.tm-shead .tm-share { font: 10px var(--mono); }
+.tm-leaf {
+  border-radius: 3px; background: rgba(var(--hue), 0.30); box-shadow: inset 0 0 0 1px rgba(var(--hue), 0.55);
+  padding: 1px 3px; cursor: pointer; color: var(--ink);
+}
+.tm-leaf:hover { background: rgba(var(--hue), 0.48); }
+.tm-leaf.sel { box-shadow: inset 0 0 0 2px var(--ink); }
+.tm-name { font: 600 10.5px/13px var(--mono); white-space: nowrap; }
+.tm-fig { font: 10px/12px var(--mono); white-space: nowrap; color: var(--ink-2); }
+
+/* the same kernels ranked */
+.sh-side { flex: 1 1 auto; min-width: 0; }
+.sh-side-title { font-weight: 600; margin-bottom: 4px; }
+.sh-list tr { cursor: pointer; }
+.sh-list td, .sh-list th { white-space: nowrap; }
+.sh-stage { max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
+.sh-list tr:hover td { background: var(--hl); }
+.sh-list tr.sel td { background: var(--sel-bg); }
+.sh-bar { white-space: nowrap; }
+.sh-pct { display: inline-block; width: 42px; text-align: right; font: 11px var(--mono); margin-right: 6px; }
+.sh-track { display: inline-block; width: 56px; height: 8px; vertical-align: middle; }
+.sh-track i { display: block; height: 8px; min-width: 1px; border-radius: 0 4px 4px 0; background: rgb(var(--hue)); }
+.sh-more { margin-top: 4px; }

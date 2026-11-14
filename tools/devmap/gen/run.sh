@@ -24,7 +24,10 @@ trace() { # runtime bench id title problem model env...
     local bin=bal-bench
     [ "$bench" = slam ] && bin=slam-bench
     echo "== $id"
-    (cd "$repo/benchmarks/$bench" && env "$@" ARAEL_GPU=$rt ARAEL_GPU_TRACE="$out/$id.jsonl" ROUNDS=1 BENCH_THREADS=8 BENCH_PIN=0 \
+    # a GPU's launches are timed (one at a time); under the probe a time says nothing
+    local timed=0
+    [ "$rt" != cpu ] && timed=1
+    (cd "$repo/benchmarks/$bench" && env "$@" ARAEL_GPU=$rt ARAEL_GPU_TRACE="$out/$id.jsonl" ARAEL_GPU_TRACE_TIME=$timed ROUNDS=1 BENCH_THREADS=8 BENCH_PIN=0 \
         ./target-trace/release/$bin > "$out/$id.log" 2>&1) || { tail -5 "$out/$id.log"; return 1; }
     # a GPU's case takes its access patterns from the largest probed case of the same bench and model
     local from=() f

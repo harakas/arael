@@ -25,7 +25,7 @@ const shots = arg('shots', 'first');
 const only = arg('cases', '');
 fs.mkdirSync(out, { recursive: true });
 
-const views = ['overview', 'pipeline', 'matrix', 'memory', 'kernels', 'findings'];
+const views = ['overview', 'shares', 'pipeline', 'matrix', 'memory', 'kernels', 'findings'];
 const problems = [];
 const browser = await chromium.launch();
 
