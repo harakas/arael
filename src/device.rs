@@ -462,10 +462,12 @@ fn record_width(shape: &DeviceShape, c: usize) -> usize {
     k.rows * (1 + k.params(shape))
 }
 
-/// The columns of an instance's words, in order: `S<i>` per side, `X<p>`
-/// per pair.
+/// The image's columns of an instance's words: `S<i>` per side, the first
+/// words of its row. Its cross slots, a word per pair after them, stay on
+/// the host: no kernel reads them, the instances are grouped by them
+/// (`XOFF`, `XINST`).
 fn word_names(k: &DeviceConstraint) -> impl Iterator<Item = String> {
-    (0..k.sides.len()).map(|i| format!("S{i}")).chain((0..k.pairs.len()).map(|p| format!("X{p}")))
+    (0..k.sides.len()).map(|i| format!("S{i}"))
 }
 
 /// The columns of a root, in the layout table's order, and how many of them
@@ -1100,7 +1102,6 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
                 (b'R', "DER") => (f, "F", "per entity: the composed values' derivatives by the step"),
                 (b'X', "TILE") => ("u32", "", "per cross block: its tile in H's values (base, stride, flip: 1 when the second side's span lies on the tile's rows)"),
                 (b'C', "S") => ("u32", "", "per instance: this side's entity slot"),
-                (b'C', "X") => ("u32", "", "per instance: this pair's cross tile slot"),
                 (b'C', "OFF") => ("u32", "", "per entity slot of this side: where its instances start in INST"),
                 (b'C', "INST") => ("u32", "", "the instances grouped by this side's entity"),
                 (b'C', "XOFF") => ("u32", "", "per cross tile slot: where its instances start in XINST"),

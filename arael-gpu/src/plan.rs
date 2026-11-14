@@ -75,32 +75,29 @@ pub const XR_CH: usize = 1024;
 /// per sparsity structure.
 pub const H_DIMS: usize = 0;
 pub const H_VAL_PTR: usize = 1;
-pub const H_SUP_BEGIN: usize = 2;
-pub const H_SC_START: usize = 3;
-pub const H_PAIR_PTR: usize = 4;
-pub const H_PR_D: usize = 5;
-pub const H_PR_R0: usize = 6;
-pub const H_PR_RMAP: usize = 7;
-pub const H_PR_CMAP: usize = 8;
-pub const H_RMAP: usize = 9;
-pub const H_CMAP: usize = 10;
-pub const H_ROW_SC: usize = 11;
-pub const H_ROW_SC_OFF: usize = 12;
+pub const H_SC_START: usize = 2;
+pub const H_PR_D: usize = 3;
+pub const H_PR_R0: usize = 4;
+pub const H_PR_RMAP: usize = 5;
+pub const H_PR_CMAP: usize = 6;
+pub const H_RMAP: usize = 7;
+pub const H_CMAP: usize = 8;
+pub const H_ROW_SC: usize = 9;
 /// The permutation, for the device-side solve: the block elimination order,
 /// the permuted block widths, and the matrix's scalar partition.
-pub const H_ORDER: usize = 13;
-pub const H_BLK_WIDTH: usize = 14;
-pub const H_PART: usize = 15;
+pub const H_ORDER: usize = 10;
+pub const H_BLK_WIDTH: usize = 11;
+pub const H_PART: usize = 12;
 /// The solve's header of every supernode, [`SOLVE_HEAD`] words: its
 /// columns q, its rows h, its first scalar column, its panel's offset, the
 /// offset of its rows below in the row map (`H_ROW_SC`), and its first
 /// inverted diagonal tile ([`H_INV_TILES`]; 0 for a supernode of at most
 /// [`NB`] columns, which has none).
-pub const H_SOLVE_HEAD: usize = 16;
+pub const H_SOLVE_HEAD: usize = 13;
 pub const SOLVE_HEAD: usize = 6;
 /// The inverted 32 x 32 diagonal tiles of the supernodes wider than
 /// [`NB`], 2 words each: the supernode and the tile's first column.
-pub const H_INV_TILES: usize = 17;
+pub const H_INV_TILES: usize = 14;
 /// Values per inverted diagonal tile: the inverse column-major (for the
 /// forward solve), then row-major (for the backward solve).
 pub const INV_TILE: usize = 2 * 32 * 32;
@@ -574,15 +571,16 @@ impl Plan {
                 [q, self.dims[2 * s + 1], col0, self.val_ptr[s], self.row_sc_off[s], first]
             })
             .collect();
-        let arrays: [(usize, &[u32]); 18] = [
+        // the kernels read no sup_begin, pair_ptr or row_sc_off: the pairs
+        // carry their descendant and maps, the solve head a supernode's
+        // offset into row_sc
+        let arrays: [(usize, &[u32]); 15] = [
             (H_ORDER, &self.order),
             (H_BLK_WIDTH, &self.blk_width),
             (H_PART, &self.part),
             (H_DIMS, &self.dims),
             (H_VAL_PTR, &self.val_ptr),
-            (H_SUP_BEGIN, &self.sup_begin),
             (H_SC_START, &self.sc_start),
-            (H_PAIR_PTR, &self.pair_ptr),
             (H_PR_D, &pr_d),
             (H_PR_R0, &pr_r0),
             (H_PR_RMAP, &self.pr_rmap),
@@ -590,7 +588,6 @@ impl Plan {
             (H_RMAP, &self.rmap),
             (H_CMAP, &self.cmap),
             (H_ROW_SC, &self.row_sc),
-            (H_ROW_SC_OFF, &self.row_sc_off),
             (H_SOLVE_HEAD, &head),
             (H_INV_TILES, &inv),
         ];
