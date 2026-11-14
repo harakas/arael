@@ -30,6 +30,9 @@ pub struct CudaDevice {
     modules: Mutex<HashMap<String, Arc<CudaModule>>>,
     /// A graph capture is open on the stream.
     capturing: AtomicBool,
+    /// Launches are timed ([`Device::time_launches`]).
+    timing: AtomicBool,
+    timer: Mutex<Timer>,
     /// The device memory the blocks come from and go back to.
     pool: Arc<Pool<CudaSlice<u8>>>,
     /// The pinned host memory the host blocks come from and go back to.
@@ -97,9 +100,32 @@ impl CudaKernel {
     }
 }
 
-/// A captured graph on a [`CudaDevice`], instantiated for replay.
+/// A launch as the driver takes it: what a capture made while timing
+/// keeps, to issue again at each replay.
+struct TimedLaunch {
+    function: CudaFunction,
+    lane: Lane,
+    launch: Launch,
+    values: [u64; MAX_ARGS],
+    args: usize,
+}
+
+/// The timing of launches ([`Device::time_launches`]).
+struct Timer {
+    /// Recorded on a launch's stream before and after it.
+    start: CudaEvent,
+    end: CudaEvent,
+    /// Seconds per launch since the last [`Device::take_times`].
+    times: Vec<f64>,
+    /// The launches of the capture open while timing.
+    capture: Option<Vec<TimedLaunch>>,
+}
+
+/// A captured graph on a [`CudaDevice`], instantiated for replay; or, when
+/// captured while timing, its launches (`exec` null).
 pub struct CudaGraph {
     exec: sys::CUgraphExec,
+    timed: Vec<TimedLaunch>,
     // Keeps the context the graph belongs to alive.
     ctx: Arc<CudaContext>,
 }
@@ -112,7 +138,7 @@ unsafe impl Send for CudaGraph {}
 
 impl Drop for CudaGraph {
     fn drop(&mut self) {
-        if self.ctx.bind_to_thread().is_ok() {
+        if !self.exec.is_null() && self.ctx.bind_to_thread().is_ok() {
             // SAFETY: the handle came from instantiate and is destroyed once.
             // An error here has nobody to go to: the graph is gone either way.
             let _ = unsafe { result::graph::exec_destroy(self.exec) };
@@ -204,6 +230,9 @@ impl CudaDevice {
         let side = ctx.new_stream_with_priority(highest).map_err(driver)?;
         let fork_event = ctx.new_event(None).map_err(driver)?;
         let join_event = ctx.new_event(None).map_err(driver)?;
+        // the timer's events keep their timing, which cudarc's default flag drops
+        let timed = || ctx.new_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT)).map_err(driver);
+        let timer = Timer { start: timed()?, end: timed()?, times: Vec::new(), capture: None };
         let (major, minor) = ctx.compute_capability().map_err(driver)?;
         let attr = |a| ctx.attribute(a).map_err(driver);
         let arch = Arch {
@@ -228,6 +257,8 @@ impl CudaDevice {
             arch,
             modules: Mutex::new(HashMap::new()),
             capturing: AtomicBool::new(false),
+            timing: AtomicBool::new(false),
+            timer: Mutex::new(timer),
             pool: Arc::new(Pool::new()),
             host_pool: Arc::new(Pool::new()),
         })
@@ -235,6 +266,71 @@ impl CudaDevice {
 
     /// [`GpuError::Capture`] while a capture is open: `op` would be
     /// recorded into it or would break it.
+    fn timer(&self) -> std::sync::MutexGuard<'_, Timer> {
+        self.timer.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Queues `function` on `stream` with the argument slots `values`.
+    fn issue(&self, function: &CudaFunction, stream: &CudaStream, launch: Launch, values: &mut [u64; MAX_ARGS], args: usize) -> Result<(), GpuError> {
+        let mut params = [core::ptr::null_mut::<core::ffi::c_void>(); MAX_ARGS];
+        for (p, v) in params.iter_mut().zip(values.iter_mut()) {
+            *p = v as *mut u64 as *mut core::ffi::c_void;
+        }
+        let [gx, gy, gz] = launch.grid;
+        let [bx, by, bz] = launch.block;
+        self.ctx.bind_to_thread().map_err(driver)?;
+        // Safety: the kernel's parameters are the caller's to match; the
+        // argument slots live until the call returns, and the launch only
+        // queues.
+        unsafe { result::launch_kernel(function.cu_function(), (gx, gy, gz), (bx, by, bz), launch.shared_bytes, stream.cu_stream(), &mut params[..args]) }.map_err(driver)
+    }
+
+    /// `launch` alone on its stream, between two events whose distance is
+    /// its time on the device.
+    fn run_timed(&self, timer: &mut Timer, launch: &TimedLaunch) -> Result<(), GpuError> {
+        let stream = match launch.lane {
+            Lane::Main => &self.stream,
+            Lane::Side => &self.side,
+        };
+        timer.start.record(stream).map_err(driver)?;
+        let mut values = launch.values;
+        self.issue(&launch.function, stream, launch.launch, &mut values, launch.args)?;
+        timer.end.record(stream).map_err(driver)?;
+        timer.end.synchronize().map_err(driver)?;
+        let ms = timer.start.elapsed_ms(&timer.end).map_err(driver)?;
+        timer.times.push(ms as f64 * 1e-3);
+        Ok(())
+    }
+
+    /// A capture while timing: `record`'s launches kept, not run; the
+    /// graph's replays issue them one by one.
+    fn capture_timed(&self, record: impl FnOnce() -> Result<(), GpuError>) -> Result<CudaGraph, GpuError> {
+        /// The capture closed again, a failed or panicking recording included.
+        struct Open<'a>(&'a CudaDevice);
+        impl Drop for Open<'_> {
+            fn drop(&mut self) {
+                self.0.timer().capture = None;
+                self.0.capturing.store(false, Ordering::Release);
+            }
+        }
+        if self.capturing.swap(true, Ordering::AcqRel) {
+            return Err(GpuError::Capture("a capture is already open on this device".into()));
+        }
+        let open = Open(self);
+        let forks = self.forks.open();
+        self.timer().capture = Some(Vec::new());
+        let recorded = record();
+        let timed = self.timer().capture.take().unwrap_or_default();
+        drop(open);
+        let joined = self.forks.check_capture(forks);
+        recorded?;
+        joined?;
+        if timed.is_empty() {
+            return Err(GpuError::Capture("the capture recorded nothing".into()));
+        }
+        Ok(CudaGraph { exec: core::ptr::null_mut(), timed, ctx: self.ctx.clone() })
+    }
+
     fn not_capturing(&self, op: &str) -> Result<(), GpuError> {
         if self.capturing.load(Ordering::Acquire) {
             return Err(GpuError::Capture(format!("{op} while a capture is open on the device")));
@@ -569,27 +665,27 @@ impl Device for CudaDevice {
                 Arg::Bits(v) => v,
             };
         }
-        let mut params = [core::ptr::null_mut::<core::ffi::c_void>(); MAX_ARGS];
-        for (p, v) in params.iter_mut().zip(values.iter_mut()) {
-            *p = v as *mut u64 as *mut core::ffi::c_void;
+        if self.timing.load(Ordering::Acquire) {
+            let timed = TimedLaunch { function: kernel.function.clone(), lane, launch, values, args: args.len() };
+            let mut timer = self.timer();
+            return match timer.capture.as_mut() {
+                // kept for the graph's replays
+                Some(launches) => {
+                    launches.push(timed);
+                    Ok(())
+                }
+                None => self.run_timed(&mut timer, &timed),
+            };
         }
-        let [gx, gy, gz] = launch.grid;
-        let [bx, by, bz] = launch.block;
-        self.ctx.bind_to_thread().map_err(driver)?;
-        // Safety: the kernel's parameters are the caller's to match; the
-        // argument slots live until the call returns, and the launch only
-        // queues.
-        unsafe {
-            result::launch_kernel(
-                kernel.function.cu_function(),
-                (gx, gy, gz),
-                (bx, by, bz),
-                launch.shared_bytes,
-                stream.cu_stream(),
-                &mut params[..args.len()],
-            )
-        }
-        .map_err(driver)
+        self.issue(&kernel.function, stream, launch, &mut values, args.len())
+    }
+
+    fn time_launches(&self, on: bool) {
+        self.timing.store(on, Ordering::Release);
+    }
+
+    fn take_times(&self) -> Vec<f64> {
+        core::mem::take(&mut self.timer().times)
     }
 
     /// The side stream waits for an event recorded on the main one; in a
@@ -622,6 +718,9 @@ impl Device for CudaDevice {
     /// capture forbids nothing on other threads.
     fn capture(&self, record: impl FnOnce() -> Result<(), GpuError>) -> Result<CudaGraph, GpuError> {
         crate::fault::check("capture")?;
+        if self.timing.load(Ordering::Acquire) {
+            return self.capture_timed(record);
+        }
         let forks = self.forks.open();
         let open = OpenCapture::begin(self)?;
         let recorded = record();
@@ -640,7 +739,7 @@ impl Device for CudaDevice {
         // independent of it.
         let exec = unsafe { result::graph::instantiate(graph.0, sys::CUgraphInstantiate_flags(0)) }.map_err(driver)?;
         drop(graph);
-        let graph = CudaGraph { exec, ctx: self.ctx.clone() };
+        let graph = CudaGraph { exec, timed: Vec::new(), ctx: self.ctx.clone() };
         // the first replay then pays no setup
         // SAFETY: the executable graph and the stream are alive.
         unsafe { result::graph::upload(graph.exec, self.stream.cu_stream()) }.map_err(driver)?;
@@ -651,6 +750,10 @@ impl Device for CudaDevice {
         crate::fault::check("replay")?;
         self.not_capturing("a replay")?;
         assert!(Arc::ptr_eq(&graph.ctx, &self.ctx), "a graph replays on the context it was captured on");
+        if graph.exec.is_null() {
+            let mut timer = self.timer();
+            return graph.timed.iter().try_for_each(|launch| self.run_timed(&mut timer, launch));
+        }
         self.ctx.bind_to_thread().map_err(driver)?;
         // SAFETY: the executable graph is alive; its blocks are the caller's
         // to keep alive (the capture's contract).

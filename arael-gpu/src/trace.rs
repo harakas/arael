@@ -21,16 +21,16 @@
 //!
 //! | `e` | fields |
 //! |---|---|
-//! | `device` | `dev`, `runtime`, `name`, `target`, `warp`, `integrated`, `has_f64` |
+//! | `device` | `dev`, `runtime`, `name`, `target`, `warp`, `integrated`, `has_f64`, `timed`: its launches are timed ([`time`]) |
 //! | `unit` | `unit`, `entries`, `defines`, `source`: a kernel source compiled |
 //! | `alloc` | `block`, `bytes` |
 //! | `free` | `block` |
 //! | `describe` | `block`, `name`, `sections`: `name`, `at`, `bytes`, `elem`, `ty`, `role`, `group`, `doc` each, `record` (elements per record) where above 1, and for index sections `content`: what kind of sequence their words are, and `sample`: their first and last words (`head`, `tail`) |
 //! | `write` | `block`, `at`, `bytes`, `via` (`pageable` or `pinned`): host to device |
 //! | `read` | `block`, `at`, `bytes`, `group`: device to host, the host waits; reads of one wait share `group` |
-//! | `launch` | `k`, `unit`, `grid`, `threads`, `shared`, `lane`, `args`, and `acc` when measured |
+//! | `launch` | `k`, `unit`, `grid`, `threads`, `shared`, `lane`, `args`, `acc` when measured, `us` (its microseconds on the device) when timed |
 //! | `capture` | `graph`, `events`: the launches and scopes recorded |
-//! | `replay` | `graph`, and `acc` (per launch) when measured |
+//! | `replay` | `graph`, `acc` (per launch) when measured, `us` (per launch) when timed |
 //! | `scope`, `end` | `name`: a named scope opens, the last one closes |
 //! | `fork`, `join`, `sync` | |
 //!
@@ -54,6 +54,18 @@ static SINK: Mutex<Option<std::io::BufWriter<std::fs::File>>> = Mutex::new(None)
 
 /// Whether the environment's `ARAEL_GPU_TRACE` was looked at.
 static FROM_ENV: OnceLock<()> = OnceLock::new();
+
+/// Whether the devices wrapped from now on time their launches ([`time`]).
+static TIMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the devices traced from now on time each launch
+/// ([`Device::time_launches`]): a launch event then has its `us`, a replay
+/// its launches'. Also on with `ARAEL_GPU_TRACE_TIME` set (to anything but
+/// 0) in the environment. Timed launches run one at a time, so a timed
+/// trace is for the launches' times, not for the solve's.
+pub fn time(on: bool) {
+    TIMED.store(on, Ordering::Release);
+}
 
 /// Starts the process's trace in the file `path` (truncated), ending one
 /// that was on.
@@ -80,6 +92,9 @@ pub fn active() -> bool {
             && let Ok(file) = std::fs::File::create(&path)
         {
             *SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::io::BufWriter::new(file));
+        }
+        if std::env::var_os("ARAEL_GPU_TRACE_TIME").is_some_and(|v| !v.is_empty() && v != "0") {
+            time(true);
         }
     });
     SINK.lock().unwrap_or_else(|e| e.into_inner()).is_some()
@@ -176,9 +191,13 @@ impl<D: Device> Traced<D> {
     pub fn new(inner: Arc<D>) -> Self {
         let id = next();
         let a = inner.arch();
+        let timed = TIMED.load(Ordering::Acquire);
+        if timed {
+            inner.time_launches(true);
+        }
         emit(
             &format!(
-                "{{\"e\":\"device\",\"dev\":{id},\"runtime\":{},\"name\":{},\"target\":{},\"warp\":{},\"integrated\":{},\"has_f64\":{}}}",
+                "{{\"e\":\"device\",\"dev\":{id},\"runtime\":{},\"name\":{},\"target\":{},\"warp\":{},\"integrated\":{},\"has_f64\":{},\"timed\":{timed}}}",
                 quote(D::RUNTIME),
                 quote(&a.name),
                 quote(&a.target),
@@ -567,10 +586,14 @@ impl<D: Device> Device for Traced<D> {
             if lane == Lane::Main { "main" } else { "side" },
             shown.join(",")
         );
-        if !self.capturing()
-            && let Some(acc) = self.inner.take_accesses().pop()
-        {
-            line.push_str(&format!(",\"acc\":{}", accesses(&acc, &blocks)));
+        if !self.capturing() {
+            if let Some(acc) = self.inner.take_accesses().pop() {
+                line.push_str(&format!(",\"acc\":{}", accesses(&acc, &blocks)));
+            }
+            // a timed device's time of the launch, in microseconds
+            if let Some(seconds) = self.inner.take_times().pop() {
+                line.push_str(&format!(",\"us\":{:.2}", seconds * 1e6));
+            }
         }
         line.push('}');
         self.event(line, false);
@@ -616,8 +639,11 @@ impl<D: Device> Device for Traced<D> {
         // the measured launches of the replay carry their arguments' indices only:
         // the capture's events name the blocks
         let acc = self.inner.take_accesses();
+        // a timed device's times of the graph's launches, in microseconds
+        let times = self.inner.take_times();
+        let us = if times.is_empty() { String::new() } else { format!(",\"us\":[{}]", times.iter().map(|s| format!("{:.2}", s * 1e6)).collect::<Vec<_>>().join(",")) };
         if acc.is_empty() {
-            emit(&format!("{{\"e\":\"replay\",\"graph\":{}}}", graph.id), false);
+            emit(&format!("{{\"e\":\"replay\",\"graph\":{}{us}}}", graph.id), false);
         } else {
             let per: Vec<String> = acc
                 .iter()
@@ -633,7 +659,7 @@ impl<D: Device> Device for Traced<D> {
                     format!("[{}]", items.join(","))
                 })
                 .collect();
-            emit(&format!("{{\"e\":\"replay\",\"graph\":{},\"acc\":[{}]}}", graph.id, per.join(",")), false);
+            emit(&format!("{{\"e\":\"replay\",\"graph\":{},\"acc\":[{}]{us}}}", graph.id, per.join(",")), false);
         }
         Ok(())
     }
@@ -691,6 +717,12 @@ impl<D: Device> Device for Traced<D> {
 
     fn take_accesses(&self) -> Vec<Vec<Access>> {
         Vec::new()
+    }
+
+    /// The device underneath is timed; its times go into the trace's
+    /// launch and replay events, so [`Device::take_times`] has none here.
+    fn time_launches(&self, on: bool) {
+        self.inner.time_launches(on);
     }
 }
 

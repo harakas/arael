@@ -84,6 +84,9 @@ pub struct HipDevice {
     modules: Mutex<HashMap<String, Arc<HipModule>>>,
     /// A graph capture is open on the stream.
     capturing: AtomicBool,
+    /// Launches are timed ([`Device::time_launches`]).
+    timing: AtomicBool,
+    timer: Mutex<Timer>,
     /// The device memory the blocks come from and go back to.
     pool: Arc<Pool<HipMem>>,
     /// The pinned host memory the host blocks come from and go back to.
@@ -111,6 +114,9 @@ impl Drop for HipDevice {
             let _ = self.l.rt.hipStreamSynchronize(self.side);
             let _ = self.l.rt.hipEventDestroy(self.fork_event);
             let _ = self.l.rt.hipEventDestroy(self.join_event);
+            let timer = self.timer.get_mut().unwrap_or_else(|e| e.into_inner());
+            let _ = self.l.rt.hipEventDestroy(timer.start);
+            let _ = self.l.rt.hipEventDestroy(timer.end);
             let _ = self.l.rt.hipStreamDestroy(self.side);
             let _ = self.l.rt.hipStreamDestroy(self.stream);
         }
@@ -292,9 +298,33 @@ impl HipKernel {
     }
 }
 
-/// A captured graph on a [`HipDevice`], instantiated for replay.
+/// A launch as the runtime takes it: what a capture made while timing
+/// keeps, to issue again at each replay.
+struct TimedLaunch {
+    function: rt::hipFunction_t,
+    // Keeps the function's module loaded.
+    _module: Arc<HipModule>,
+    lane: Lane,
+    launch: Launch,
+    values: [u64; MAX_ARGS],
+}
+
+/// The timing of launches ([`Device::time_launches`]).
+struct Timer {
+    /// Recorded on a launch's stream before and after it.
+    start: rt::hipEvent_t,
+    end: rt::hipEvent_t,
+    /// Seconds per launch since the last [`Device::take_times`].
+    times: Vec<f64>,
+    /// The launches of the capture open while timing.
+    capture: Option<Vec<TimedLaunch>>,
+}
+
+/// A captured graph on a [`HipDevice`], instantiated for replay; or, when
+/// captured while timing, its launches (`exec` null).
 pub struct HipGraph {
     exec: rt::hipGraphExec_t,
+    timed: Vec<TimedLaunch>,
     l: &'static Libs,
     index: i32,
 }
@@ -305,6 +335,9 @@ unsafe impl Send for HipGraph {}
 
 impl Drop for HipGraph {
     fn drop(&mut self) {
+        if self.exec.is_null() {
+            return;
+        }
         // SAFETY: made by hipGraphInstantiate, destroyed once.
         unsafe {
             let _ = self.l.rt.hipSetDevice(self.index);
@@ -475,6 +508,10 @@ impl HipDevice {
             let (mut fork_event, mut join_event) = (core::ptr::null_mut(), core::ptr::null_mut());
             check(l, l.rt.hipEventCreateWithFlags(&mut fork_event, rt::hipEventDisableTiming), "hipEventCreateWithFlags")?;
             check(l, l.rt.hipEventCreateWithFlags(&mut join_event, rt::hipEventDisableTiming), "hipEventCreateWithFlags")?;
+            // the timer's events keep their timing (no flag)
+            let (mut start, mut end) = (core::ptr::null_mut(), core::ptr::null_mut());
+            check(l, l.rt.hipEventCreateWithFlags(&mut start, 0), "hipEventCreateWithFlags")?;
+            check(l, l.rt.hipEventCreateWithFlags(&mut end, 0), "hipEventCreateWithFlags")?;
             // the code object's target: the architecture without its feature flags
             let gcn = field(&prop.gcnArchName);
             let target = gcn.split(':').next().unwrap_or(&gcn).to_string();
@@ -500,6 +537,8 @@ impl HipDevice {
                 arch,
                 modules: Mutex::new(HashMap::new()),
                 capturing: AtomicBool::new(false),
+                timing: AtomicBool::new(false),
+                timer: Mutex::new(Timer { start, end, times: Vec::new(), capture: None }),
                 pool: Arc::new(Pool::new()),
                 host_pool: Arc::new(Pool::new()),
             })
@@ -510,6 +549,77 @@ impl HipDevice {
     fn bind(&self) -> Result<(), GpuError> {
         // SAFETY: a plain runtime call.
         check(self.l, unsafe { self.l.rt.hipSetDevice(self.index) }, "hipSetDevice")
+    }
+
+    fn timer(&self) -> std::sync::MutexGuard<'_, Timer> {
+        self.timer.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Queues `function` on `stream` with the argument slots `values`.
+    fn issue(&self, function: rt::hipFunction_t, stream: rt::hipStream_t, launch: Launch, values: &mut [u64; MAX_ARGS]) -> Result<(), GpuError> {
+        let mut params = [core::ptr::null_mut::<c_void>(); MAX_ARGS];
+        for (p, v) in params.iter_mut().zip(values.iter_mut()) {
+            *p = v as *mut u64 as *mut c_void;
+        }
+        let [gx, gy, gz] = launch.grid;
+        let [bx, by, bz] = launch.block;
+        self.bind()?;
+        // SAFETY: the kernel's parameters are the caller's to match; the
+        // argument slots live until the call returns, and the launch only queues.
+        let e = unsafe { self.l.rt.hipModuleLaunchKernel(function, gx, gy, gz, bx, by, bz, launch.shared_bytes, stream, params.as_mut_ptr(), core::ptr::null_mut()) };
+        check(self.l, e, "hipModuleLaunchKernel")
+    }
+
+    /// `launch` alone on its stream, between two events whose distance is
+    /// its time on the device.
+    fn run_timed(&self, timer: &mut Timer, launch: &TimedLaunch) -> Result<(), GpuError> {
+        let stream = match launch.lane {
+            Lane::Main => self.stream,
+            Lane::Side => self.side,
+        };
+        self.bind()?;
+        // SAFETY: the device's stream and the timer's events.
+        check(self.l, unsafe { self.l.rt.hipEventRecord(timer.start, stream) }, "hipEventRecord")?;
+        let mut values = launch.values;
+        self.issue(launch.function, stream, launch.launch, &mut values)?;
+        let mut ms = 0f32;
+        // SAFETY: as above; the elapsed time is asked once the end event is reached.
+        unsafe {
+            check(self.l, self.l.rt.hipEventRecord(timer.end, stream), "hipEventRecord")?;
+            check(self.l, self.l.rt.hipEventSynchronize(timer.end), "hipEventSynchronize")?;
+            check(self.l, self.l.rt.hipEventElapsedTime(&mut ms, timer.start, timer.end), "hipEventElapsedTime")?;
+        }
+        timer.times.push(ms as f64 * 1e-3);
+        Ok(())
+    }
+
+    /// A capture while timing: `record`'s launches kept, not run; the
+    /// graph's replays issue them one by one.
+    fn capture_timed(&self, record: impl FnOnce() -> Result<(), GpuError>) -> Result<HipGraph, GpuError> {
+        /// The capture closed again, a failed or panicking recording included.
+        struct Open<'a>(&'a HipDevice);
+        impl Drop for Open<'_> {
+            fn drop(&mut self) {
+                self.0.timer().capture = None;
+                self.0.capturing.store(false, Ordering::Release);
+            }
+        }
+        if self.capturing.swap(true, Ordering::AcqRel) {
+            return Err(GpuError::Capture("a capture is already open on this device".into()));
+        }
+        let open = Open(self);
+        let forks = self.forks.open();
+        self.timer().capture = Some(Vec::new());
+        let recorded = record();
+        let timed = self.timer().capture.take().unwrap_or_default();
+        drop(open);
+        let joined = self.forks.check_capture(forks);
+        recorded?;
+        joined?;
+        if timed.is_empty() {
+            return Err(GpuError::Capture("the capture recorded nothing".into()));
+        }
+        Ok(HipGraph { exec: core::ptr::null_mut(), timed, l: self.l, index: self.index })
     }
 
     /// [`GpuError::Capture`] while a capture is open.
@@ -749,19 +859,27 @@ impl Device for HipDevice {
                 Arg::Bits(v) => v,
             };
         }
-        let mut params = [core::ptr::null_mut::<c_void>(); MAX_ARGS];
-        for (p, v) in params.iter_mut().zip(values.iter_mut()) {
-            *p = v as *mut u64 as *mut c_void;
+        if self.timing.load(Ordering::Acquire) {
+            let timed = TimedLaunch { function: kernel.function, _module: kernel.module.clone(), lane, launch, values };
+            let mut timer = self.timer();
+            return match timer.capture.as_mut() {
+                // kept for the graph's replays
+                Some(launches) => {
+                    launches.push(timed);
+                    Ok(())
+                }
+                None => self.run_timed(&mut timer, &timed),
+            };
         }
-        let [gx, gy, gz] = launch.grid;
-        let [bx, by, bz] = launch.block;
-        self.bind()?;
-        // SAFETY: the kernel's parameters are the caller's to match; the
-        // argument slots live until the call returns, and the launch only queues.
-        let e = unsafe {
-            self.l.rt.hipModuleLaunchKernel(kernel.function, gx, gy, gz, bx, by, bz, launch.shared_bytes, stream, params.as_mut_ptr(), core::ptr::null_mut())
-        };
-        check(self.l, e, "hipModuleLaunchKernel")
+        self.issue(kernel.function, stream, launch, &mut values)
+    }
+
+    fn time_launches(&self, on: bool) {
+        self.timing.store(on, Ordering::Release);
+    }
+
+    fn take_times(&self) -> Vec<f64> {
+        core::mem::take(&mut self.timer().times)
     }
 
     /// The side stream waits for an event recorded on the main one; in a
@@ -805,6 +923,9 @@ impl Device for HipDevice {
     /// Stream capture in thread-local mode, instantiated and uploaded, as on CUDA.
     fn capture(&self, record: impl FnOnce() -> Result<(), GpuError>) -> Result<HipGraph, GpuError> {
         crate::fault::check("capture")?;
+        if self.timing.load(Ordering::Acquire) {
+            return self.capture_timed(record);
+        }
         let forks = self.forks.open();
         let open = OpenCapture::begin(self)?;
         let recorded = record();
@@ -824,7 +945,7 @@ impl Device for HipDevice {
         let e = unsafe { self.l.rt.hipGraphInstantiate(&mut exec, graph.0, core::ptr::null_mut(), core::ptr::null_mut(), 0) };
         check(self.l, e, "hipGraphInstantiate")?;
         drop(graph);
-        let graph = HipGraph { exec, l: self.l, index: self.index };
+        let graph = HipGraph { exec, timed: Vec::new(), l: self.l, index: self.index };
         // the first replay then pays no setup
         // SAFETY: the executable graph and the stream are alive.
         check(self.l, unsafe { self.l.rt.hipGraphUpload(graph.exec, self.stream) }, "hipGraphUpload")?;
@@ -835,6 +956,10 @@ impl Device for HipDevice {
         crate::fault::check("replay")?;
         self.not_capturing("a replay")?;
         assert_eq!(graph.index, self.index, "a graph replays on the device it was captured on");
+        if graph.exec.is_null() {
+            let mut timer = self.timer();
+            return graph.timed.iter().try_for_each(|launch| self.run_timed(&mut timer, launch));
+        }
         self.bind()?;
         // SAFETY: the executable graph is alive; its blocks are the caller's to keep alive.
         check(self.l, unsafe { self.l.rt.hipGraphLaunch(graph.exec, self.stream) }, "hipGraphLaunch")

@@ -130,8 +130,12 @@ arguments, graph captures and replays. Each owner of a block names its
 sections (`Device::describe`), and the solver opens named scopes
 (`Device::scope_begin`). An index section (u32 or u64) is read back when
 it is described: the trace says what kind of sequence its words are and
-keeps the first and the last of them. `tools/devmap` turns a trace into a
-browsable map of a solve.
+keeps the first and the last of them. With `trace::time(true)` (or
+`ARAEL_GPU_TRACE_TIME=1`) the traced devices time each launch
+(`Device::time_launches`): a launch runs alone between two device events,
+a captured graph's launches one by one, and the trace has their
+microseconds. `tools/devmap` turns a trace into a browsable map of a
+solve.
 
 ```rust,ignore
 arael_gpu::trace::start("solve.trace")?;           // or ARAEL_GPU_TRACE=<file>

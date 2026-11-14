@@ -163,4 +163,32 @@ fn a_traced_device_writes_its_operations_down() {
     // the gather of x: a thousand reads of a thousand elements
     assert!(launched.contains("\"s\":0,\"r\":{\"n\":1000,\"bytes\":4000,\"unique\":1000"), "the measured accesses: {launched}");
     assert!(lines[10].contains("\"events\":[{\"e\":\"launch\"") && lines[11].contains("\"acc\":[[{\"arg\":0,\"s\":0"), "{}\n{}", lines[10], lines[11]);
+    assert!(lines[0].contains("\"timed\":false") && !text.contains("\"us\":"), "an untimed trace has no times: {}", lines[0]);
+
+    // a timed trace (the trace file is the process's: one test, one after the other):
+    // a launch has its microseconds, a replay those of its graph's launches
+    arael_gpu::trace::time(true);
+    arael_gpu::trace::start(&path).unwrap();
+    let dev = arael_gpu::trace::traced(&Arc::new(CpuDevice::with_probe(0, false).unwrap()));
+    let k = dev.compile(SOURCE, "", "k_pick").unwrap();
+    let mut block = dev.alloc(16384).unwrap();
+    fill(&*dev, &mut block);
+    dev.launch(&k, launch, &args(&block)).unwrap();
+    let graph = dev.capture(|| dev.launch(&k, launch, &args(&block)).and_then(|()| dev.launch(&k, launch, &args(&block)))).unwrap();
+    dev.replay(&graph).unwrap();
+    arael_gpu::trace::stop();
+    arael_gpu::trace::time(false);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    let us = |line: &str| -> Vec<f64> {
+        let at = line.find("\"us\":").unwrap_or_else(|| panic!("a time in {line}")) + 5;
+        line[at..].trim_start_matches('[').split(|c| c == ']' || c == '}').next().unwrap().split(',').map(|v| v.parse().unwrap()).collect()
+    };
+    let line = |kind: &str| text.lines().find(|l| l.split('"').nth(3) == Some(kind)).unwrap_or_else(|| panic!("a {kind} line in {text}"));
+    assert!(line("device").contains("\"timed\":true"), "{}", line("device"));
+    let launched = us(line("launch"));
+    assert!(launched.len() == 1 && launched[0] > 0.0, "{launched:?}");
+    let replayed = us(line("replay"));
+    assert!(replayed.len() == 2 && replayed.iter().all(|&t| t > 0.0), "{replayed:?}");
+    assert!(!line("capture").contains("\"us\":"), "a capture runs nothing: {}", line("capture"));
 }

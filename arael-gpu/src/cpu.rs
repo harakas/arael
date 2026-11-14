@@ -309,6 +309,10 @@ pub struct CpuDevice {
     host_pool: Arc<Pool<Mem>>,
     /// The access probe, when on ([`with_probe`](Self::with_probe)).
     probe: Option<Mutex<crate::cpu_probe::Probe>>,
+    /// Launches are timed ([`Device::time_launches`]), and their seconds
+    /// since the last [`Device::take_times`].
+    timing: std::sync::atomic::AtomicBool,
+    times: Mutex<Vec<f64>>,
 }
 
 impl CpuDevice {
@@ -358,15 +362,24 @@ impl CpuDevice {
             host_pool: Arc::new(Pool::new()),
             // SAFETY: the runtime's table starts with its `current` (cpu.h's Runtime).
             probe: probe.then(|| Mutex::new(crate::cpu_probe::Probe::new(unsafe { *(runtime().expect("checked above").0 as *const unsafe extern "C" fn() -> *const u32) }))),
+            timing: std::sync::atomic::AtomicBool::new(false),
+            times: Mutex::new(Vec::new()),
         })
     }
 
-    /// One launch run, its accesses counted when the probe is on.
+    /// One launch run, its accesses counted when the probe is on, and
+    /// timed by the host's clock when asked: a launch runs to its end
+    /// here, so a replay's launches are timed one by one as they are.
     fn run(&self, kernel: &CpuKernel, launch: &Launch, slots: &[u64; MAX_ARGS], blocks: &[(usize, usize, usize)]) -> Result<(), GpuError> {
-        match &self.probe {
+        let clock = self.timing.load(Ordering::Acquire).then(std::time::Instant::now);
+        let ran = match &self.probe {
             Some(p) => p.lock().unwrap_or_else(|e| e.into_inner()).launch(blocks, || run(kernel, launch, slots)),
             None => run(kernel, launch, slots),
+        };
+        if let Some(clock) = clock {
+            self.times.lock().unwrap_or_else(|e| e.into_inner()).push(clock.elapsed().as_secs_f64());
         }
+        ran
     }
 
     /// Whether the calling thread has a capture open.
@@ -737,6 +750,14 @@ impl Device for CpuDevice {
             Some(p) => p.lock().unwrap_or_else(|e| e.into_inner()).take(),
             None => Vec::new(),
         }
+    }
+
+    fn time_launches(&self, on: bool) {
+        self.timing.store(on, Ordering::Release);
+    }
+
+    fn take_times(&self) -> Vec<f64> {
+        core::mem::take(&mut self.times.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 

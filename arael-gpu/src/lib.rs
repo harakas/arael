@@ -828,6 +828,27 @@ pub trait Device: Send + Sync {
     fn take_accesses(&self) -> Vec<Vec<Access>> {
         Vec::new()
     }
+
+    /// Starts (`true`) or stops timing each launch on the device, for
+    /// [`take_times`](Self::take_times). A timed launch runs alone: the
+    /// host waits for it, so launches overlap neither one another nor the
+    /// host. A capture made while timing keeps its launches, and its
+    /// replays issue them one by one, timed. For measuring, not for speed;
+    /// a device that does not time ignores the call.
+    ///
+    /// ```ignore
+    /// dev.time_launches(true);
+    /// dev.launch(&k, Launch::linear(n, 256), &[Arg::Block(&x, 0)])?;
+    /// let seconds = dev.take_times()[0];
+    /// ```
+    fn time_launches(&self, _on: bool) {}
+
+    /// The device time, in seconds, of each launch since the last call, in
+    /// launch order, a replayed graph's launches among them; empty unless
+    /// [`time_launches`](Self::time_launches) is on.
+    fn take_times(&self) -> Vec<f64> {
+        Vec::new()
+    }
 }
 
 /// A scope of a device's operations ([`Device::scope_begin`]), closed when

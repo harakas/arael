@@ -178,3 +178,52 @@ fn captures_leave_other_threads_alone() {
         });
     });
 }
+
+/// Whether this file's device times its launches ([`Device::time_launches`]):
+/// all but the Metal device, which has its own `time_kernels`.
+const TIMED: bool = cfg!(any(feature = "cuda", feature = "hip", not(all(feature = "metal", target_vendor = "apple"))));
+
+/// A device asked to time its launches gives a time a launch, in launch
+/// order: of direct launches, and of the launches of a graph captured while
+/// timing, whose capture runs nothing and whose every replay is timed.
+/// Unasked it gives none.
+#[test]
+fn a_timed_device_gives_a_time_a_launch() {
+    if !TIMED {
+        return;
+    }
+    let dev = Dev::new(0).unwrap();
+    let k = dev.compile(SOURCE, "", "spin").unwrap();
+    let out = dev.alloc(4 * N).unwrap();
+    let spin = |n: u32| dev.launch(&k, Launch::linear(1, 1), &[Arg::Block(&out, 0), Arg::U32(n)]);
+    spin(1000).unwrap();
+    dev.sync().unwrap();
+    assert!(dev.take_times().is_empty(), "no times unless asked");
+
+    dev.time_launches(true);
+    spin(1_000).unwrap();
+    spin(8_000_000).unwrap();
+    let t = dev.take_times();
+    assert_eq!(t.len(), 2, "{t:?}");
+    assert!(t[0] > 0.0 && t[1] > 4.0 * t[0], "the longer loop takes longer: {t:?}");
+    assert!(dev.take_times().is_empty(), "the times are taken once");
+
+    let graph = dev.capture(|| spin(1_000).and_then(|()| spin(8_000_000)).and_then(|()| spin(2_000))).unwrap();
+    assert!(dev.take_times().is_empty(), "a capture runs nothing");
+    for round in 0..2 {
+        dev.replay(&graph).unwrap();
+        let t = dev.take_times();
+        assert_eq!(t.len(), 3, "round {round}: a time a launch of the graph, {t:?}");
+        assert!(t[1] > 4.0 * t[0] && t[1] > 4.0 * t[2], "round {round}: {t:?}");
+    }
+    // the graph's last launch ran last: 2000 steps of x = 0.999 x + 1 from 0
+    let mut x = [0f32; 1];
+    dev.read(&out, 0, bytemuck::cast_slice_mut(&mut x)).unwrap();
+    let expected = 1000.0 * (1.0 - 0.999f64.powi(2000));
+    assert!((x[0] as f64 - expected).abs() < 1.0, "{} against {expected}", x[0]);
+
+    dev.time_launches(false);
+    spin(1000).unwrap();
+    dev.sync().unwrap();
+    assert!(dev.take_times().is_empty(), "no times once timing is off");
+}
