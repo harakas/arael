@@ -419,10 +419,13 @@ impl RefKind {
 /// A robust loss of a device constraint, over the squared norm of its
 /// instance's rows ([`LOSS_ARG_SYM`]): `rho(s)` for the cost kernel, and
 /// `rho(s)` and the weight `rho'(s)` with shared statements for the
-/// assembly kernel.
+/// assembly kernel. `off`: the loss at zero rows, `rho(0)`, which an
+/// instance behind the assembly kernel's guard adds to the cost; None
+/// where it is zero by its form.
 pub(crate) struct DevLoss {
     pub cost: (Vec<Intermediate>, E),
     pub gh: (Vec<Intermediate>, E, E),
+    pub off: Option<(Vec<Intermediate>, E)>,
 }
 
 use crate::constraint::LOSS_ARG_SYM;
@@ -645,6 +648,10 @@ pub(crate) fn device_constraint(
         [&l.gh.1, &l.gh.2].into_iter().for_each(|e| syms_of(e, &mut gh_syms));
         syms_of_inters(&l.cost.0, &mut cost_syms);
         syms_of(&l.cost.1, &mut cost_syms);
+        if let Some((ints, rho0)) = &l.off {
+            syms_of_inters(ints, &mut gh_syms);
+            syms_of(rho0, &mut gh_syms);
+        }
     }
     // a kernel computing an atom reads its parameters; a referenced field's
     // cache (a transform's pose) is the reference kind's, not an atom
@@ -822,7 +829,8 @@ fn cpp_kernels(
     // Jacobian rows are): the reducers' sums of its products are then the
     // CPU's rho'(s)-weighted gradient and Hessian. In a block of its own,
     // so the loss's temporaries do not meet the body's. Behind the guard,
-    // as the CPU's assembly skips the loss where the rows are off.
+    // as the CPU's assembly skips the loss where the rows are off; there
+    // the cost takes the loss at zero, rho(0), as the cost kernel's does.
     let costs = match loss {
         Some(l) => {
             body.push_str(&format!("F {LOSS_ARG_SYM} = (F)0.0f;\n"));
@@ -841,7 +849,13 @@ fn cpp_kernels(
         None => (0..rows).map(|ri| format!("c += (CACC)rec[{0}] * (CACC)rec[{0}];\n", ri * stride)).collect(),
     };
     let gh_code = match guard {
-        Some((pre, q)) => format!("{}if ({} >= 0.0f) {{\n{body}}}\n", stmts(pre)?, expr(q)?),
+        Some((pre, q)) => {
+            let off = match loss.and_then(|l| l.off.as_ref()) {
+                Some((ints, rho0)) => format!(" else {{\n{}c += (CACC)({});\n}}", stmts(ints)?, expr(rho0)?),
+                None => String::new(),
+            };
+            format!("{}if ({} >= 0.0f) {{\n{body}}}{off}\n", stmts(pre)?, expr(q)?)
+        }
         None => body,
     };
     let gh_kernel = format!(

@@ -5925,3 +5925,109 @@ fn an_f32_slam_path_assembles_and_solves_on_the_device_as_on_the_cpu() {
     f32_twin_assembles_and_solves(|| slam_path(24, 30, 13), || slam_path_f32(24, 30, 13), whole_options, "the f32 slam path");
 }
 
+
+/// The bundle-adjustment observation under a loss that is not zero at zero
+/// rows, rho(s) = s + 0.5 (the built-in losses are zero there).
+#[arael::model]
+#[arael(constraint(hb, loss = |s| s + 0.5, {
+    let pc = cam.ea.rotation_matrix() * pt.pos + cam.t;
+    let keep = -pc.z - cam.zdrop;
+    let px = -pc.x / pc.z;
+    let py = -pc.y / pc.z;
+    let r2 = px * px + py * py;
+    let d = 1.0 + r2 * (cam.intr.y + cam.intr.z * r2);
+    [branch(keep, with_wide(cam.intr.x * d * px - obso.xy.x), 0.0),
+     branch(keep, with_wide(cam.intr.x * d * py - obso.xy.y), 0.0)]
+}))]
+#[derive(Clone)]
+pub struct ObsO<T: Float> {
+    #[arael(ref = root.cameras)]
+    pub cam: Ref<Camera<T>>,
+    #[arael(ref = root.points)]
+    pub pt: Ref<Point<T>>,
+    pub xy: vect2<T>,
+    pub hb: CrossBlock<Camera<T>, Point<T>, T>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct SceneO {
+    pub cameras: refs::Vec<Camera<f64>>,
+    pub points: refs::Vec<Point<f64>>,
+    pub observations: std::vec::Vec<ObsO<f64>>,
+}
+
+#[arael::model]
+#[arael(root, f32)]
+#[derive(Clone)]
+pub struct SceneOF {
+    pub cameras: refs::Vec<Camera<f32>>,
+    pub points: refs::Vec<Point<f32>>,
+    pub observations: std::vec::Vec<ObsO<f32>>,
+}
+
+type OffsetParts<T> = (refs::Vec<Camera<T>>, refs::Vec<Point<T>>, std::vec::Vec<ObsO<T>>);
+
+/// [`consistent_scene`] under the offset loss, camera 4's observations of
+/// points less than five units deep dropped by its depth guard.
+fn offset_scene<T: Float>() -> OffsetParts<T> {
+    let (mut cameras, points, observations) = consistent_scene::<T>();
+    cameras[4usize].zdrop = T::from(5.0).unwrap();
+    let observations = observations.into_iter().map(|o| ObsO { cam: o.cam, pt: o.pt, xy: o.xy, hb: CrossBlock::new() }).collect();
+    (cameras, points, observations)
+}
+
+/// An instance behind the body's dead branch has zero rows; its cost is
+/// the loss at zero, rho(0), in the linearization as in the cost alone.
+/// With rho(0) = 0.5 the linearization's cost is the cost path's on the
+/// CPU, the device's costs are the CPU's, and a device solve takes the
+/// CPU's steps.
+#[test]
+fn a_loss_not_zero_at_zero_costs_the_same_behind_a_dead_branch_on_the_device() {
+    use arael::__gpu::Wide;
+    let (cameras, points, observations) = offset_scene::<f64>();
+    let mut s = SceneO { cameras, points, observations };
+    let c4 = s.cameras[4usize].clone();
+    let depth = |o: &ObsO<f64>| -(arael::matrix::matrix3d::rotation_from_euler_angles(c4.ea.value) * s.points[o.pt].pos.value + c4.t.value).z;
+    let off = s.observations.iter().filter(|o| o.cam.index() == 4 && depth(o) < 5.0).count();
+    assert!(off > 0, "camera 4 drops some observations");
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let cost = LmProblem::<f64>::calc_cost(&mut s, &x);
+    let (mut g, mut h) = (vec![0.0; x.len()], vec![0.0; x.len() * x.len()]);
+    let linearized = LmProblem::<f64>::calc_grad_hessian_dense(&mut s, &x, &mut g, &mut h);
+    assert!((linearized - cost).abs() <= 1e-12 * cost, "the CPU's linearization costs {linearized}, its cost path {cost} ({off} observations off, 0.5 each)");
+    if checks_f64("a loss not zero at zero") {
+        for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+            let (cameras, points, observations) = offset_scene::<f64>();
+            let mut s = SceneO { cameras, points, observations };
+            assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+            let mut x = Vec::new();
+            s.serialize(&mut x);
+            let x1 = perturbed(&x);
+            let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+        }
+    }
+    let (cameras, points, observations) = offset_scene::<f32>();
+    checks_f32(&mut SceneOF { cameras, points, observations }, 1e-5, 1e-4, "an f32 loss not zero at zero");
+    let run = |gpu: Option<&GpuDevice>| {
+        let (cameras, points, observations) = offset_scene::<f64>();
+        let mut s = SceneO { cameras, points, observations };
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&options(gpu, true));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        (r.start_cost, r.end_cost, r.iterations)
+    };
+    let (start, end, iterations) = run(None);
+    assert!((start - cost).abs() <= 1e-12 * cost, "the solve starts at the cost path's cost: {start} against {cost}");
+    for d in devices() {
+        let (dstart, dend, diterations) = run(Some(&d));
+        assert!((dstart - start).abs() <= 1e-9 * start && (dend - end).abs() <= 1e-9 * end, "{}: {dstart} to {dend} against the CPU's {start} to {end}", label(&d));
+        assert_eq!(diterations, iterations, "{}", label(&d));
+    }
+}

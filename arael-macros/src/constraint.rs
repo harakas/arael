@@ -6901,6 +6901,28 @@ pub fn generate_root_methods(
         };
         let loss_cost_finalize = emit_loss(false)?;
         let loss_gh_finalize = emit_loss(true)?;
+        // The loss at zero rows, rho(0): what an instance the dead-branch
+        // skip jumps over still adds to the cost, as the cost path's
+        // rho(s) with every row zero does. None where it simplifies to
+        // zero (a loss of the form s * f(s)); the built-in losses come out
+        // zero when evaluated.
+        let loss_off: Option<arael_sym::E> = loss_expr.as_ref().and_then(|loss_e| {
+            let rho0 = loss_e.subs(LOSS_ARG_SYM, &arael_sym::constant(0.0)).simplify();
+            (!rho0.is_zero()).then_some(rho0)
+        });
+        let loss_off_cost: Option<TokenStream2> = match &loss_off {
+            Some(rho0) => {
+                let mut exprs = vec![rho0.clone()];
+                apply_substitutions(&mut exprs, &all_subs);
+                if fast_atan { replace_atan_fast(&mut exprs); }
+                let (ints, simplified) = arael_sym::cse_scoped_wide(&exprs, wide);
+                let stmts = cse_stmts(&ints, Some(""))?;
+                let rho_code: Expr = parse_sym_code(&simplified[0].to_rust(""))?;
+                let rho_add = cost_add(quote! { (#rho_code) as #acc_type });
+                Some(quote! { #(#stmts)* #rho_add })
+            }
+            None => None,
+        };
         // The same loss for the device head: rho for its cost kernel, rho
         // and the weight for its assembly kernel.
         let device_loss: Option<crate::device::DevLoss> = loss_expr.as_ref().map(|loss_e| {
@@ -6912,7 +6934,11 @@ pub fn generate_root_methods(
             let (cost_ints, mut rho) = cse(vec![loss_e.clone()]);
             let (gh_ints, mut gh) = cse(vec![loss_e.clone(), loss_e.diff(LOSS_ARG_SYM)]);
             let w = gh.pop().unwrap();
-            crate::device::DevLoss { cost: (cost_ints, rho.pop().unwrap()), gh: (gh_ints, gh.pop().unwrap(), w) }
+            let off = loss_off.as_ref().map(|rho0| {
+                let (ints, mut rho0) = cse(vec![rho0.clone()]);
+                (ints, rho0.pop().unwrap())
+            });
+            crate::device::DevLoss { cost: (cost_ints, rho.pop().unwrap()), gh: (gh_ints, gh.pop().unwrap(), w), off }
         });
         // calc_cost_table twin of a finished cost blob: identical
         // statements with the accumulator shadowed, so this constraint's
@@ -7545,13 +7571,15 @@ pub fn generate_root_methods(
             }
         }
         if let Some((_, q_code)) = &guard_code {
-            // Off that side every row is zero, so the cost, the loss
-            // (rho(0) = 0) and the writes contribute nothing; a NaN
-            // condition is off, as in `branch`.
+            // Off that side every row is zero, so the rows' cost and the
+            // writes contribute nothing; the loss still adds its value at
+            // zero, rho(0), where that is not zero. A NaN condition is
+            // off, as in `branch`.
             let tail = gh.split_off(skip_split);
             let (tail_seq, _) = split_gh(&tail);
+            let off = loss_off_cost.as_ref().map(|c| quote! { else { #c } });
             gh.push(GhStmt::Seq(
-                quote! { if (#q_code) >= 0.0 { #(#tail_seq)* } },
+                quote! { if (#q_code) >= 0.0 { #(#tail_seq)* } #off },
             ));
         }
         let (gh_stmts, _) = split_gh(&gh);
