@@ -1,0 +1,4 @@
+# The cases gen/run.sh generates from traces, and their list (cases.js):
+# local data. The hand-made sample stays.
+*.js
+!sample.js

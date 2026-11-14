@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>devmap</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Every exception and every script that fails to load is listed here. -->
+<div id="errors" hidden></div>
+
+<header id="top">
+  <span class="brand" data-tip="devmap: the device's kernels and the memory they touch">devmap</span>
+  <select id="case-select" data-tip="case"></select>
+  <nav id="tabs"></nav>
+  <div id="search-wrap">
+    <input id="search" type="text" placeholder="find kernel, section, block ( / )" autocomplete="off" spellcheck="false">
+    <div id="search-results" hidden></div>
+  </div>
+</header>
+<div id="meta-bar"></div>
+<!-- What a case without measured accesses does not show (js/app.js fills it). -->
+<div id="notice" hidden></div>
+
+<div id="main">
+  <section id="view">
+    <div id="view-tools"></div>
+    <div id="view-body"></div>
+  </section>
+  <div id="det-resize" data-tip="drag to resize the details panel"></div>
+  <aside id="details">
+    <div id="det-bar">
+      <button id="det-back" type="button" disabled>&larr; back</button>
+      <span id="det-title"></span>
+      <button id="det-clear" type="button">clear</button>
+    </div>
+    <div id="det-body"></div>
+  </aside>
+</div>
+
+<script>
+// The data entry point (case files call DEVMAP.add) and the error strip.
+// Both are defined here, before any other script, so that a script that
+// fails to load or to parse is still reported on the page.
+window.DEVMAP = { cases: [], add: function (c) { this.cases.push(c); } };
+
+window.devmapReport = function (text) {
+  var box = document.getElementById("errors");
+  if (!box) return;
+  text = String(text);
+  box.hidden = false;
+  var items = box.getElementsByTagName("pre");
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].getAttribute("data-text") === text) {
+      var n = Number(items[i].getAttribute("data-n")) + 1;
+      items[i].setAttribute("data-n", String(n));
+      items[i].firstChild.nodeValue = "(x" + n + ") " + text;
+      return;
+    }
+  }
+  if (items.length >= 12) return;
+  if (!items.length) {
+    var head = document.createElement("div");
+    head.className = "err-head";
+    head.appendChild(document.createTextNode("devmap errors (copy these back): "));
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.appendChild(document.createTextNode("dismiss"));
+    btn.onclick = function () {
+      while (box.firstChild) box.removeChild(box.firstChild);
+      box.hidden = true;
+    };
+    head.appendChild(btn);
+    box.appendChild(head);
+  }
+  var pre = document.createElement("pre");
+  pre.setAttribute("data-text", text);
+  pre.setAttribute("data-n", "1");
+  pre.appendChild(document.createTextNode(text));
+  box.appendChild(pre);
+};
+
+window.addEventListener("error", function (e) {
+  var t = e && e.target;
+  if (t && t !== window && t.tagName) {
+    // a resource that did not load (the event does not bubble: this is the capture phase)
+    if (t.tagName === "SCRIPT") {
+      // the generated case list is not there before the first gen/run.sh
+      if (!t.hasAttribute("data-optional")) window.devmapReport("failed to load script: " + (t.getAttribute("src") || "?"));
+    }
+    else if (t.tagName === "LINK") window.devmapReport("failed to load stylesheet: " + (t.getAttribute("href") || "?"));
+    return;
+  }
+  var msg = (e && e.message) ? e.message : "script error";
+  if (e && e.filename) msg += "\n  at " + e.filename + ":" + e.lineno + ":" + e.colno;
+  if (e && e.error && e.error.stack) msg += "\n" + e.error.stack;
+  window.devmapReport(msg);
+}, true);
+</script>
+
+<!-- data/cases.js sets DEVMAP_FILES; DM.boot() then adds one script tag per case file.
+     gen/devmap.py writes it with the cases; without it the viewer shows data/sample.js. -->
+<script src="data/cases.js" data-optional></script>
+
+<script src="js/util.js"></script>
+<script src="js/model.js"></script>
+<script src="js/app.js"></script>
+<script src="js/details.js"></script>
+<script src="js/overview.js"></script>
+<script src="js/pipeline.js"></script>
+<script src="js/matrix.js"></script>
+<script src="js/memory.js"></script>
+<script src="js/kernels.js"></script>
+<script src="js/findings.js"></script>
+
+<script>
+if (window.DM && typeof window.DM.boot === "function") window.DM.boot();
+else window.devmapReport("devmap: the viewer's scripts (js/*.js) did not load completely; see the messages above");
+</script>
+</body>
+</html>
