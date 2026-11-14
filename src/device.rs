@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arael_gpu::{Arg, Device, FIXED, GpuError, Launch, Values, WIDE, Wide};
+use arael_gpu::{Arg, Device, FIXED, GpuError, Launch, Scope, Section, Values, WIDE, Wide};
 
 /// A root's device layout, as its generated code describes it.
 #[derive(Clone, Debug)]
@@ -479,19 +479,24 @@ fn word_names(k: &DeviceConstraint) -> impl Iterator<Item = String> {
 /// and W) and derivatives, per constraint its records and cost parts. The
 /// order depends on the shape alone. W values are 8 bytes, the model's
 /// `ts`; a reference is in its kind's scalar on a route of `route`.
+/// Words of a tile's record in the image's TILE columns: its base in H's
+/// values, its stride, and an entity's start or a cross block's flip
+/// ([`tiles`]).
+const TILE_WORDS: usize = 3;
+
 fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: &[usize], ts: usize, route: Values) -> (Vec<Column>, usize, usize) {
     let col = |name: String, elem: usize, len: usize| Column { name, elem, len };
     let mut v = Vec::new();
     for (e, &n) in shape.entities.iter().enumerate() {
         let s = slots[e];
         v.push(col(format!("E{e}_IDX"), 4, n * s));
-        v.push(col(format!("E{e}_TILE"), 4, 3 * s));
+        v.push(col(format!("E{e}_TILE"), 4, TILE_WORDS * s));
     }
     for (r, rf) in shape.references.iter().enumerate() {
         v.push(col(format!("R{r}_AT"), 4, slots[rf.entity]));
     }
     for (x, &s) in cross_slots.iter().enumerate() {
-        v.push(col(format!("X{x}_TILE"), 4, 3 * s));
+        v.push(col(format!("X{x}_TILE"), 4, TILE_WORDS * s));
     }
     for (c, k) in shape.constraints.iter().enumerate() {
         let n = counts[c];
@@ -1014,6 +1019,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             leaf_bits: 53,
             _t: core::marker::PhantomData,
         };
+        asm.dev.describe(&asm.block, "image", &|| asm.sections());
         asm.refresh(root)?;
         Ok(asm)
     }
@@ -1026,6 +1032,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     /// another structure panics (the session's structure is rebuilt by
     /// `LmSession::invalidate`).
     pub fn refresh(&mut self, root: &dyn DeviceRoot<T>) -> Result<(), GpuError> {
+        let _scope = Scope::new(&*self.dev, "image");
         let base = self.layout.structure_bytes;
         let at = |name: &str| self.offset[name] - base;
         let n_ent = self.shape.entities.len();
@@ -1055,6 +1062,60 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         self.leaf_bits = w.bits;
         let len = self.layout.host_bytes - base;
         self.staged.upload(&*self.dev, &mut self.block, base, len)
+    }
+
+    /// The block's sections, for the tools that inspect a device's work
+    /// ([`Device::describe`]): the layout table, then every column with its
+    /// group (`structure`: written once; `values`: rewritten per solve;
+    /// `computed`: written by the kernels), stored type and meaning.
+    fn sections(&self) -> Vec<Section> {
+        let l = &self.layout;
+        let (f, w) = (if core::mem::size_of::<T>() == 4 { "f32" } else { "f64" }, self.wide.name());
+        let mut v = vec![Section::new("L", 0, l.columns.len() * 8, 8, "u64").group("table").doc("the layout table: each column's byte offset in the block")];
+        for (c, &at) in l.columns.iter().zip(&l.offsets) {
+            let group = if at < l.structure_bytes {
+                "structure"
+            } else if at < l.host_bytes {
+                "values"
+            } else {
+                "computed"
+            };
+            // E3_IDX: the table letter, its number, the column's kind
+            let kind = c.name.split_once('_').map_or(c.name.as_str(), |(_, k)| k);
+            let kind = kind.trim_end_matches(|ch: char| ch.is_ascii_digit());
+            let number = |name: &str| name[1..].split('_').next().and_then(|n| n.parse::<usize>().ok());
+            let (ty, role, doc): (&str, &str, &str) = match (c.name.as_bytes()[0], kind) {
+                (b'E', "IDX") => ("u32", "", "per entity parameter: its global index in x, FIXED when not optimized"),
+                (b'E', "TILE") => ("u32", "", "per entity: its diagonal tile in H's values (base, stride, first live index)"),
+                (b'E', "FIXED") => (f, "F", "per entity parameter: its value where fixed"),
+                (b'E', "DATA") => (f, "F", "per entity: the record of its data the constraints read (F values)"),
+                (b'E', "EV") => (f, "F", "per entity parameter: its value at the current x, gathered"),
+                (b'R', "AT") => ("u32", "", "per entity: where the referenced field's step starts among its parameters"),
+                (b'R', "REFR") => (number(&c.name).map_or(w, |r| self.shape.references[r].kind.scalar(self.route).ty()), "", "per entity: the referenced field's reference (rotation or quaternion)"),
+                (b'R', "VAL") => (f, "F", "per entity: the referenced field's composed values"),
+                (b'R', "VALW") => (w, "W", "per entity: the referenced field's composed values in the wide scalar"),
+                (b'R', "DER") => (f, "F", "per entity: the composed values' derivatives by the step"),
+                (b'X', "TILE") => ("u32", "", "per cross block: its tile in H's values (base, stride, flip: 1 when the second side's span lies on the tile's rows)"),
+                (b'C', "S") => ("u32", "", "per instance: this side's entity slot"),
+                (b'C', "X") => ("u32", "", "per instance: this pair's cross tile slot"),
+                (b'C', "OFF") => ("u32", "", "per entity slot of this side: where its instances start in INST"),
+                (b'C', "INST") => ("u32", "", "the instances grouped by this side's entity"),
+                (b'C', "XOFF") => ("u32", "", "per cross tile slot: where its instances start in XINST"),
+                (b'C', "XINST") => ("u32", "", "the instances grouped by this pair's cross tile"),
+                (b'C', "D") => (f, "F", "per instance: one datum of the constraint"),
+                (b'C', "REC") => (f, "F", "per instance: its record, the residual rows and their partials"),
+                (b'C', "PART") => ("bytes", "CACC", "per block of 256 instances: its part of the cost, in the root's CACC (V, or W with cost_f64), an 8-byte slot each"),
+                (b'R', "ROOT") => (f, "F", "the root's record of data the constraints read (F values)"),
+                _ if c.elem == 4 && group == "structure" => ("u32", "", "structure words"),
+                _ => ("bytes", "", ""),
+            };
+            // a record of F values counts by its values
+            let ts = core::mem::size_of::<T>();
+            let elem = if role == "F" && c.elem > ts { ts } else { c.elem };
+            let record = if kind == "TILE" { TILE_WORDS } else { 1 };
+            v.push(Section::new(c.name.clone(), at, c.elem * c.len, elem, ty).role(role).group(group).doc(doc).record(record));
+        }
+        v
     }
 
     /// Changes whenever the block or its offsets change: a graph of the
@@ -1107,6 +1168,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     /// The entities' parameter values and the referenced fields' values at
     /// the parameters `x`; with `derivatives`, their derivatives too.
     fn gather(&self, x: Target<'_, D::Block>, derivatives: bool) -> Result<(), GpuError> {
+        let _scope = Scope::new(&*self.dev, "gather");
         for (e, &n) in self.shape.entities.iter().enumerate() {
             let len = n * self.slots[e];
             let args = [Arg::Block(x.0, x.1), self.col(&format!("E{e}_IDX")), self.col(&format!("E{e}_FIXED")), self.col(&format!("E{e}_EV")), Arg::U32(len as u32)];
@@ -1140,10 +1202,15 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         nh: usize,
         cost: Target<'_, D::Block>,
     ) -> Result<(), GpuError> {
-        self.zero_values(g, ng)?;
-        self.zero_values(h, nh)?;
-        self.zero(cost, 1)?;
+        let _scope = Scope::new(&*self.dev, "assemble");
+        {
+            let _scope = Scope::new(&*self.dev, "zero");
+            self.zero_values(g, ng)?;
+            self.zero_values(h, nh)?;
+            self.zero(cost, 1)?;
+        }
         self.gather(x, true)?;
+        let _constraints = Scope::new(&*self.dev, "constraints");
         let (b, h, g, cost) = (Arg::Block(&self.block, 0), Arg::Block(h.0, h.1), Arg::Block(g.0, g.1), Arg::Block(cost.0, cost.1));
         for (c, &n) in self.counts.iter().enumerate() {
             if n == 0 {
@@ -1169,8 +1236,10 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     /// The cost (one value at `cost`) at the parameters `x`, zeroed first;
     /// the referenced fields' derivatives are not computed. Nothing read back.
     pub fn cost_at(&self, x: Target<'_, D::Block>, cost: Target<'_, D::Block>) -> Result<(), GpuError> {
+        let _scope = Scope::new(&*self.dev, "cost");
         self.zero(cost, 1)?;
         self.gather(x, false)?;
+        let _constraints = Scope::new(&*self.dev, "constraints");
         let (b, cost) = (Arg::Block(&self.block, 0), Arg::Block(cost.0, cost.1));
         for (c, &n) in self.counts.iter().enumerate() {
             if n == 0 {

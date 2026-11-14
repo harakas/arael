@@ -59,6 +59,9 @@ gpu-cuda = ["gpu", "arael-gpu/cuda"]
 gpu-hip = ["gpu", "arael-gpu/hip"]
 gpu-metal = ["gpu", "arael-gpu/metal"]
 gpu-cpu = ["gpu", "arael-gpu/cpu"]
+# Device solves can be traced: with `ARAEL_GPU_TRACE=<file>` every device
+# operation of the process is written there (tools/devmap reads it).
+gpu-trace = ["gpu"]
 
 [dependencies]
 arael-macros = { workspace = true }

@@ -9,7 +9,7 @@ use arael_faer::{SparseIndex, ValueIndex};
 use arael_gpu::lm::{N_SCALARS, S_COST_TRY, S_COST_X, Scalars};
 use arael_gpu::schur::{GraphKey, STATUS_BYTES};
 use arael_gpu::FactorizeError;
-use arael_gpu::{Device, GpuError, GpuFactor, LmVectors, GpuSchur, GpuSchurError, Values, Wide};
+use arael_gpu::{Device, GpuError, GpuFactor, LmVectors, GpuSchur, GpuSchurError, Scope, Values, Wide};
 use arael_gpu::{GpuPrecision, RefineStats};
 
 use super::{GpuSolver, narrow, resident_attempt};
@@ -80,6 +80,7 @@ impl<T, D: Device> DeviceSolver<T, D> {
         staging: crate::device::Staging,
         f32_reduction: bool,
     ) -> Result<Self, GpuError> {
+        let _scope = (Scope::new(&**dev, "setup"), Scope::new(&**dev, "factor"));
         let factor = GpuFactor::new(dev, precision, sn, asym, &Default::default(), wide)?;
         Ok(DeviceSolver { route: None, schur: None, factor, wide, staging, f32_reduction })
     }
@@ -153,6 +154,7 @@ impl<T: crate::utils::Float, D: Device> DeviceSolver<T, D> {
     fn settle(&mut self) -> Result<(), DeviceFailure> {
         let r = self.route.as_mut().expect("a device route");
         if std::mem::take(&mut r.accept_due) {
+            let _scope = Scope::new(&**r.asm.device(), "accept");
             on_device(accept_on_device(&r.asm, &r.vec), "accept")?;
         }
         Ok(())
@@ -176,6 +178,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
     }
 
     fn factorize(&mut self, vals: &[T]) -> Result<Result<(), SupernodalError>, DeviceFailure> {
+        let dev = self.factor.device().clone();
+        let _scope = Scope::new(&*dev, "factorize");
         match self.factor.factorize(vals) {
             Ok(()) => Ok(Ok(())),
             Err(FactorizeError::NotPositiveDefinite) => Ok(Err(SupernodalError::NotPositiveDefinite)),
@@ -184,10 +188,14 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
     }
 
     fn solve(&mut self, x: &mut [T]) -> Result<(), DeviceFailure> {
+        let dev = self.factor.device().clone();
+        let _scope = Scope::new(&*dev, "solve");
         on_device(self.factor.solve(x), "solve")
     }
 
     fn solve_f64(&mut self, x: &mut [f64]) -> Result<(), DeviceFailure> {
+        let dev = self.factor.device().clone();
+        let _scope = Scope::new(&*dev, "solve");
         on_device(self.factor.solve(x), "solve")
     }
 
@@ -195,6 +203,7 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         // the old blocks go first, so the device holds one structure's at a time
         self.drop_reduction();
         let dev = self.factor.device();
+        let _scope = (Scope::new(&**dev, "setup"), Scope::new(&**dev, "reduction"));
         let params = arael_gpu::GpuSchurParams { f32_reduction: self.f32_reduction, ..Default::default() };
         let values = self.values();
         self.schur = Some(match schur {
@@ -218,6 +227,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
     }
 
     fn solve_reduced(&mut self, hvals: &[T], grad: &[T], refine: Option<(usize, f64)>, delta: &mut [T]) -> Result<Option<RefineStats>, DeviceFailure> {
+        let dev = self.factor.device().clone();
+        let _scope = Scope::new(&*dev, "solve_reduced");
         let gs = self.schur.as_mut().expect("the device reduction is built with the Schur symbolic");
         match gs.solve(&mut self.factor, hvals, grad, refine, delta) {
             Ok(stats) => Ok(Some(stats)),
@@ -232,6 +243,7 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
             return Ok(());
         }
         let dev = self.factor.device();
+        let _scope = (Scope::new(&**dev, "setup"), Scope::new(&**dev, "route"));
         let asm = DeviceAssembly::new(dev, root, hsym, threads, self.wide, self.staging)?;
         self.route = Some(Route {
             attempt_graph: None,
@@ -266,6 +278,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
 
     fn route_compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T]) -> Result<T, DeviceFailure> {
         let (values, wide) = (self.values(), Values::from(self.wide));
+        let dev = self.factor.device().clone();
+        let _scope = Scope::new(&*dev, "compute");
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a device route");
         // what the device holds is the last compute's only once this one
@@ -297,6 +311,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
     }
 
     fn start(&mut self, x: &[T], floor: Option<f64>) -> Result<(), DeviceFailure> {
+        let dev = self.factor.device().clone();
+        let _scope = Scope::new(&*dev, "start");
         let r = self.route.as_mut().expect("a resident solve has its device route");
         r.floor = floor;
         r.accept_due = false;
@@ -306,6 +322,7 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         if r.live {
             // this linearization was assembled there: its diagonal pass only
             let gs = self.schur.as_ref().expect("a device route has its reduction");
+            let _scope = Scope::new(&*dev, "pass");
             on_device(r.vec.linearized(gs.rhs_target(), gs.h_target(), r.floor), "linearization")
         } else {
             self.linearize()
@@ -317,6 +334,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
     /// the gradient), without waiting. An accept with its linearization is
     /// one captured graph.
     fn linearize(&mut self) -> Result<(), DeviceFailure> {
+        let dev = self.factor.device().clone();
+        let _scope = Scope::new(&*dev, "linearize");
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a device route");
         r.live = false;
@@ -326,9 +345,11 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         let (g, h) = (gs.rhs_target(), gs.h_target());
         let launches = || {
             if accept {
+                let _scope = Scope::new(&**asm.device(), "accept");
                 accept_on_device(asm, vec)?;
             }
             asm.assemble_at(vec.x(), g, vec.len(), h, nh, vec.slot(S_COST_X))?;
+            let _scope = Scope::new(&**asm.device(), "pass");
             vec.linearized(g, h, floor)
         };
         let queued = if accept { run_graph(&**asm.device(), &mut r.step_graph, key, launches) } else { launches() };
@@ -338,6 +359,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
     }
 
     fn attempt(&mut self, lambda: f64, refine: Option<(usize, f64)>) -> Result<(Option<RefineStats>, ResidentAttempt), DeviceFailure> {
+        let dev = self.factor.device().clone();
+        let _scope = Scope::new(&*dev, "attempt");
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let gf = &self.factor;
         let r = self.route.as_mut().expect("a resident solve has its device route");
@@ -345,9 +368,15 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         let key = (gs.graph_key(gf, refine), r.asm.generation());
         let (asm, vec) = (&r.asm, &r.vec);
         let launches = || {
-            vec.damp(gs.h_target())?;
+            {
+                let _scope = Scope::new(&**asm.device(), "damp");
+                vec.damp(gs.h_target())?;
+            }
             gs.launch(gf, refine)?;
-            vec.step(gs.step_view(), gs.rhs_target())?;
+            {
+                let _scope = Scope::new(&**asm.device(), "step");
+                vec.step(gs.step_view(), gs.rhs_target())?;
+            }
             asm.cost_at(vec.x_try(), vec.slot(S_COST_TRY))
         };
         on_device(run_graph(&**asm.device(), &mut r.attempt_graph, key, launches), "attempt")?;
@@ -408,6 +437,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
     }
 
     fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]) -> Result<(), DeviceFailure> {
+        let dev = self.factor.device().clone();
+        let _scope = Scope::new(&*dev, "finish");
         self.params(x)?;
         let r = self.route.as_ref().expect("a resident solve has its device route");
         on_device(r.asm.restore(problem.device_root_mut().expect("a device route's problem has a device root")), "read of the rotations")

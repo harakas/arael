@@ -5868,9 +5868,9 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
         #[cfg(feature = "gpu-cuda")]
         GpuBackend::Cuda => {
             let made = device_in(&dev.cuda, || arael_gpu::cuda::CudaDevice::new(dev.index));
-            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging, f32_reduction));
+            let solver = solver_on(made, precision, sn, asym, wide, staging, f32_reduction);
             report_kernel_cache();
-            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("setup of the CUDA factor", e))?))
+            Ok(solver.map_err(|e| gpu_setup_failed("setup of the CUDA factor", e))?)
         }
         #[cfg(not(feature = "gpu-cuda"))]
         GpuBackend::Cuda => {
@@ -5880,9 +5880,9 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
         #[cfg(feature = "gpu-hip")]
         GpuBackend::Hip => {
             let made = device_in(&dev.hip, || arael_gpu::hip::HipDevice::new(dev.index));
-            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging, f32_reduction));
+            let solver = solver_on(made, precision, sn, asym, wide, staging, f32_reduction);
             report_kernel_cache();
-            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("setup of the HIP factor", e))?))
+            Ok(solver.map_err(|e| gpu_setup_failed("setup of the HIP factor", e))?)
         }
         #[cfg(not(feature = "gpu-hip"))]
         GpuBackend::Hip => {
@@ -5892,9 +5892,9 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
         #[cfg(feature = "gpu-cpu")]
         GpuBackend::Cpu => {
             let made = device_in(&dev.cpu, || arael_gpu::cpu::CpuDevice::new(dev.index));
-            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging, f32_reduction));
+            let solver = solver_on(made, precision, sn, asym, wide, staging, f32_reduction);
             report_kernel_cache();
-            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("setup of the CPU device's factor", e))?))
+            Ok(solver.map_err(|e| gpu_setup_failed("setup of the CPU device's factor", e))?)
         }
         #[cfg(not(feature = "gpu-cpu"))]
         GpuBackend::Cpu => {
@@ -5904,8 +5904,8 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
         #[cfg(gpu_metal)]
         GpuBackend::Metal => {
             let made = device_in(&dev.metal, || arael_gpu::metal::MetalDevice::new(dev.index));
-            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging, f32_reduction));
-            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("setup of the Metal factor", e))?))
+            let solver = solver_on(made, precision, sn, asym, wide, staging, f32_reduction);
+            Ok(solver.map_err(|e| gpu_setup_failed("setup of the Metal factor", e))?)
         }
         #[cfg(not(gpu_metal))]
         GpuBackend::Metal => {
@@ -5913,6 +5913,34 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the Metal runtime is not compiled in (feature gpu-metal, on an Apple target)" }.into())
         }
     }
+}
+
+/// The device solver on the device `made`; with a trace on (feature
+/// `gpu-trace`, `ARAEL_GPU_TRACE=<file>` or `arael_gpu::trace::start`), on
+/// its traced twin, which writes every device operation of the solve into
+/// the trace (tools/devmap reads it).
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
+#[allow(clippy::too_many_arguments)]
+fn solver_on<T, D>(
+    made: Result<std::sync::Arc<D>, arael_gpu::GpuError>,
+    precision: arael_gpu::GpuPrecision,
+    sn: &arael_faer::supernodal::SupernodalSymbolic,
+    asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+    wide: arael_gpu::Wide,
+    staging: crate::device::Staging,
+    f32_reduction: bool,
+) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, arael_gpu::GpuError>
+where
+    T: crate::utils::Float + arael_faer::schur::SchurReal,
+    D: arael_gpu::Device + 'static,
+{
+    use crate::gpu_solver::solver::DeviceSolver;
+    let dev = made?;
+    #[cfg(feature = "gpu-trace")]
+    if arael_gpu::trace::active() {
+        return Ok(Box::new(DeviceSolver::new(&arael_gpu::trace::traced(&dev), precision, sn, asym, wide, staging, f32_reduction)?));
+    }
+    Ok(Box::new(DeviceSolver::new(&dev, precision, sn, asym, wide, staging, f32_reduction)?))
 }
 
 /// A kernel cache entry the runtime could not write, logged once.
