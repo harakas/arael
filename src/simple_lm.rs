@@ -4225,11 +4225,15 @@ pub enum ReducedOrdering {
     /// of its own.
     NaturalDense,
     /// A general sparse graph. AMD earns its keep -- and on the pose-graph
-    /// shape it beats nested dissection outright.
+    /// shape it beats nested dissection outright. Also AMD because the
+    /// caller asked for it ([`SolveOrdering::Amd`]).
     Amd,
     /// Nested dissection, because the caller asked for it
     /// ([`SolveOrdering::NestedDissection`]).
     NestedDissection,
+    /// The natural order, because the caller asked for it
+    /// ([`SolveOrdering::Natural`]).
+    Natural,
 }
 
 /// Half-bandwidth (in scalars) past which the narrow-band Cholesky
@@ -4347,6 +4351,25 @@ fn ordering_for(nnz: usize, n: usize, band: usize) -> ReducedOrdering {
     }
 }
 
+/// The reduced system's ordering under the caller's `request`: AMD, the
+/// natural order and nested dissection as asked; [`ordering_for`]'s choice
+/// under [`SolveOrdering::Auto`] and [`SolveOrdering::MarginalizeFirst`]
+/// (the reduction has eliminated the marginalized parameters already).
+///
+/// ```ignore
+/// // a banded reduced system: natural unless asked otherwise
+/// assert_eq!(reduced_ordering_for(SolveOrdering::Auto, nnz, n, band), ReducedOrdering::NaturalBanded);
+/// assert_eq!(reduced_ordering_for(SolveOrdering::Amd, nnz, n, band), ReducedOrdering::Amd);
+/// ```
+fn reduced_ordering_for(request: SolveOrdering, nnz: usize, n: usize, band: usize) -> ReducedOrdering {
+    match request {
+        SolveOrdering::Amd => ReducedOrdering::Amd,
+        SolveOrdering::Natural => ReducedOrdering::Natural,
+        SolveOrdering::NestedDissection => ReducedOrdering::NestedDissection,
+        SolveOrdering::Auto | SolveOrdering::MarginalizeFirst => ordering_for(nnz, n, band),
+    }
+}
+
 impl ReducedOrdering {
     fn faer<'a>(self) -> faer::sparse::linalg::cholesky::SymmetricOrdering<'a, SparseIndex> {
         use faer::sparse::linalg::cholesky::SymmetricOrdering;
@@ -4355,9 +4378,24 @@ impl ReducedOrdering {
             _ => SymmetricOrdering::Identity,
         }
     }
-    fn why(self, n: usize, nnz: usize, band: usize) -> String {
+    /// Whether the system stays in its own order: it has an envelope to
+    /// factor under.
+    fn is_natural(self) -> bool {
+        matches!(self, ReducedOrdering::NaturalBanded | ReducedOrdering::NaturalDense | ReducedOrdering::Natural)
+    }
+    /// The ordering and its reason, for the verbose output; `asked`: the
+    /// caller named it ([`SolveOrdering::Amd`]).
+    fn why(self, asked: bool, n: usize, nnz: usize, band: usize) -> String {
         let density = 100.0 * nnz as f64 / (n as f64 * (n as f64 + 1.0) / 2.0);
         match self {
+            ReducedOrdering::Amd if asked => std::format!(
+                "AMD -- asked for (half-bandwidth {} of {}, {:.0}% dense)",
+                band, n, density
+            ),
+            ReducedOrdering::Natural => std::format!(
+                "natural order -- asked for (half-bandwidth {} of {}, {:.0}% dense)",
+                band, n, density
+            ),
             ReducedOrdering::NaturalDense => std::format!(
                 "natural order -- S is {:.0}% dense, so there is no fill for AMD to reduce",
                 density
@@ -4515,9 +4553,10 @@ pub enum SolveOrdering {
     /// * whole system otherwise -- AMD or nested dissection, whichever the
     ///   reduction gate ([`SchurPolicy::Auto`]) priced cheaper; AMD when
     ///   the gate did not run;
-    /// * reduced system -- AMD, unless the reduction left it dense enough
-    ///   (over a quarter of the upper triangle) that AMD has nothing to
-    ///   find, where it is the natural order.
+    /// * reduced system -- AMD, unless the reduction left it banded, or
+    ///   dense enough (over a quarter of the upper triangle) that AMD has
+    ///   nothing to find, where it is the natural order
+    ///   ([`ReducedOrdering`] names the choice).
     ///
     /// Note what Auto does NOT do: use a set the solver DETECTED itself as
     /// an ordering. Detection says which blocks are marginalizable, not
@@ -4526,13 +4565,17 @@ pub enum SolveOrdering {
     /// of 3-column supernodes. A set the caller named is an
     /// instruction; a set we guessed is not.
     Auto,
-    /// Approximate minimum degree, always.
+    /// Approximate minimum degree, always: of the whole system, or of the
+    /// reduced one.
     Amd,
     /// The marginalized parameters first, everything else in natural
     /// order. Falls back to AMD when there is no marginalize set to put
-    /// first.
+    /// first. With a reduction the marginalized parameters are eliminated
+    /// by it, and the reduced system is ordered as under
+    /// [`Auto`](Self::Auto).
     MarginalizeFirst,
-    /// Natural order, no permutation.
+    /// Natural order, no permutation: of the whole system, or of the
+    /// reduced one.
     Natural,
     /// Nested dissection ([`arael_faer::nd`]). For a reduced system with no
     /// band and no small degrees -- bundle adjustment, where every 3D point
@@ -7659,6 +7702,15 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let mut fill_ratio = None;
         let mut route_flops = None;
         let band = if eliminated.is_empty() { 0 } else { schur.kept_bandwidth() };
+        // The reduced system's ordering: the caller's, else the rule's from
+        // S's block structure (nnz straight off the symbolic, no scalar CSC
+        // yet; band from the symbolic pass). Decided once, so the gate
+        // prices the ordering the factorization takes.
+        let ord = match (&nd, self.ordering) {
+            // asked for and not computed: the iterative route factors nothing
+            (None, SolveOrdering::NestedDissection) => ordering_for(schur.s.val_count(), schur.s.nrows(), band),
+            _ => reduced_ordering_for(self.ordering, schur.s.val_count(), schur.s.nrows(), band),
+        };
         // Set when the reduction barely shrinks the system, which disqualifies
         // the shortcut below however good the flop ratio looks.
         let mut keeps_most_of_the_system = false;
@@ -7746,7 +7798,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let nk = schur.s.nrows();
             let s_ord = match &nd {
                 Some(nd) => SymmetricOrdering::Custom(nd.perm()),
-                None => ordering_for(s_pat.0.last().copied().unwrap_or(0) as usize, nk, band).faer(),
+                None => ord.faer(),
             };
             let ms = |t0: Option<Instant>| t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
             // The three analyses: the reduced system under its ordering,
@@ -7976,20 +8028,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
         let nk = schur.s.nrows();
 
-        // Ordering, and the opt-in narrow-band route, are decided from S's
-        // block structure: nnz straight off the symbolic (no scalar CSC yet),
-        // band from the symbolic pass.
-        let ord = match &nd {
-            Some(_) => ReducedOrdering::NestedDissection,
-            None => ordering_for(schur.s.val_count(), nk, band),
-        };
         // Conjugate gradients multiplies by S; it neither orders nor factors
         // it, so neither the ordering nor the band route applies.
-        // A naturally-ordered reduction -- banded or dense -- has an envelope
-        // to factor under. Anything reordered (AMD, nested dissection) does
-        // not, and the iterative routes never factor at all.
-        let natural =
-            matches!(ord, ReducedOrdering::NaturalBanded | ReducedOrdering::NaturalDense);
+        // A naturally-ordered reduction -- banded, dense, or asked for -- has
+        // an envelope to factor under. Anything reordered (AMD, nested
+        // dissection) does not, and the iterative routes never factor at all.
+        let natural = ord.is_natural();
         let mut take_envelope =
             !iterative && natural && self.envelope_mode != EnvelopeMode::Never;
         if take_envelope && self.envelope_mode == EnvelopeMode::Auto {
@@ -8156,7 +8200,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     ReducedOrdering::Amd | ReducedOrdering::NestedDissection => {
                         Some(arael_faer::supernodal::amd_block_order(&schur.s))
                     }
-                    ReducedOrdering::NaturalBanded | ReducedOrdering::NaturalDense => None,
+                    ReducedOrdering::NaturalBanded | ReducedOrdering::NaturalDense | ReducedOrdering::Natural => None,
                 },
             };
             let sn = match reduced_sn {
@@ -8234,7 +8278,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 );
                 info!(
                     "schur: ordering the reduced system by {}",
-                    ord.why(nk, self.s_row_idx.len(), band),
+                    ord.why(matches!(self.ordering, SolveOrdering::Amd), nk, self.s_row_idx.len(), band),
                 );
             }
             self.size_llt_buffers(&llt_symbolic);
@@ -9376,6 +9420,46 @@ mod tests {
         // guessing natural costs 48x, so it must come out AMD.
         let sparse_nnz = 3 * n;
         assert_eq!(ordering_for(sparse_nnz, n, n - 1), ReducedOrdering::Amd);
+    }
+
+    /// An ordering the caller names is the reduced system's, whatever its
+    /// shape; Auto and MarginalizeFirst leave it to the rule.
+    #[test]
+    fn a_named_ordering_is_the_reduced_systems() {
+        use super::{reduced_ordering_for, SolveOrdering};
+        let n = 10_000;
+        // (nnz, band, the rule's choice): banded, a general sparse graph, dense
+        let shapes = [
+            (100 * n, 100, ReducedOrdering::NaturalBanded),
+            (3 * n, n - 1, ReducedOrdering::Amd),
+            (n * (n + 1) / 3, n - 1, ReducedOrdering::NaturalDense),
+        ];
+        for (nnz, band, rule) in shapes {
+            assert_eq!(ordering_for(nnz, n, band), rule);
+            for (request, want) in [
+                (SolveOrdering::Auto, rule),
+                (SolveOrdering::MarginalizeFirst, rule),
+                (SolveOrdering::Amd, ReducedOrdering::Amd),
+                (SolveOrdering::Natural, ReducedOrdering::Natural),
+                (SolveOrdering::NestedDissection, ReducedOrdering::NestedDissection),
+            ] {
+                assert_eq!(reduced_ordering_for(request, nnz, n, band), want, "{request:?} on a system the rule orders {rule:?}");
+            }
+        }
+        // the natural orders have an envelope to factor under, the others none
+        for (o, natural) in [
+            (ReducedOrdering::NaturalBanded, true),
+            (ReducedOrdering::NaturalDense, true),
+            (ReducedOrdering::Natural, true),
+            (ReducedOrdering::Amd, false),
+            (ReducedOrdering::NestedDissection, false),
+        ] {
+            assert_eq!(o.is_natural(), natural, "{o:?}");
+        }
+        // the reason names a request
+        assert!(ReducedOrdering::Amd.why(true, n, 3 * n, n - 1).starts_with("AMD -- asked for"));
+        assert!(ReducedOrdering::Amd.why(false, n, 3 * n, n - 1).starts_with("AMD -- S is a general sparse graph"));
+        assert!(ReducedOrdering::Natural.why(false, n, 3 * n, n - 1).starts_with("natural order -- asked for"));
     }
 
     use super::*;

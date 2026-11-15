@@ -65,6 +65,7 @@ pub fn ord_code(o: Option<arael::simple_lm::ReducedOrdering>) -> f64 {
         Some(ReducedOrdering::NaturalDense) => 1.0,
         Some(ReducedOrdering::Amd) => 2.0,
         Some(ReducedOrdering::NestedDissection) => 3.0,
+        Some(ReducedOrdering::Natural) => 4.0,
         None => -1.0,
     }
 }
@@ -258,6 +259,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
             Some(ReducedOrdering::NaturalDense) => 1.0,
             Some(ReducedOrdering::Amd) => 2.0,
             Some(ReducedOrdering::NestedDissection) => 3.0,
+            Some(ReducedOrdering::Natural) => 4.0,
             None => -1.0,
         };
         assert_eq!(g("plan_ordering"), ord);

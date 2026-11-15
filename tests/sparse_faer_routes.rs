@@ -212,6 +212,34 @@ fn every_ordering_of_the_whole_system_agrees() {
     }
 }
 
+/// Every ordering of the reduced system reaches the same optimum, on the
+/// block supernodal route and on the scalar one.
+#[test]
+fn every_ordering_of_the_reduced_system_agrees() {
+    use arael::simple_lm::BlockSupernodalMode;
+    let (reference, _) = solved_params(&mut SparseFaer::new());
+    for supernodal in [BlockSupernodalMode::Always, BlockSupernodalMode::Never] {
+        for ordering in [
+            SolveOrdering::Auto,
+            SolveOrdering::Amd,
+            SolveOrdering::MarginalizeFirst,
+            SolveOrdering::Natural,
+            SolveOrdering::NestedDissection,
+        ] {
+            let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+                .with_policy(SchurPolicy::Force)
+                .with_block_supernodal(supernodal)
+                .with_ordering(ordering));
+            let (got, cost) = solved_params(&mut solver);
+            assert!(cost < 1e-14, "{:?}, {:?}: end_cost {}", ordering, supernodal, cost);
+            assert!(solver.plan().expect("a plan").reduced, "{:?}, {:?}", ordering, supernodal);
+            for (i, (a, b)) in std::iter::zip(&got, &reference).enumerate() {
+                assert!((a - b).abs() < 1e-8, "{:?}, {:?}: param {}: {} vs {}", ordering, supernodal, i, a, b);
+            }
+        }
+    }
+}
+
 /// Naming blocks that couple to each other is a mistake in the model
 /// description, not a slow path: marginalizing them is not defined. The solve
 /// fails at setup with a coupled-marginalization error rather than a panic.

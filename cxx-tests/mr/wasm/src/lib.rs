@@ -825,7 +825,7 @@ pub enum JsLmStatus {
 
 /// How the reduced system was ordered (the plan's `ordering`).
 #[wasm_bindgen(js_name = "ReducedOrdering")]
-pub enum JsReducedOrdering { NaturalBanded = 0, NaturalDense = 1, Amd = 2, NestedDissection = 3 }
+pub enum JsReducedOrdering { NaturalBanded = 0, NaturalDense = 1, Amd = 2, NestedDissection = 3, Natural = 4 }
 
 /// How much covariance to prepare (`assembleCovariance`'s mode).
 #[wasm_bindgen(js_name = "CovMode")]
@@ -1141,7 +1141,7 @@ impl DecayLmResult {
     }
     /// The sparse backend's plan, or undefined when the solve carried
     /// none. Absent statistics are undefined; `ordering` is 0
-    /// NaturalBanded, 1 NaturalDense, 2 Amd, 3 Nd.
+    /// NaturalBanded, 1 NaturalDense, 2 Amd, 3 Nd, 4 Natural.
     pub fn plan(&self) -> JsValue {
         use arael::simple_lm::ReducedOrdering;
         let p = match &self.r.solver {
@@ -1165,6 +1165,7 @@ impl DecayLmResult {
             ReducedOrdering::NaturalDense => 1.0,
             ReducedOrdering::Amd => 2.0,
             ReducedOrdering::NestedDissection => 3.0,
+            ReducedOrdering::Natural => 4.0,
         })));
         js_set(&o, "keptBandwidth", &JsValue::from_f64(p.kept_bandwidth as f64));
         js_set(&o, "envelope", &JsValue::from_bool(p.envelope));
@@ -1750,7 +1751,7 @@ pub enum JsLmStatus {
 
 /// How the reduced system was ordered (the plan's `ordering`).
 #[wasm_bindgen(js_name = "ReducedOrdering")]
-pub enum JsReducedOrdering { NaturalBanded = 0, NaturalDense = 1, Amd = 2, NestedDissection = 3 }
+pub enum JsReducedOrdering { NaturalBanded = 0, NaturalDense = 1, Amd = 2, NestedDissection = 3, Natural = 4 }
 
 /// How much covariance to prepare (`assembleCovariance`'s mode).
 #[wasm_bindgen(js_name = "CovMode")]
@@ -2066,7 +2067,7 @@ impl LineLmResult {
     }
     /// The sparse backend's plan, or undefined when the solve carried
     /// none. Absent statistics are undefined; `ordering` is 0
-    /// NaturalBanded, 1 NaturalDense, 2 Amd, 3 Nd.
+    /// NaturalBanded, 1 NaturalDense, 2 Amd, 3 Nd, 4 Natural.
     pub fn plan(&self) -> JsValue {
         use arael::simple_lm::ReducedOrdering;
         let p = match &self.r.solver {
@@ -2090,6 +2091,7 @@ impl LineLmResult {
             ReducedOrdering::NaturalDense => 1.0,
             ReducedOrdering::Amd => 2.0,
             ReducedOrdering::NestedDissection => 3.0,
+            ReducedOrdering::Natural => 4.0,
         })));
         js_set(&o, "keptBandwidth", &JsValue::from_f64(p.kept_bandwidth as f64));
         js_set(&o, "envelope", &JsValue::from_bool(p.envelope));

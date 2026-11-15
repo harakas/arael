@@ -125,6 +125,7 @@ class ReducedOrdering(enum.IntEnum):
     NATURAL_DENSE = 1
     AMD = 2
     ND = 3
+    NATURAL = 4
 
 
 class SchurPolicy(enum.IntEnum):

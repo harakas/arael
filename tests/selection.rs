@@ -22,7 +22,7 @@
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{
-    lm_solve, LmConfig, ReducedOrdering, SchurPlan, SchurPolicy, SparseFaer,
+    lm_solve, LmConfig, ReducedOrdering, SchurPlan, SchurPolicy, SolveOrdering, SparseFaer,
 };
 
 // --- a 2D SLAM model: 3-parameter poses, 2-parameter landmarks ------------
@@ -168,13 +168,43 @@ impl Scene {
 /// Run the solver's analysis and hand back what it decided. One iteration is
 /// enough: every choice is made on the first assembly.
 fn decide(scene: &Scene, policy: SchurPolicy) -> SchurPlan {
+    decide_ordered(scene, policy, SolveOrdering::default())
+}
+
+/// [`decide`] with the ordering the caller names.
+fn decide_ordered(scene: &Scene, policy: SchurPolicy, ordering: SolveOrdering) -> SchurPlan {
     let mut w = scene.build();
     let mut params = std::vec::Vec::new();
     arael::simple_lm::RootProblem::serialize(&mut w, &mut params);
     let cfg = LmConfig { max_iters: 1, ..Default::default() };
-    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(policy));
+    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(policy).with_ordering(ordering));
     lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
     solver.plan().expect("the first compute must leave a plan")
+}
+
+/// The ordering the caller names is the reduced system's. On the banded
+/// trajectory the rule keeps the natural order: AMD, nested dissection and
+/// the natural order are taken when asked, each named in the plan; Auto and
+/// MarginalizeFirst (the reduction has eliminated the marginalized
+/// parameters) leave it to the rule. A reordered system has no envelope to
+/// factor under.
+#[test]
+fn a_named_ordering_reaches_the_reduced_system() {
+    let scene = Scene { poses: 200, landmarks: 400, span: 8, odometry: true };
+    for (asked, want) in [
+        (SolveOrdering::Auto, ReducedOrdering::NaturalBanded),
+        (SolveOrdering::MarginalizeFirst, ReducedOrdering::NaturalBanded),
+        (SolveOrdering::Amd, ReducedOrdering::Amd),
+        (SolveOrdering::Natural, ReducedOrdering::Natural),
+        (SolveOrdering::NestedDissection, ReducedOrdering::NestedDissection),
+    ] {
+        let plan = decide_ordered(&scene, SchurPolicy::Force, asked);
+        assert!(plan.reduced, "{asked:?}");
+        assert_eq!(plan.ordering, Some(want), "{asked:?}");
+        if matches!(want, ReducedOrdering::Amd | ReducedOrdering::NestedDissection) {
+            assert!(!plan.envelope, "{asked:?}: a reordered system was factored under an envelope");
+        }
+    }
 }
 
 // --- benchmarks/slam: a trajectory with local landmarks -------------------

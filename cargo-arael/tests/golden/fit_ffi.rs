@@ -1003,7 +1003,7 @@ pub struct CSchurPlan {
     pub route_flops: COptRouteFlops,
     pub cg_iterations: COptU32,
     pub flop_ratio: COptDouble,
-    /// ReducedOrdering: 0 NaturalBanded, 1 NaturalDense, 2 Amd, 3 Nd.
+    /// ReducedOrdering: 0 NaturalBanded, 1 NaturalDense, 2 Amd, 3 Nd, 4 Natural.
     pub ordering: COptI32,
     pub kept_bandwidth: u32,
     pub envelope: bool,
@@ -1060,6 +1060,7 @@ unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
                     ReducedOrdering::NaturalDense => 1,
                     ReducedOrdering::Amd => 2,
                     ReducedOrdering::NestedDissection => 3,
+                    ReducedOrdering::Natural => 4,
                 },
             },
             None => COptI32 { has: false, v: 0 },

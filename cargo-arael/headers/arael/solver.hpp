@@ -470,6 +470,7 @@ enum class ReducedOrdering : int32_t {
     NaturalDense = 1,
     Amd = 2,
     Nd = 3,
+    Natural = 4,
 };
 
 /// Per-iteration flops down the two routes the Auto policy priced:

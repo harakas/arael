@@ -383,6 +383,10 @@ struct SparseOptionsT {
     /// Where the device assembly's image is staged (Rust's
     /// GpuDevice::with_staging).
     GpuStaging gpu_staging;
+    /// An f32 solve's reduced system in the GPU's wide values instead of
+    /// f32, as the CPU's f32 route forms it (Rust's
+    /// GpuDevice::with_wide_schur). Off by default.
+    bool gpu_wide_schur;
 };
 
 /// Per-phase wall-clock seconds plus call counts, gathered when
@@ -467,6 +471,7 @@ enum class ReducedOrdering : int32_t {
     NaturalDense = 1,
     Amd = 2,
     Nd = 3,
+    Natural = 4,
 };
 
 /// Per-iteration flops down the two routes the Auto policy priced:
@@ -525,6 +530,9 @@ struct SchurPlan {
     /// assembly too (SparseOptions::gpu_assembly).
     bool gpu_factor;
     bool gpu_assembly;
+    /// The GPU formed the reduced system in f32 (an f32 solve without
+    /// SparseOptions::mixed_precision, unless SparseOptions::gpu_wide_schur).
+    bool gpu_f32_reduction;
 };
 
 /// One form's share of a sweep phase, summed over its calls (mirrors
