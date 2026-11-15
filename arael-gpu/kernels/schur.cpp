@@ -11,7 +11,10 @@
 // per block), TILE_GROUPS (a unit's lane groups) and ACC (the widest kept
 // block's square over a group's lanes, rounded up: the entries of a tile of
 // S per lane);
-// the plan header's slots (SE_*, SO_*, ST_*, SP_*, SK_*, SB_*), the
+// the plan header's slots (SE, SO, SP, ST_*, SK_*, SB_*), the words of
+// an eliminated block's record (SE_*, SE_REC of them, in the table at SE),
+// of an observer's (SO_*, SO_REC, at SO) and of a pair's (SP_*, SP_REC, at
+// SP), the
 // refinement state's words (R_*) and flags (F_*) come from schur.rs as
 // #defines. Kernels launched with THREADS threads per block, or PLANE where
 // said.
@@ -56,6 +59,13 @@ KERNEL_THREADS(PLANE) void k_zero_u32(GLOBAL u32* RESTRICT buf, u32 n) {
     u32 i = global_x();
     if (i < n) buf[i] = 0;
 }
+
+// An observer's sizes word (SO_DIMS; schur.rs, so_dims): the width of its
+// kept block, of its eliminated block, and whether its coupling tile is
+// stored (eliminated, kept).
+#define DIMS_WO(d) ((d) & 0xffu)
+#define DIMS_WE(d) (((d) >> 8) & 0xffu)
+#define DIMS_TRANS(d) ((d) >> 16)
 
 // C[i][k] of an observer's coupling tile at `ca`, wo x we, in either storage
 // orientation.
@@ -105,11 +115,12 @@ DEVICE void ldlt_solve(GLOBAL const R* f, u32 w, THREAD R* v) {
 KERNEL_THREADS_REGS(THREADS) void k_schur_elim(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL R* RESTRICT dfac, GLOBAL R* RESTRICT z, GLOBAL u32* RESTRICT fail, u32 ne) {
     u32 e = global_x();
     if (e >= ne) return;
-    u32 w = plan[plan[SE_W] + e];
-    u32 diag = plan[plan[SE_DIAG_OFF] + e];
-    u32 orig = plan[plan[SE_ORIG_OFF] + e];
-    u32 doff = plan[plan[SE_DFAC_OFF] + e];
-    u32 zoff = plan[plan[SE_Z_OFF] + e];
+    GLOBAL const u32* se = plan + plan[SE] + SE_REC * e;
+    u32 w = se[SE_W];
+    u32 diag = se[SE_DIAG_OFF];
+    u32 orig = se[SE_ORIG_OFF];
+    u32 doff = se[SE_DFAC_OFF];
+    u32 zoff = se[SE_Z_OFF];
     // the tile, symmetric from its upper triangle, then its lower factor in
     // place and its pivots L_jj^2
     R a[EW * EW];
@@ -166,14 +177,15 @@ KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL c
     u32 o = x / KW;
     u32 i = x - o * KW;
     if (o >= no) return;
-    u32 wo = plan[plan[SO_W] + o];
+    GLOBAL const u32* so = plan + plan[SO] + SO_REC * o;
+    u32 dims = so[SO_DIMS];
+    u32 wo = DIMS_WO(dims);
     if (i >= wo) return;
-    u32 e = plan[plan[SO_E] + o];
-    u32 we = plan[plan[SE_W] + e];
-    u32 ca = plan[plan[SO_CA_OFF] + o];
-    u32 trans = plan[plan[SO_TRANS] + o];
-    u32 doff = plan[plan[SE_DFAC_OFF] + e];
-    u32 woff = plan[plan[SO_W_OFF] + o];
+    u32 we = DIMS_WE(dims);
+    u32 trans = DIMS_TRANS(dims);
+    u32 ca = so[SO_CA_OFF];
+    u32 doff = plan[plan[SE] + SE_REC * so[SO_E] + SE_DFAC_OFF];
+    u32 woff = so[SO_W_OFF];
     R c[EW];
 #pragma unroll
     for (u32 k = 0; k < EW; k++) c[k] = k < we ? to_r(coupling(h, ca, trans, wo, we, i, k)) : R(0.0f);
@@ -283,13 +295,8 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const V* 
     if (t == NONE) return;
     SHARED_PTR R* ws = ws_all + (unit * TILE_GROUPS + g) * KW * EW;
     SHARED_PTR R* cs = cs_all + (unit * TILE_GROUPS + g) * KW * EW;
-    u32 o_ew = plan[SE_W];
-    u32 o_ca = plan[SO_CA_OFF];
-    u32 o_trans = plan[SO_TRANS];
-    u32 o_e = plan[SO_E];
-    u32 o_woff = plan[SO_W_OFF];
-    u32 o_oa = plan[SP_OA];
-    u32 o_ob = plan[SP_OB];
+    u32 o_so = plan[SO];
+    u32 o_sp = plan[SP];
     u32 val = plan[plan[ST_VAL_OFF] + t];
     u32 wr = plan[plan[ST_WR] + t];
     u32 wc = plan[plan[ST_WC] + t];
@@ -335,12 +342,15 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const V* 
         // ob observes the tile's column block: C_ob has wc rows
         u32 wb = 0u;
         if (p < p1) {
-            u32 oa = plan[o_oa + p];
-            u32 ob = plan[o_ob + p];
-            we = plan[o_ew + plan[o_e + oa]];
-            woff = plan[o_woff + oa];
-            cb = plan[o_ca + ob];
-            tb = plan[o_trans + ob];
+            // the pair's observers' records: W_oa's place from oa's, the
+            // rest from ob's (both observe the pair's eliminated block)
+            u32 pr = o_sp + SP_REC * p;
+            u32 rb = o_so + SO_REC * plan[pr + SP_OB];
+            u32 db = plan[rb + SO_DIMS];
+            we = DIMS_WE(db);
+            tb = DIMS_TRANS(db);
+            cb = plan[rb + SO_CA_OFF];
+            woff = plan[o_so + SO_REC * plan[pr + SP_OA] + SO_W_OFF];
             wb = wc;
         }
         // the step's widest pair, uniform in the unit (one group's too, for
@@ -410,11 +420,8 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const V* 
 // over the block's observers of C_o z_e, the lanes over the observers, a
 // warp sum per row.
 KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL const R* RESTRICT z, GLOBAL R* RESTRICT out) {
-    u32 o_ew = plan[SE_W];
-    u32 o_z = plan[SE_Z_OFF];
-    u32 o_ca = plan[SO_CA_OFF];
-    u32 o_trans = plan[SO_TRANS];
-    u32 o_e = plan[SO_E];
+    u32 o_se = plan[SE];
+    u32 o_so = plan[SO];
     u32 o_kobs = plan[SK_OBS];
     u32 k = block_x();
     u32 lane = thread_x();
@@ -427,12 +434,13 @@ KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, GLOBAL c
 #pragma unroll
     for (u32 i = 0; i < KW; i++) acc[i] = 0.0f;
     for (u32 q = q0 + lane; q < q1; q += PLANE) {
-        u32 o = plan[o_kobs + q];
-        u32 e = plan[o_e + o];
-        u32 we = plan[o_ew + e];
-        u32 ca = plan[o_ca + o];
-        u32 trans = plan[o_trans + o];
-        u32 zoff = plan[o_z + e];
+        // the observer's record, and z's offset from its eliminated block's
+        u32 ro = o_so + SO_REC * plan[o_kobs + q];
+        u32 dims = plan[ro + SO_DIMS];
+        u32 we = DIMS_WE(dims);
+        u32 ca = plan[ro + SO_CA_OFF];
+        u32 trans = DIMS_TRANS(dims);
+        u32 zoff = plan[o_se + SE_REC * plan[ro + SO_E] + SE_Z_OFF];
 #pragma unroll
         for (u32 i = 0; i < KW; i++) {
             if (i < wk) {
@@ -469,24 +477,25 @@ KERNEL_THREADS(THREADS) void k_scatter_kept(GLOBAL const u32* RESTRICT plan, GLO
 KERNEL_THREADS(THREADS) void k_schur_backsub(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL const R* RESTRICT dfac, GLOBAL V* RESTRICT x, u32 ne) {
     u32 e = global_x();
     if (e >= ne) return;
-    u32 o_ca = plan[SO_CA_OFF];
-    u32 o_trans = plan[SO_TRANS];
-    u32 o_ow = plan[SO_W];
-    u32 o_oorig = plan[SO_ORIG_OFF];
-    u32 w = plan[plan[SE_W] + e];
-    u32 orig = plan[plan[SE_ORIG_OFF] + e];
-    u32 doff = plan[plan[SE_DFAC_OFF] + e];
-    u32 q0 = plan[plan[SE_OBS_PTR] + e];
-    u32 q1 = plan[plan[SE_OBS_PTR] + e + 1];
+    // the block's record; its observers end where the next block's start
+    GLOBAL const u32* se = plan + plan[SE] + SE_REC * e;
+    GLOBAL const u32* so = plan + plan[SO];
+    u32 w = se[SE_W];
+    u32 orig = se[SE_ORIG_OFF];
+    u32 doff = se[SE_DFAC_OFF];
+    u32 q0 = se[SE_OBS_PTR];
+    u32 q1 = se[SE_REC + SE_OBS_PTR];
     R t[EW];
 #pragma unroll
     for (u32 i = 0; i < EW; i++)
         if (i < w) t[i] = to_r(rhs[orig + i]);
     for (u32 o = q0; o < q1; o++) {
-        u32 wa = plan[o_ow + o];
-        u32 ca = plan[o_ca + o];
-        u32 trans = plan[o_trans + o];
-        u32 xo = plan[o_oorig + o];
+        GLOBAL const u32* r = so + SO_REC * o;
+        u32 dims = r[SO_DIMS];
+        u32 wa = DIMS_WO(dims);
+        u32 ca = r[SO_CA_OFF];
+        u32 trans = DIMS_TRANS(dims);
+        u32 xo = r[SO_ORIG_OFF];
 #pragma unroll
         for (u32 kk = 0; kk < EW; kk++) {
             if (kk < w) {

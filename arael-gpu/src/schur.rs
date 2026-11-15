@@ -42,37 +42,85 @@ use crate::{Arg, Device, GpuError, Launch, Layout, Scope, Section, Values, WIDE,
 /// No kept-kept tile behind a tile of S.
 const NONE: u32 = u32::MAX;
 
-// The header of the reduction's plan buffer: where each array starts.
-pub(crate) const SE_DIAG_OFF: usize = 0;
-pub(crate) const SE_W: usize = 1;
-pub(crate) const SE_ORIG_OFF: usize = 2;
-pub(crate) const SE_OBS_PTR: usize = 3;
-pub(crate) const SE_DFAC_OFF: usize = 4;
-pub(crate) const SE_Z_OFF: usize = 5;
-pub(crate) const SO_CA_OFF: usize = 6;
-pub(crate) const SO_TRANS: usize = 7;
-pub(crate) const SO_W: usize = 8;
-pub(crate) const SO_E: usize = 9;
-pub(crate) const SO_ORIG_OFF: usize = 10;
-pub(crate) const SO_W_OFF: usize = 11;
-pub(crate) const ST_VAL_OFF: usize = 12;
-pub(crate) const ST_WR: usize = 13;
-pub(crate) const ST_WC: usize = 14;
-pub(crate) const ST_A: usize = 15;
-pub(crate) const ST_B: usize = 16;
-pub(crate) const ST_COPY_OFF: usize = 17;
-pub(crate) const ST_PAIR_PTR: usize = 18;
-pub(crate) const SP_OA: usize = 19;
-pub(crate) const SP_OB: usize = 20;
-pub(crate) const SK_OBS_PTR: usize = 21;
-pub(crate) const SK_OBS: usize = 22;
-pub(crate) const SK_S_OFF: usize = 23;
-pub(crate) const SK_ORIG_OFF: usize = 24;
-pub(crate) const SK_W: usize = 25;
+// The header of the reduction's plan buffer: where each table and array
+// starts.
+/// The eliminated blocks: a record of [`SE_REC`] words each (the `SE_*`
+/// fields), and one more at the end for the end of the last block's
+/// observers.
+pub(crate) const SE: usize = 0;
+/// The observers (an eliminated block's coupling to a kept block), in the
+/// order of their eliminated blocks: a record of [`SO_REC`] words each (the
+/// `SO_*` fields).
+pub(crate) const SO: usize = 1;
+pub(crate) const ST_VAL_OFF: usize = 2;
+pub(crate) const ST_WR: usize = 3;
+pub(crate) const ST_WC: usize = 4;
+pub(crate) const ST_A: usize = 5;
+pub(crate) const ST_B: usize = 6;
+pub(crate) const ST_COPY_OFF: usize = 7;
+pub(crate) const ST_PAIR_PTR: usize = 8;
+/// The pairs (two observers of one eliminated block: a term of a tile of
+/// S), grouped by tile: a record of [`SP_REC`] words each (the `SP_*`
+/// fields).
+pub(crate) const SP: usize = 9;
+pub(crate) const SK_OBS_PTR: usize = 10;
+pub(crate) const SK_OBS: usize = 11;
+pub(crate) const SK_S_OFF: usize = 12;
+pub(crate) const SK_ORIG_OFF: usize = 13;
+pub(crate) const SK_W: usize = 14;
 /// The blocks of `k_schur_tiles` ([`tile_blocks`]), added by
 /// [`GpuSchur`]'s build.
-pub(crate) const SB_ITEMS: usize = 26;
+pub(crate) const SB_ITEMS: usize = 15;
 pub(crate) const SHEADER: usize = 32;
+
+// The words of a pair's record ([`SP`]).
+/// Its observer of the tile's row block.
+pub(crate) const SP_OA: usize = 0;
+/// Its observer of the tile's column block.
+pub(crate) const SP_OB: usize = 1;
+pub(crate) const SP_REC: usize = 2;
+
+// The words of an eliminated block's record ([`SE`]). A kernel that walks
+// the blocks reads one table, not an array per field.
+/// The value offset of its diagonal tile in h.
+pub(crate) const SE_DIAG_OFF: usize = 0;
+pub(crate) const SE_W: usize = 1;
+/// Its scalar offset in the gradient and the step.
+pub(crate) const SE_ORIG_OFF: usize = 2;
+/// Its first observer; the next record's is the end of its observers.
+pub(crate) const SE_OBS_PTR: usize = 3;
+/// The value offset of its square in dfac.
+pub(crate) const SE_DFAC_OFF: usize = 4;
+/// Its value offset in z.
+pub(crate) const SE_Z_OFF: usize = 5;
+pub(crate) const SE_REC: usize = 6;
+
+// The words of an observer's record ([`SO`]). Five words: `k_schur_backsub`
+// and `k_schur_rhs` in f64 slow down with the record's width.
+/// The value offset of W_o in w.
+pub(crate) const SO_W_OFF: usize = 0;
+/// Its sizes ([`so_dims`]).
+pub(crate) const SO_DIMS: usize = 1;
+/// The value offset of its coupling tile in h.
+pub(crate) const SO_CA_OFF: usize = 2;
+/// Its eliminated block (a record of [`SE`]).
+pub(crate) const SO_E: usize = 3;
+/// The scalar offset of its kept block in the step.
+pub(crate) const SO_ORIG_OFF: usize = 4;
+pub(crate) const SO_REC: usize = 5;
+
+/// An observer's sizes in one word: the width of its kept block (bits 0 to
+/// 7), of its eliminated block (bits 8 to 15), and `trans` (bit 16): whether
+/// its coupling tile is stored (eliminated, kept). The kernels' `DIMS_WO`,
+/// `DIMS_WE` and `DIMS_TRANS` take it apart.
+///
+/// ```ignore
+/// assert_eq!(so_dims(9, 3, true), 0x10309);
+/// ```
+fn so_dims(wo: u32, we: u32, trans: bool) -> u32 {
+    assert!(wo < 256 && we < 256, "a block of {} columns does not fit an observer's sizes word", wo.max(we));
+    wo | we << 8 | (trans as u32) << 16
+}
 
 /// How [`GpuSchur`] cuts the forming of S (`k_schur_tiles`), whose
 /// lockstep units (the device's lockstep width of threads each) take a tile
@@ -298,41 +346,46 @@ impl SchurPlan {
         let n = hsym.ncols();
         let nks = sym.s.nrows();
         let hpart = hsym.col_part();
-        // the eliminated blocks
-        let (mut e_diag, mut e_w, mut e_orig, mut e_dfac, mut e_z, mut elim_blk) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        // The plan's words: the header, then the eliminated blocks' and the
+        // observers' tables, their records written in place; room for the
+        // tiles', the pairs' and the kept blocks' words that follow.
+        let (at_se, at_so) = (SHEADER, SHEADER + SE_REC * (ne + 1));
+        let mut buf: Vec<u32> = Vec::with_capacity(at_so + SO_REC * no + 7 * sym.s.nblocks() + SP_REC * sym.pairs + no + 4 * nk + 64);
+        buf.resize(at_so + SO_REC * no, 0);
+        (buf[SE], buf[SO]) = (at_se as u32, at_so as u32);
+        let (se, so) = buf[at_se..].split_at_mut(SE_REC * (ne + 1));
+        // a record per eliminated block, and one more for the end of the
+        // last one's observers
+        let e_obs_ptr = sym.elim_obs_ptr;
+        let mut elim_blk = Vec::with_capacity(ne);
         let (mut dfac_len, mut z_len) = (0u32, 0u32);
         let mut ew_max = 1usize;
-        for slot in 0..ne {
+        for (slot, r) in se.chunks_exact_mut(SE_REC).enumerate() {
+            r[SE_OBS_PTR] = e_obs_ptr[slot];
+            if slot == ne {
+                break;
+            }
             let dblk = sym.elim_diag[slot] as usize;
             let e = hsym.blk_row(dblk);
-            let we = sym.elim_w[slot] as usize;
-            ew_max = ew_max.max(we);
-            e_diag.push(hsym.val_range(dblk).start as u32);
-            e_w.push(we as u32);
-            e_orig.push(hpart[e]);
-            e_dfac.push(dfac_len);
-            e_z.push(z_len);
+            let we = sym.elim_w[slot];
+            ew_max = ew_max.max(we as usize);
+            (r[SE_DIAG_OFF], r[SE_W], r[SE_ORIG_OFF], r[SE_DFAC_OFF], r[SE_Z_OFF]) = (hsym.val_range(dblk).start as u32, we, hpart[e], dfac_len, z_len);
             elim_blk.push(e as u32);
-            dfac_len += (we * we) as u32;
-            z_len += we as u32;
+            dfac_len += we * we;
+            z_len += we;
         }
-        let e_obs_ptr: Vec<u32> = sym.elim_obs_ptr.to_vec();
-        // the observers, with their eliminated slot and their W offset
-        let mut o_e = vec![0u32; no];
-        for slot in 0..ne {
-            o_e[e_obs_ptr[slot] as usize..e_obs_ptr[slot + 1] as usize].fill(slot as u32);
-        }
-        let o_ca: Vec<u32> = sym.obs_ca_off.to_vec();
-        let o_trans: Vec<u32> = sym.obs_trans.iter().map(|&t| t as u32).collect();
-        let o_w: Vec<u32> = sym.obs_w.to_vec();
-        let o_orig: Vec<u32> = sym.obs_orig_off.to_vec();
-        let mut o_woff = Vec::with_capacity(no);
+        // a record per observer, in the order of their eliminated blocks
         let mut w_len = 0u32;
         let mut kw_max = 1usize;
-        for o in 0..no {
-            o_woff.push(w_len);
-            w_len += o_w[o] * e_w[o_e[o] as usize];
-            kw_max = kw_max.max(o_w[o] as usize);
+        for slot in 0..ne {
+            let we = sym.elim_w[slot];
+            for o in e_obs_ptr[slot] as usize..e_obs_ptr[slot + 1] as usize {
+                let wo = sym.obs_w[o];
+                let r = &mut so[SO_REC * o..][..SO_REC];
+                (r[SO_W_OFF], r[SO_DIMS], r[SO_CA_OFF], r[SO_E], r[SO_ORIG_OFF]) = (w_len, so_dims(wo, we, sym.obs_trans[o]), sym.obs_ca_off[o], slot as u32, sym.obs_orig_off[o]);
+                w_len += wo * we;
+                kw_max = kw_max.max(wo as usize);
+            }
         }
         // the tiles of S, in storage order, with their kept-kept source
         let ssym = sym.s;
@@ -412,21 +465,8 @@ impl SchurPlan {
         let k_s_off: Vec<u32> = (0..nk).map(|k| spart[k]).collect();
         let k_orig: Vec<u32> = sym.kept.iter().map(|&orig| hpart[orig as usize]).collect();
         let k_w: Vec<u32> = (0..nk).map(|k| spart[k + 1] - spart[k]).collect();
-        // pack, the pairs' observers written in place by their tile
-        let mut buf: Vec<u32> = vec![0; SHEADER];
-        let arrays: [(usize, &[u32]); 19] = [
-            (SE_DIAG_OFF, &e_diag),
-            (SE_W, &e_w),
-            (SE_ORIG_OFF, &e_orig),
-            (SE_OBS_PTR, &e_obs_ptr),
-            (SE_DFAC_OFF, &e_dfac),
-            (SE_Z_OFF, &e_z),
-            (SO_CA_OFF, &o_ca),
-            (SO_TRANS, &o_trans),
-            (SO_W, &o_w),
-            (SO_E, &o_e),
-            (SO_ORIG_OFF, &o_orig),
-            (SO_W_OFF, &o_woff),
+        // pack the rest, the pairs' records written in place by their tile
+        let arrays: [(usize, &[u32]); 7] = [
             (ST_VAL_OFF, &t_val),
             (ST_WR, &t_wr),
             (ST_WC, &t_wc),
@@ -436,15 +476,13 @@ impl SchurPlan {
             (ST_PAIR_PTR, &t_pair_ptr),
         ];
         let tail: [(usize, &[u32]); 5] = [(SK_OBS_PTR, &k_obs_ptr), (SK_OBS, &k_obs), (SK_S_OFF, &k_s_off), (SK_ORIG_OFF, &k_orig), (SK_W, &k_w)];
-        buf.reserve(arrays.iter().chain(&tail).map(|a| a.1.len()).sum::<usize>() + 2 * np + 64);
         for (slot, v) in arrays {
             buf[slot] = buf.len() as u32;
             buf.extend_from_slice(v);
         }
-        let (at_oa, at_ob) = (buf.len(), buf.len() + np);
-        buf[SP_OA] = at_oa as u32;
-        buf[SP_OB] = at_ob as u32;
-        buf.resize(at_ob + np, 0);
+        let at_pairs = buf.len();
+        buf[SP] = at_pairs as u32;
+        buf.resize(at_pairs + SP_REC * np, 0);
         let mut next = t_pair_ptr.clone();
         let mut k = 0usize;
         for slot in 0..ne {
@@ -455,8 +493,8 @@ impl SchurPlan {
                     k += 1;
                     let at = next[t] as usize;
                     next[t] += 1;
-                    buf[at_oa + at] = i as u32;
-                    buf[at_ob + at] = j as u32;
+                    let r = &mut buf[at_pairs + SP_REC * at..][..SP_REC];
+                    (r[SP_OA], r[SP_OB]) = (i as u32, j as u32);
                 }
             }
         }
@@ -1125,21 +1163,22 @@ impl<D: Device> GpuSchur<D> {
 }
 
 /// The plan words' sections, for [`Device::describe`]: the header, then
-/// the array of each of its slots.
+/// the table or array of each of its slots.
 fn plan_sections(words: &[u32]) -> Vec<Section> {
     let slots = [
-        (SE_DIAG_OFF, "SE_DIAG_OFF", "per eliminated block: the value offset of its diagonal tile in h"),
-        (SE_W, "SE_W", "per eliminated block: its width"),
-        (SE_ORIG_OFF, "SE_ORIG_OFF", "per eliminated block: its scalar offset in the gradient and the step"),
-        (SE_OBS_PTR, "SE_OBS_PTR", "per eliminated block: its first observer"),
-        (SE_DFAC_OFF, "SE_DFAC_OFF", "per eliminated block: the value offset of its square in dfac"),
-        (SE_Z_OFF, "SE_Z_OFF", "per eliminated block: its value offset in z"),
-        (SO_CA_OFF, "SO_CA_OFF", "per observer: the value offset of its coupling tile in h"),
-        (SO_TRANS, "SO_TRANS", "per observer: 1 when the coupling tile is stored (eliminated, kept)"),
-        (SO_W, "SO_W", "per observer: the width of its kept block"),
-        (SO_E, "SO_E", "per observer: its eliminated slot"),
-        (SO_ORIG_OFF, "SO_ORIG_OFF", "per observer: the scalar offset of its kept block in the step"),
-        (SO_W_OFF, "SO_W_OFF", "per observer: the value offset of W_o in w"),
+        (
+            SE,
+            "SE",
+            "per eliminated block, a record: the value offset of its diagonal tile in h, its width, its scalar offset in the gradient and the step, \
+             its first observer (the next record's is their end; one record more than blocks), the value offset of its square in dfac, its value offset in z",
+        ),
+        (
+            SO,
+            "SO",
+            "per observer, a record: the value offset of W_o in w, its sizes (the width of its kept block, of its eliminated block times 256, \
+             65536 when its coupling tile is stored (eliminated, kept)), the value offset of its coupling tile in h, its eliminated block, \
+             the scalar offset of its kept block in the step",
+        ),
         (ST_VAL_OFF, "ST_VAL_OFF", "per tile of S: its value offset in s"),
         (ST_WR, "ST_WR", "per tile of S: its rows"),
         (ST_WC, "ST_WC", "per tile of S: its columns"),
@@ -1147,15 +1186,23 @@ fn plan_sections(words: &[u32]) -> Vec<Section> {
         (ST_B, "ST_B", "per tile of S: its column kept block"),
         (ST_COPY_OFF, "ST_COPY_OFF", "per tile of S: the value offset in h of the kept-kept tile behind it, or NONE"),
         (ST_PAIR_PTR, "ST_PAIR_PTR", "per tile of S: its first pair"),
-        (SP_OA, "SP_OA", "per pair: its observer oa, the pairs grouped by tile"),
-        (SP_OB, "SP_OB", "per pair: its observer ob"),
+        (SP, "SP", "per pair, a record, the pairs grouped by tile: its observer of the tile's row block, its observer of the column block"),
         (SK_OBS_PTR, "SK_OBS_PTR", "per kept block: its first entry in SK_OBS"),
         (SK_OBS, "SK_OBS", "the observers grouped by kept block"),
         (SK_S_OFF, "SK_S_OFF", "per kept block: its scalar offset in the reduced vector"),
         (SK_ORIG_OFF, "SK_ORIG_OFF", "per kept block: its scalar offset in the step"),
         (SK_W, "SK_W", "per kept block: its width"),
     ];
-    crate::plan_sections(words, SHEADER, &slots)
+    let mut sections = crate::plan_sections(words, SHEADER, &slots);
+    for s in &mut sections {
+        match s.name.as_str() {
+            "SE" => s.record = SE_REC,
+            "SO" => s.record = SO_REC,
+            "SP" => s.record = SP_REC,
+            _ => {}
+        }
+    }
+    sections
 }
 
 /// Per kept block, the tiles of S touching it, for `k_symv_sub`: `(ptr, tiles)`
@@ -1335,18 +1382,21 @@ fn defines(p: &SchurPlan, lanes: u32, tile_warps: u32, tile_groups: u32) -> Stri
             ("EW", p.ew_cap),
             ("KW", p.kw_cap),
             ("ACC", tile_acc(p.kw_max, lanes, tile_groups)),
+            ("SE", SE),
+            ("SE_REC", SE_REC),
             ("SE_DIAG_OFF", SE_DIAG_OFF),
             ("SE_W", SE_W),
             ("SE_ORIG_OFF", SE_ORIG_OFF),
             ("SE_OBS_PTR", SE_OBS_PTR),
             ("SE_DFAC_OFF", SE_DFAC_OFF),
             ("SE_Z_OFF", SE_Z_OFF),
+            ("SO", SO),
+            ("SO_REC", SO_REC),
+            ("SO_W_OFF", SO_W_OFF),
+            ("SO_DIMS", SO_DIMS),
             ("SO_CA_OFF", SO_CA_OFF),
-            ("SO_TRANS", SO_TRANS),
-            ("SO_W", SO_W),
             ("SO_E", SO_E),
             ("SO_ORIG_OFF", SO_ORIG_OFF),
-            ("SO_W_OFF", SO_W_OFF),
             ("ST_VAL_OFF", ST_VAL_OFF),
             ("ST_WR", ST_WR),
             ("ST_WC", ST_WC),
@@ -1354,6 +1404,8 @@ fn defines(p: &SchurPlan, lanes: u32, tile_warps: u32, tile_groups: u32) -> Stri
             ("ST_B", ST_B),
             ("ST_COPY_OFF", ST_COPY_OFF),
             ("ST_PAIR_PTR", ST_PAIR_PTR),
+            ("SP", SP),
+            ("SP_REC", SP_REC),
             ("SP_OA", SP_OA),
             ("SP_OB", SP_OB),
             ("SK_OBS_PTR", SK_OBS_PTR),
@@ -1746,6 +1798,49 @@ mod tests {
                     let es = err_max(&g.download().unwrap().0, s_cpu.vals());
                     assert!(es < 1e-12, "{wide:?}, tiles over {split_pairs} pairs split, {groups} groups: S err/max {es}");
                 }
+            }
+        }
+    }
+
+    /// The plan's tables: a record per eliminated block and one more for
+    /// the end of the last one's observers; a record per observer, its
+    /// sizes in one word; a record per pair, its observers of one
+    /// eliminated block and of its tile's row and column blocks.
+    #[test]
+    fn the_plan_holds_a_record_per_block_observer_and_pair() {
+        assert_eq!(so_dims(9, 3, true), 0x10309);
+        assert_eq!(so_dims(6, 3, false), 0x306);
+        let (h, _, _, elim) = ba_like(10, 30, 2);
+        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
+        let p = SchurPlan::reduction(&sym, h.symbolic());
+        let (ne, no, nt, np) = (p.ne as usize, p.no as usize, p.nt as usize, sym.pair_count());
+        let w = &p.words;
+        let se = &w[w[SE] as usize..][..SE_REC * (ne + 1)];
+        let so = &w[w[SO] as usize..][..SO_REC * no];
+        let sp = &w[w[SP] as usize..][..SP_REC * np];
+        for (e, r) in se.chunks_exact(SE_REC).enumerate() {
+            assert_eq!(r[SE_OBS_PTR], sym.elim_obs_ptr()[e]);
+            if e < ne {
+                assert_eq!(r[SE_W], sym.elim_w()[e]);
+            }
+        }
+        assert_eq!(se[SE_REC * ne + SE_OBS_PTR] as usize, no, "the record past the last block: the observers' end");
+        let mut w_len = 0;
+        for (o, r) in so.chunks_exact(SO_REC).enumerate() {
+            let e = r[SO_E] as usize;
+            assert!((se[SE_REC * e + SE_OBS_PTR]..se[SE_REC * (e + 1) + SE_OBS_PTR]).contains(&(o as u32)), "observer {o} is one of block {e}'s");
+            assert_eq!(r[SO_DIMS], so_dims(sym.obs_w()[o], sym.elim_w()[e], sym.obs_trans()[o]));
+            assert_eq!((r[SO_CA_OFF], r[SO_ORIG_OFF], r[SO_W_OFF]), (sym.obs_ca_off()[o], sym.obs_orig_off()[o], w_len));
+            w_len += sym.obs_w()[o] * sym.elim_w()[e];
+        }
+        let at = |slot: usize| &w[w[slot] as usize..];
+        let (ptr, a, b) = (at(ST_PAIR_PTR), at(ST_A), at(ST_B));
+        assert_eq!((ptr[0], ptr[nt] as usize), (0, np));
+        for t in 0..nt {
+            for r in sp[SP_REC * ptr[t] as usize..SP_REC * ptr[t + 1] as usize].chunks_exact(SP_REC) {
+                let (oa, ob) = (r[SP_OA] as usize, r[SP_OB] as usize);
+                assert_eq!(so[SO_REC * oa + SO_E], so[SO_REC * ob + SO_E], "a pair's observers observe one eliminated block");
+                assert_eq!((sym.obs_kept()[oa], sym.obs_kept()[ob]), (a[t], b[t]), "tile {t}'s pair: its row block's observer, its column block's");
             }
         }
     }

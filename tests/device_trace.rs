@@ -220,7 +220,15 @@ fn a_traced_solve_names_its_phases_blocks_and_accesses() {
     for name in ["factor.plan", "factor.work", "schur.plan", "schur.work", "image", "lm"] {
         assert!(described.contains_key(name), "the block `{name}` is described: {described:?}");
     }
-    assert!(described["image"] > 20 && described["schur.plan"] > 20, "the image's columns and the plan's arrays are sections: {described:?}");
+    assert!(described["image"] > 20 && described["schur.plan"] > 15, "the image's columns and the plan's tables and arrays are sections: {described:?}");
+
+    // the reduction's plan: its eliminated blocks, observers and pairs are
+    // tables of records
+    let plan = lines.iter().find(|l| kind(l) == "describe" && l.contains("\"name\":\"schur.plan\",\"sections\"")).expect("the reduction's plan is described");
+    for (table, record) in [("SE", 6), ("SO", 5), ("SP", 2)] {
+        let s = plan.split("{\"name\":\"").find(|s| s.starts_with(&format!("{table}\""))).unwrap_or_else(|| panic!("the plan has the table {table}"));
+        assert!(s.contains(&format!("\"record\":{record},")), "{table} is records of {record} words: {s}");
+    }
 
     // an index section's words are in the trace: a tile column is records of
     // three words, classified, its first and last words kept

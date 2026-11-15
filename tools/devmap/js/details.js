@@ -494,7 +494,7 @@
   // Computable index words
   // ------------------------------------------------------------------
 
-  // "= 9 x schur.plan.SO_E": what a sequence's words are of another's.
+  // "= 9 x schur.plan.SO field 3": what a sequence's words are of another's.
   function copyEl(c, o) {
     return h("span", { cls: "cmp-copy", tip: DM.fmtInt(c.n) + " words equal to " + (o.times ? o.times + "those" : "those") + " of " + o.S.qname + (o.field >= 0 ? ", field " + o.field + " of its records" : "") },
       (c.field >= 0 ? "field " + c.field + " " : "") + "= " + o.times, DM.link.section(o.S), o.field >= 0 ? " field " + o.field : null);
