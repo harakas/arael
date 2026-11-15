@@ -156,12 +156,13 @@ fn print_header(rounds: usize, only: &Option<String>, systems: &Option<String>,
             } else {
                 "fixed ladder"
             }))
-        // SolveOrdering::Auto resolves to AMD on this problem, so its Debug name
-        // would say less than the ordering it picks.
-        .line("arael schur ordering", format!("{} [BAL_ORDERING=amd]",
+        .line("arael schur ordering", format!("{} [BAL_ORDERING: nd|auto|amd|natural]",
             match arael_runner::schur_ordering() {
                 arael::simple_lm::SolveOrdering::NestedDissection => "nested dissection",
-                _ => "AMD",
+                arael::simple_lm::SolveOrdering::Amd => "AMD",
+                arael::simple_lm::SolveOrdering::Natural => "natural order",
+                // the rule names its choice per dataset in the verbose output
+                _ => "arael's rule (natural where S is dense or banded, else AMD)",
             }))
         .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",
             cfg.abs_precision, cfg.rel_precision, cfg.patience, cfg.min_iters))

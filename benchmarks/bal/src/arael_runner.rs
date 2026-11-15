@@ -181,15 +181,21 @@ impl Route {
     }
 }
 
-/// Elimination ordering for the reduced camera system. Nested dissection by
+/// Elimination ordering for the reduced camera system:
+/// `BAL_ORDERING=nd|auto|amd|natural`. Nested dissection (`nd`) by
 /// default: a 3D point makes a clique of the cameras that see it, and AMD
 /// drowns in cliques -- at Ladybug-1723 it factorizes S in 1508 ms against
-/// AMD's 4730. `amd` is the only value read; anything else is the default.
+/// AMD's 4730. `auto` is arael's own rule (the natural order where S is
+/// dense or banded, AMD otherwise); `amd` and `natural` name one. A typo is
+/// an error.
 pub fn schur_ordering() -> arael::simple_lm::SolveOrdering {
-    if std::env::var("BAL_ORDERING").as_deref() == Ok("amd") {
-        arael::simple_lm::SolveOrdering::Auto
-    } else {
-        arael::simple_lm::SolveOrdering::NestedDissection
+    use arael::simple_lm::SolveOrdering as O;
+    match std::env::var("BAL_ORDERING").as_deref() {
+        Err(_) | Ok("nd") => O::NestedDissection,
+        Ok("auto") => O::Auto,
+        Ok("amd") => O::Amd,
+        Ok("natural") => O::Natural,
+        Ok(other) => panic!("BAL_ORDERING: expected nd, auto, amd or natural, got {:?}", other),
     }
 }
 
