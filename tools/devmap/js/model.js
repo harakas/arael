@@ -16,9 +16,13 @@
 //               ty, role, group, doc, touches[A], uses[{T, G}], edges[E], tot, flags
 //   P  phase    id, title, doc, times, variants, steps[T], tot
 //   T  step     id, kind, phase, idx, scope[], scopeKey, label, acc[A], flags,
-//               edgesIn[E], edgesOut[E], time;
+//               edgesIn[E], edgesOut[E], time, n (its place among the phase's
+//               operations, or null; DM.callsOf lists them in order);
 //               launch: kernel, kname, launches, grid, threads, shared, geoms, lane,
-//                       graph, interleaved, args[G], rBytes, wBytes, rN, wN, rUnk, wUnk
+//                       graph, interleaved, args[G], rBytes, wBytes, rN, wN, rUnk, wUnk,
+//                       runs (null, or of a step of several launches: vary[G], the
+//                       arguments that differ, and list[{n, grid, threads, time, v[]}],
+//                       v a value per vary: {value} or {S, at, off})
 //               upload / download: S (the first section), target (text), bytes, at, via
 //   G  argument param, def (Q), S, at, off, value, mismatch ("", "type", "role", "untyped")
 //   A  access   T, S, src (measured, static, args, host), r, w, host, derived, maybeR
@@ -65,6 +69,28 @@
     var g = !T.grid.length ? "?" : T.grid.length === 1 ? String(T.grid[0]) : "(" + T.grid.join(",") + ")";
     var t = !T.threads.length ? "?" : T.threads.length === 1 ? String(T.threads[0]) : "(" + T.threads.join(",") + ")";
     return g + " x " + t;
+  };
+
+  // The operations (launches and copies) of one occurrence of the phase P
+  // in execution order: { T, r, i, n } each, r one launch of a step of
+  // several (i its index among them) or null, n its place from 0. null when
+  // the case does not say the places.
+  DM.callsOf = function (P) {
+    var out = [], known = true;
+    P.steps.forEach(function (T) {
+      if (T.runs) {
+        T.runs.list.forEach(function (r, i) {
+          if (r.n === null) known = false;
+          out.push({ T: T, r: r, i: i, n: r.n });
+        });
+      } else {
+        if (T.n === null || T.launches > 1) known = false;
+        out.push({ T: T, r: null, i: 0, n: T.n });
+      }
+    });
+    if (!known) return null;
+    out.sort(function (a, b) { return a.n - b.n; });
+    return out;
   };
 
   // grid x threads multiplied out, or null.
@@ -465,6 +491,23 @@
     }
   }
 
+  // One launch's value of the argument G: a scalar's text, or for a pointer
+  // (a byte offset in G's block, or [block, offset]) its section S and the
+  // offset `off` in it; `at` the offset in the block.
+  function runValue(M, G, x) {
+    var out = { value: null, S: null, at: null, off: null };
+    if (!given(x)) return out;
+    if (G && G.S || Array.isArray(x)) {
+      var block = Array.isArray(x) ? x[0] : G.S.block.id;
+      out.at = num(Array.isArray(x) ? x[1] : x, null);
+      out.S = sectionAt(M, block, out.at);
+      if (out.S) out.off = out.at - out.S.at;
+    } else {
+      out.value = String(x);
+    }
+    return out;
+  }
+
   function initLaunch(M, T, t) {
     T.kname = str(t.kernel, "");
     if (T.kname) {
@@ -497,6 +540,17 @@
       }
       T.args.push(G);
     });
+
+    // A step of several launches: each one. vary: the arguments (G) that
+    // differ between them; a launch's v: their values, a pointer's as the
+    // section it lands in and its offset there.
+    if (isObj(t.runs) && Array.isArray(t.runs.list) && t.runs.list.length) {
+      var vary = arr(t.runs.vary).map(function (i) { return T.args[i] || null; });
+      T.runs = { vary: vary, list: t.runs.list.filter(isObj).map(function (r) {
+        return { n: num(r.n, null), grid: arr(r.grid), threads: arr(r.threads), time: num(r.time_us, null),
+                 v: vary.map(function (G, j) { return runValue(M, G, arr(r.v)[j]); }) };
+      }) };
+    }
 
     if (Array.isArray(t.access)) {
       t.access.forEach(function (a) {
@@ -578,9 +632,9 @@
     if (!scope.length) scope = [P.id];
     var T = { id: id, kind: str(t.kind, "launch"), raw: t, phase: P, idx: M.steps.length, pidx: ti,
               scope: scope, scopeKey: scope.join("/"), label: "", flags: [], edgesIn: [], edgesOut: [], acc: [],
-              time: num(t.time_us, null),
+              time: num(t.time_us, null), n: num(t.n, null),
               kernel: null, kname: "", launches: 1, grid: [], threads: [], shared: null, geoms: 1, lane: "", graph: false,
-              interleaved: false, args: [],
+              interleaved: false, args: [], runs: null,
               rBytes: 0, wBytes: 0, rN: 0, wN: 0, rUnk: 0, wUnk: 0,
               S: null, bytes: 0, at: null, via: "", target: "" };
     if (T.time !== null) M.hasTime = true;

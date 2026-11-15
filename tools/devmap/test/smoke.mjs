@@ -25,7 +25,7 @@ const shots = arg('shots', 'first');
 const only = arg('cases', '');
 fs.mkdirSync(out, { recursive: true });
 
-const views = ['overview', 'shares', 'pipeline', 'matrix', 'memory', 'kernels', 'findings'];
+const views = ['overview', 'shares', 'pipeline', 'sequence', 'matrix', 'memory', 'kernels', 'findings'];
 const problems = [];
 const browser = await chromium.launch();
 
@@ -90,6 +90,31 @@ for (const scheme of ['light', 'dark']) {
             await strip(`${id} values of ${s.name}`);
             if (wanted) await page.screenshot({ path: path.join(out, `${id}-values-${s.kind}-${scheme}.png`) });
         }
+        // a step of several launches lists each one in its details: a row a launch, and on a
+        // timed case their times and the total; a generated case has the list for every such step
+        const multi = await page.evaluate(() => {
+            const c = DEVMAP.cases.find(c => c.id === DM.state.caseId);
+            const steps = c.phases.flatMap(p => p.steps).filter(s => s.kind === 'launch');
+            const bad = steps.filter(s => s.runs ? s.runs.list.length !== s.launches : s.launches > 1 && c.id !== 'sample').map(s => s.id);
+            const most = steps.filter(s => s.runs).sort((a, b) => b.launches - a.launches)[0];
+            return { bad, most: most ? { id: most.id, kernel: most.kernel, launches: most.launches, vary: most.runs.vary.length,
+                                         timed: most.runs.list.some(r => 'time_us' in r),
+                                         threads: new Set(most.runs.list.map(r => r.threads.join(','))).size > 1 } : null };
+        });
+        if (multi.bad.length) problems.push(`${id}: steps of several launches without one entry a launch: ${multi.bad.join(' ')}`);
+        if (multi.most) {
+            const m = multi.most;
+            await page.evaluate(x => DM.select(x), 'step:' + m.id);
+            await page.waitForTimeout(50);
+            const got = await page.evaluate(() => ({ rows: document.querySelectorAll('#det-body table.runs tr').length,
+                                                     cols: document.querySelectorAll('#det-body table.runs tr:first-child th').length }));
+            const want = { rows: m.launches + 1 + (m.timed ? 1 : 0), cols: 3 + (m.threads ? 1 : 0) + m.vary + (m.timed ? 2 : 0) };
+            if (got.rows !== want.rows || got.cols !== want.cols) {
+                problems.push(`${id}: ${m.kernel} [${m.id}] x${m.launches}: the launches table is ${got.rows} rows of ${got.cols} columns, expected ${want.rows} of ${want.cols}`);
+            }
+            await strip(`${id} launches of ${m.kernel}`);
+            if (wanted) await page.screenshot({ path: path.join(out, `${id}-launches-${scheme}.png`) });
+        }
         for (const view of views) {
             await page.evaluate(v => DM.setView(v), view);
             await page.waitForTimeout(150);
@@ -108,6 +133,21 @@ for (const scheme of ['light', 'dark']) {
             for (const s of sels) {
                 await page.evaluate(x => DM.select(x), s);
                 await strip(`${id} ${view} select ${s}`);
+            }
+            // the Sequence view lists every operation of every phase, a row each, numbered in
+            // order from 1 in each phase; selecting a step marks all its launches
+            if (view === 'sequence') {
+                if (multi.most) await page.evaluate(x => DM.select(x), 'step:' + multi.most.id);
+                const seq = await page.evaluate(() => {
+                    const c = DEVMAP.cases.find(c => c.id === DM.state.caseId);
+                    const tables = [...document.querySelectorAll('#view-body table.seq')];
+                    return { want: c.phases.flatMap(p => p.steps).reduce((n, s) => n + (s.kind === 'launch' ? s.launches : 1), 0),
+                             rows: document.querySelectorAll('#view-body table.seq tbody tr').length, tables: tables.length, phases: c.phases.length,
+                             ordered: tables.every(t => [...t.querySelectorAll('tbody tr')].every((tr, i) => Number(tr.firstChild.textContent) === i + 1)),
+                             marked: document.querySelectorAll('#view-body table.seq tbody tr.sel').length };
+                });
+                if (seq.rows !== seq.want || seq.tables !== seq.phases || !seq.ordered) problems.push(`${id}: the sequence: ${JSON.stringify(seq)}`);
+                if (multi.most && seq.marked !== multi.most.launches) problems.push(`${id}: the sequence marks ${seq.marked} rows of ${multi.most.kernel} x${multi.most.launches}`);
             }
             if (shots === 'all' || (shots === 'first' && (ci === 0 || id.includes('slam-120-f32') || id.includes('372-f32')))) {
                 await page.screenshot({ path: path.join(out, `${id}-${view}-${scheme}.png`) });

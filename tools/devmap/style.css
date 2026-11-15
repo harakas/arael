@@ -669,3 +669,20 @@ table.mx { border-collapse: separate; border-spacing: 0; table-layout: fixed; fo
 .sh-track { display: inline-block; width: 56px; height: 8px; vertical-align: middle; }
 .sh-track i { display: block; height: 8px; min-width: 1px; border-radius: 0 4px 4px 0; background: rgb(var(--hue)); }
 .sh-more { margin-top: 4px; }
+
+/* the Sequence view: a phase's operations in execution order */
+.seq-wrap { padding: 0 10px 40px; }
+.seq-title { margin: 14px 0 4px; font-size: 13px; }
+table.seq td, table.seq th { white-space: nowrap; }
+table.seq th { position: sticky; top: 0; z-index: 2; padding-top: 6px; }
+table.seq tbody tr { cursor: pointer; }
+table.seq tbody tr:hover td { background: var(--hl); }
+table.seq tbody tr.sel td { background: var(--sel-bg); }
+table.seq tr.seq-copy td { font-style: italic; }
+.seq-diff { max-width: 520px; overflow: hidden; text-overflow: ellipsis; }
+
+/* a step's launches one by one (the details panel) */
+.runs-scroll { max-height: 420px; overflow-y: auto; }
+table.runs td, table.runs th { white-space: nowrap; }
+table.runs th { position: sticky; top: 0; }
+.run-bar { background: var(--ink-2); }

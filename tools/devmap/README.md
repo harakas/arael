@@ -19,7 +19,15 @@ top left; generate the cases first (Regenerating, about 16 minutes).
   timed case (a GPU's), or the bytes read or written on a probed one.
 - Pipeline: the steps of a phase in order, with the dataflow between them.
   Click a step for the kernel's documentation, arguments, measured
-  accesses and source.
+  accesses and source. A step of several launches (`k_syrk x93`) lists
+  each one under Launches: its place in the phase, its grid, the
+  arguments that differ between them and, on a timed case, its time.
+- Sequence: the launches and host copies of a phase one by one, in the
+  order one occurrence of the phase issues them (the Pipeline shows a
+  kernel's launches as one step): the kernel with its number among its
+  step's launches, its stage, its grid, the arguments that differ between
+  the step's launches, and on a timed case its time and the device time
+  elapsed. Click a row: all the launches of its step are marked.
 - Access matrix: steps against sections: who reads and writes what, when.
 - Memory: every device block cut into its named sections, by type. The
   column `computable` says of an index section (u32, u64) what a kernel

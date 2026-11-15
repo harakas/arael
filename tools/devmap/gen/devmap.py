@@ -624,11 +624,15 @@ def build_case(args):
                 "threads": [t for t in it["threads"] if t > 1] or [1], "shared": it["shared"], "geoms": {(tuple(it["grid"]), tuple(it["threads"]))},
                 "lane": it["lane"], "graph": it["graph"], "args": sargs, "access": access,
                 # microseconds of the step's launches together, when the trace timed them
-                "time": it.get("us")}
+                "time": it.get("us"),
+                # the step's launches one by one (n: the launch's place among its occurrence's, set by steps_of)
+                "runs": [{"n": 0, "grid": [g for g in it["grid"] if g > 1] or [1], "threads": [t for t in it["threads"] if t > 1] or [1],
+                          "args": it["args"], "time": it.get("us")}]}
 
     def merge(a, c):
         a["time"] = a["time"] + c["time"] if a["time"] is not None and c["time"] is not None else None
         a["launches"] += c["launches"]
+        a["runs"] += c["runs"]
         a["geoms"] |= c["geoms"]
         a["graph"] = a["graph"] or c["graph"]
         for key, e in c["access"].items():
@@ -639,7 +643,14 @@ def build_case(args):
                 a["access"][key] = e
 
     def steps_of(occ):
-        raw = [raw_step(it) for it in occ]
+        # n: an operation's place (a launch or a copy) among its occurrence's; a merged step keeps its first's
+        raw = []
+        for n, it in enumerate(occ):
+            s = raw_step(it)
+            s["n"] = n
+            if s["kind"] == "launch":
+                s["runs"][0]["n"] = n
+            raw.append(s)
         merged = []
         for s in raw:
             if merged and s["kind"] == "launch" and merged[-1]["kind"] == "launch" and merged[-1]["kernel"] == s["kernel"] and merged[-1]["scope"] == s["scope"]:
@@ -670,6 +681,24 @@ def build_case(args):
                 j = i + 1
             i = j
         return out
+
+    def runs_of(runs):
+        """A merged step's launches for the case: the arguments that differ between them (`vary`,
+        indices into the step's args), and per launch its place among the occurrence's operations,
+        its geometry, those arguments' values (a pointer: its byte offset in the block, or
+        [block, offset] in another block than the first launch's) and its time."""
+        first = runs[0]["args"]
+        vary = [i for i in range(len(first)) if any(i >= len(r["args"]) or r["args"][i] != first[i] for r in runs)]
+
+        def value(a, base):
+            if "b" in a:
+                return a["at"] if a["b"] == base.get("b") else [a["b"], a["at"]]
+            return str(next(iter(a.values())))
+
+        return {"vary": vary,
+                "list": [{"n": r["n"], "grid": r["grid"], "threads": r["threads"],
+                          "v": [value(r["args"][i], first[i]) if i < len(r["args"]) else None for i in vary],
+                          **({"time_us": round(r["time"], 3)} if r["time"] is not None else {})} for r in runs]}
 
     def signature(steps):
         return tuple((s["kind"], s.get("kernel"), tuple(s["scope"]), s.get("block"), s.get("section"), s.get("launches")) for s in steps)
@@ -728,17 +757,30 @@ def build_case(args):
         for steps in phase_occ[name]:
             variants.setdefault(signature(steps), []).append(steps)
         if name == "setup":
-            # the setup's parts are separate occurrences: one phase of all of them
-            steps = [s for part in phase_occ[name] for s in part]
+            # the setup's parts are separate occurrences: one phase of all of them,
+            # its operations numbered through
+            steps, at = [], 0
+            for part in phase_occ[name]:
+                for s in part:
+                    s["n"] += at
+                    for r in s.get("runs", []):
+                        r["n"] += at
+                    steps.append(s)
+                at += sum(len(s.get("runs", [0])) for s in part)
             times, nvar = 1, 1
         else:
             best = max(variants.values(), key=len)
             steps, times, nvar = best[-1], len(phase_occ[name]), len(variants)
-            # a step's time: its mean over the occurrences of this sequence
+            # a step's time, and each of its launches': the mean over the occurrences of this sequence
             for i, s in enumerate(steps):
                 took = [occ[i]["time"] for occ in best if occ[i].get("time") is not None]
                 if took:
                     s["time"] = sum(took) / len(took)
+                for j, r in enumerate(s.get("runs", [])):
+                    took = [occ[i]["runs"][j]["time"] for occ in best if occ[i]["runs"][j]["time"] is not None]
+                    if took:
+                        r = s["runs"][j] = dict(r)
+                        r["time"] = sum(took) / len(took)
         out_steps = []
         for s in steps:
             s = dict(s)
@@ -750,6 +792,9 @@ def build_case(args):
                 took = s.pop("time", None)
                 if took is not None:
                     s["time_us"] = round(took / s["launches"], 3)
+                runs = s.pop("runs")
+                if len(runs) > 1:
+                    s["runs"] = runs_of(runs)
                 acc = []
                 for (bid, sec), e in s["access"].items():
                     elem = by_id[bid]["sections"][sec]["elem"] if sec < len(by_id[bid]["sections"]) else 4

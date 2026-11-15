@@ -296,7 +296,7 @@
       ["geometry", geo ? geo + (n !== null ? " = " + DM.fmtInt(n) + " threads" : "") + "  (grid x threads)" : null],
       ["shared", T.shared !== null ? DM.fmtInt(T.shared) + " bytes" : null],
       ["launches", DM.fmtInt(T.launches) + " per occurrence, x" + DM.fmtInt(P.times) + " = " + DM.fmtInt(T.launches * P.times) + " in the solve" +
-        (T.geoms > 1 ? "; " + T.geoms + " distinct geometries (the first is shown)" : "")],
+        (T.geoms > 1 ? "; " + T.geoms + " distinct geometries (the first is shown" + (T.runs ? ", each launch is under Launches)" : ")") : "")],
       ["lane", (T.lane || "-") + (T.graph ? ", inside a captured graph" : "")],
       ["interleaved", T.interleaved ? "its launches alternate with other kernels'; they are merged into one step per kernel, in first-launch order" : null],
       ["time", T.time !== null ? DM.fmtTime(T.time) + " per launch, " + DM.fmtTime(T.time * T.launches * P.times) + " in the solve" : null],
@@ -333,6 +333,8 @@
       sa.appendChild(h("div", { cls: "tscroll" }, ta));
     }
 
+    if (T.runs) launchRows(root, T);
+
     if (T.acc.length) {
       var srcs = [];
       T.acc.forEach(function (A) { if (srcs.indexOf(A.src) < 0) srcs.push(A.src); });
@@ -350,6 +352,47 @@
     if (K && K.source) {
       root.appendChild(fold("Kernel source" + (K.file ? "  " + K.file + (K.line ? ":" + K.line : "") : ""), h("pre", { cls: "src" }, K.source), false));
     }
+  }
+
+  // The launches of a step of several, in execution order: each one's place
+  // among the phase's launches, its geometry, the arguments that differ
+  // between them and, on a timed case, its time and share of the step's.
+  function launchRows(root, T) {
+    var R = T.runs, total = 0, top = 0, timed = false, threads = {};
+    R.list.forEach(function (r) {
+      if (r.time !== null) { timed = true; total += r.time; top = Math.max(top, r.time); }
+      threads[r.threads.join(",")] = true;
+    });
+    var manyThreads = Object.keys(threads).length > 1;
+    var names = R.vary.map(function (G) { return G ? G.param : "?"; });
+    var s = sect(root, "Launches", R.list.length + (names.length ? ", differing in " + names.join(", ") : ", the same arguments"));
+    var head = h("tr", null, th("#"), th("at", "its place among the phase's operations (launches and copies), in execution order, from 1: the Sequence view lists them"),
+      th("grid", "blocks"), manyThreads ? th("threads", "threads a block") : null);
+    R.vary.forEach(function (G, j) { head.appendChild(th(names[j], "this launch's value of the argument")); });
+    if (timed) {
+      head.appendChild(th("time", "the launch's mean device time over the phase's occurrences"));
+      head.appendChild(th("of the step", "its share of the step's time, and a bar of it against the longest launch"));
+    }
+    var t = h("table", { cls: "grid runs" }, head);
+    R.list.forEach(function (r, i) {
+      var tr = h("tr", null, h("td", { cls: "numc dim" }, String(i + 1)), h("td", { cls: "numc" }, r.n !== null ? String(r.n + 1) : "-"),
+        h("td", { cls: "numc" }, r.grid.join(" x ")), manyThreads ? h("td", { cls: "numc" }, r.threads.join(" x ")) : null);
+      r.v.forEach(function (x) {
+        tr.appendChild(x.S ? h("td", null, DM.link.section(x.S), x.off ? h("span", { cls: "dim" }, " +" + DM.fmtInt(x.off)) : null)
+          : h("td", { cls: "numc" }, x.value !== null ? x.value : x.at !== null ? "+" + DM.fmtInt(x.at) : "-"));
+      });
+      if (timed) {
+        tr.appendChild(h("td", { cls: "numc" }, r.time !== null ? DM.fmtTime(r.time) : "-"));
+        tr.appendChild(h("td", { cls: "sh-bar" }, h("span", { cls: "sh-pct" }, r.time !== null && total > 0 ? DM.fmtPct(r.time / total) : "-"),
+          h("span", { cls: "sh-track" }, h("i", { cls: "run-bar", style: "width:" + (r.time !== null && top > 0 ? 100 * r.time / top : 0).toFixed(1) + "%" }))));
+      }
+      t.appendChild(tr);
+    });
+    if (timed) {
+      var cells = 3 + (manyThreads ? 1 : 0) + R.vary.length;
+      t.appendChild(h("tr", { cls: "total" }, h("td", { colspan: String(cells) }, "all " + R.list.length), h("td", { cls: "numc" }, DM.fmtTime(total)), h("td", null, "")));
+    }
+    s.appendChild(h("div", { cls: "tscroll runs-scroll" }, t));
   }
 
   // ------------------------------------------------------------------

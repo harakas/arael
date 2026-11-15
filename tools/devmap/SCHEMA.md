@@ -144,6 +144,9 @@ A STEP is one of:
 // kernel launches: consecutive launches of one kernel in one scope are one step
 { id: "s15", kind: "launch", kernel: "k_schur_w",
   scope: ["attempt", "reduce"],   // the scope path, the phase first
+  n: 4,                           // optional, every kind of step: its place among the operations (launches
+                                  // and copies) of one occurrence of the phase, from 0; a step of several
+                                  // launches: its first's (each launch's is in runs)
   launches: 1,                    // launches merged into this step
   grid: [31], threads: [256], shared: 0,   // geometry of the first launch
   geoms: 1,                       // distinct geometries among the merged launches
@@ -162,8 +165,18 @@ A STEP is one of:
            pattern: "serial" },   // coalesced, serial, gather, scatter, broadcast, strided, mixed
       w: null }
   ],
-  time_us: 12.5 }                 // optional (a timed trace): the mean device time of one of its
+  time_us: 12.5,                  // optional (a timed trace): the mean device time of one of its
                                   // launches, in microseconds, over the phase's occurrences
+  // optional, a step of several launches: each one, in execution order
+  runs: {
+    vary: [1, 2],                 // indices into args: the arguments that differ between the launches
+    list: [
+      { n: 11,                    // the launch's place among the phase occurrence's operations, from 0
+        grid: [51], threads: [256],
+        v: [945664, "0"],         // its values of the `vary` arguments: a scalar's text; a pointer's byte
+                                  // offset in the block, or [block, offset] in another block than args'
+        time_us: 13.9 }           // optional: its mean device time over the phase's occurrences
+    ] } }
 
 // host to device copy
 { id: "s3", kind: "upload", scope: ["start"], block: 4, section: 1, at: 16, bytes: 19332,
