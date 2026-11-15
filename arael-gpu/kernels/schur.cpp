@@ -286,7 +286,6 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const V* 
     u32 o_ew = plan[SE_W];
     u32 o_ca = plan[SO_CA_OFF];
     u32 o_trans = plan[SO_TRANS];
-    u32 o_ow = plan[SO_W];
     u32 o_e = plan[SO_E];
     u32 o_woff = plan[SO_W_OFF];
     u32 o_oa = plan[SP_OA];
@@ -333,6 +332,7 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const V* 
         u32 woff = 0u;
         u32 cb = 0u;
         u32 tb = 0u;
+        // ob observes the tile's column block: C_ob has wc rows
         u32 wb = 0u;
         if (p < p1) {
             u32 oa = plan[o_oa + p];
@@ -341,7 +341,7 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const V* 
             woff = plan[o_woff + oa];
             cb = plan[o_ca + ob];
             tb = plan[o_trans + ob];
-            wb = plan[o_ow + ob];
+            wb = wc;
         }
         // the step's widest pair, uniform in the unit (one group's too, for
         // the compiler): the products' columns
@@ -512,7 +512,8 @@ KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL co
     if (gate[0] == 0) return;
     u32 k = block_x();
     u32 lane = thread_x();
-    u32 k_off = plan[plan[SK_S_OFF] + k];
+    u32 o_soff = plan[SK_S_OFF];
+    u32 k_off = plan[o_soff + k];
     u32 wk = plan[plan[SK_W] + k];
     W acc[KW];
 #pragma unroll
@@ -527,7 +528,7 @@ KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL co
         u32 b = plan[plan[ST_B] + t];
         if (transposed == 0) {
             // rows of (k, b): S_kb x_b, a diagonal tile read from its upper triangle
-            u32 b_off = plan[plan[ST_B_OFF] + t];
+            u32 b_off = plan[o_soff + b];
 #pragma unroll
             for (u32 i = 0; i < KW; i++) {
                 if (i < wk) {
@@ -538,7 +539,7 @@ KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL co
             }
         } else {
             // rows of (a, k)^T: S_ak^T x_a
-            u32 a_off = plan[plan[ST_A_OFF] + t];
+            u32 a_off = plan[o_soff + a];
 #pragma unroll
             for (u32 j = 0; j < KW; j++) {
                 if (j < wk) {

@@ -60,20 +60,18 @@ pub(crate) const ST_WR: usize = 13;
 pub(crate) const ST_WC: usize = 14;
 pub(crate) const ST_A: usize = 15;
 pub(crate) const ST_B: usize = 16;
-pub(crate) const ST_A_OFF: usize = 17;
-pub(crate) const ST_B_OFF: usize = 18;
-pub(crate) const ST_COPY_OFF: usize = 19;
-pub(crate) const ST_PAIR_PTR: usize = 20;
-pub(crate) const SP_OA: usize = 21;
-pub(crate) const SP_OB: usize = 22;
-pub(crate) const SK_OBS_PTR: usize = 23;
-pub(crate) const SK_OBS: usize = 24;
-pub(crate) const SK_S_OFF: usize = 25;
-pub(crate) const SK_ORIG_OFF: usize = 26;
-pub(crate) const SK_W: usize = 27;
+pub(crate) const ST_COPY_OFF: usize = 17;
+pub(crate) const ST_PAIR_PTR: usize = 18;
+pub(crate) const SP_OA: usize = 19;
+pub(crate) const SP_OB: usize = 20;
+pub(crate) const SK_OBS_PTR: usize = 21;
+pub(crate) const SK_OBS: usize = 22;
+pub(crate) const SK_S_OFF: usize = 23;
+pub(crate) const SK_ORIG_OFF: usize = 24;
+pub(crate) const SK_W: usize = 25;
 /// The blocks of `k_schur_tiles` ([`tile_blocks`]), added by
 /// [`GpuSchur`]'s build.
-pub(crate) const SB_ITEMS: usize = 28;
+pub(crate) const SB_ITEMS: usize = 26;
 pub(crate) const SHEADER: usize = 32;
 
 /// How [`GpuSchur`] cuts the forming of S (`k_schur_tiles`), whose
@@ -345,7 +343,8 @@ impl SchurPlan {
         for (&src, &dst) in csrc.iter().zip(cdst) {
             copy_of[dst as usize] = hsym.val_range(src as usize).start as u32;
         }
-        let (mut t_val, mut t_wr, mut t_wc, mut t_a, mut t_b, mut t_aoff, mut t_boff, mut t_copy) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        // a tile's blocks' offsets in the reduced vector are the kept blocks' (SK_S_OFF of ST_A and ST_B)
+        let (mut t_val, mut t_wr, mut t_wc, mut t_a, mut t_b, mut t_copy) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for bcol in 0..ssym.nblk_cols() {
             for t in ssym.col_range(bcol) {
                 // a tile's index in these arrays is its block index in S
@@ -358,8 +357,6 @@ impl SchurPlan {
                 t_wc.push(wc as u32);
                 t_a.push(a as u32);
                 t_b.push(bcol as u32);
-                t_aoff.push(spart[a]);
-                t_boff.push(spart[bcol]);
                 t_copy.push(copy_of[t]);
             }
         }
@@ -417,7 +414,7 @@ impl SchurPlan {
         let k_w: Vec<u32> = (0..nk).map(|k| spart[k + 1] - spart[k]).collect();
         // pack, the pairs' observers written in place by their tile
         let mut buf: Vec<u32> = vec![0; SHEADER];
-        let arrays: [(usize, &[u32]); 21] = [
+        let arrays: [(usize, &[u32]); 19] = [
             (SE_DIAG_OFF, &e_diag),
             (SE_W, &e_w),
             (SE_ORIG_OFF, &e_orig),
@@ -435,8 +432,6 @@ impl SchurPlan {
             (ST_WC, &t_wc),
             (ST_A, &t_a),
             (ST_B, &t_b),
-            (ST_A_OFF, &t_aoff),
-            (ST_B_OFF, &t_boff),
             (ST_COPY_OFF, &t_copy),
             (ST_PAIR_PTR, &t_pair_ptr),
         ];
@@ -1150,8 +1145,6 @@ fn plan_sections(words: &[u32]) -> Vec<Section> {
         (ST_WC, "ST_WC", "per tile of S: its columns"),
         (ST_A, "ST_A", "per tile of S: its row kept block"),
         (ST_B, "ST_B", "per tile of S: its column kept block"),
-        (ST_A_OFF, "ST_A_OFF", "per tile of S: the scalar offset of its row block in the reduced vector"),
-        (ST_B_OFF, "ST_B_OFF", "per tile of S: the scalar offset of its column block in the reduced vector"),
         (ST_COPY_OFF, "ST_COPY_OFF", "per tile of S: the value offset in h of the kept-kept tile behind it, or NONE"),
         (ST_PAIR_PTR, "ST_PAIR_PTR", "per tile of S: its first pair"),
         (SP_OA, "SP_OA", "per pair: its observer oa, the pairs grouped by tile"),
@@ -1359,8 +1352,6 @@ fn defines(p: &SchurPlan, lanes: u32, tile_warps: u32, tile_groups: u32) -> Stri
             ("ST_WC", ST_WC),
             ("ST_A", ST_A),
             ("ST_B", ST_B),
-            ("ST_A_OFF", ST_A_OFF),
-            ("ST_B_OFF", ST_B_OFF),
             ("ST_COPY_OFF", ST_COPY_OFF),
             ("ST_PAIR_PTR", ST_PAIR_PTR),
             ("SP_OA", SP_OA),
