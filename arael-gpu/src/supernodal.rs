@@ -408,8 +408,6 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let work = dev.alloc(sec.bytes)?;
         dev.describe(&ints, "factor.plan", &|| {
             let slots = [
-                (plan::H_DIMS, "dims", "per supernode: columns q and rows h"),
-                (plan::H_VAL_PTR, "val_ptr", "per supernode: its panel's offset in the factor"),
                 (plan::H_SC_START, "sc_start", "per permuted block: its first permuted scalar"),
                 (plan::H_PR_D, "pr_d", "per pair: the descendant supernode"),
                 (plan::H_PR_R0, "pr_r0", "per pair: its first row in the descendant's panel"),
@@ -419,9 +417,8 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 (plan::H_CMAP, "cmap", "per pair column: the target panel's column"),
                 (plan::H_ROW_SC, "row_sc", "per row below a diagonal block: its index in xb"),
                 (plan::H_ORDER, "order", "per permuted block: the original block"),
-                (plan::H_BLK_WIDTH, "blk_width", "per permuted block: its scalar width"),
                 (plan::H_PART, "part", "per original block: its first scalar"),
-                (plan::H_SOLVE_HEAD, "solve_head", "per supernode, for the solve: q, h, first column, panel, row_sc offset, first inverted tile"),
+                (plan::H_SN_HEAD, "sn_head", "per supernode: columns q, rows h, first column, panel offset in the factor, row_sc offset, first inverted tile"),
                 (plan::H_INV_TILES, "inv_tiles", "per inverted diagonal tile: its supernode and first column"),
             ];
             let mut v = crate::plan_sections(&pk.words[..at_tiles], plan::HEADER, &slots);
@@ -926,8 +923,6 @@ fn defines(scalar: &str, scalar_bytes: usize, lu: usize, seed_lanes: u32, sizes:
         ("PAIR_EPT", PAIR_EPT),
         ("PAIR_KC", PAIR_KC),
         ("XR_CH", XR_CH),
-        ("H_DIMS", H_DIMS),
-        ("H_VAL_PTR", H_VAL_PTR),
         ("H_SC_START", H_SC_START),
         ("H_PR_D", H_PR_D),
         ("H_PR_R0", H_PR_R0),
@@ -937,13 +932,12 @@ fn defines(scalar: &str, scalar_bytes: usize, lu: usize, seed_lanes: u32, sizes:
         ("H_CMAP", H_CMAP),
         ("H_ROW_SC", H_ROW_SC),
         ("H_ORDER", H_ORDER),
-        ("H_BLK_WIDTH", H_BLK_WIDTH),
         ("H_PART", H_PART),
-        ("H_SOLVE_HEAD", H_SOLVE_HEAD),
+        ("H_SN_HEAD", H_SN_HEAD),
         ("H_INV_TILES", H_INV_TILES),
         ("INV_TILE", INV_TILE),
         ("TRSV_ITEM", TRSV_ITEM),
-        ("SOLVE_HEAD", plan::SOLVE_HEAD),
+        ("SN_HEAD", plan::SN_HEAD),
         ("GATHER_ROW", plan::GATHER_ROW),
     ];
     for (name, v) in consts {

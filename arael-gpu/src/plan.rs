@@ -73,31 +73,29 @@ pub const XR_CH: usize = 1024;
 /// reads the offsets it needs once per unit; they stay out of the kernel's
 /// compile-time identity, so a process compiles each kernel once, not once
 /// per sparsity structure.
-pub const H_DIMS: usize = 0;
-pub const H_VAL_PTR: usize = 1;
-pub const H_SC_START: usize = 2;
-pub const H_PR_D: usize = 3;
-pub const H_PR_R0: usize = 4;
-pub const H_PR_RMAP: usize = 5;
-pub const H_PR_CMAP: usize = 6;
-pub const H_RMAP: usize = 7;
-pub const H_CMAP: usize = 8;
-pub const H_ROW_SC: usize = 9;
-/// The permutation, for the device-side solve: the block elimination order,
-/// the permuted block widths, and the matrix's scalar partition.
-pub const H_ORDER: usize = 10;
-pub const H_BLK_WIDTH: usize = 11;
-pub const H_PART: usize = 12;
-/// The solve's header of every supernode, [`SOLVE_HEAD`] words: its
-/// columns q, its rows h, its first scalar column, its panel's offset, the
+pub const H_SC_START: usize = 0;
+pub const H_PR_D: usize = 1;
+pub const H_PR_R0: usize = 2;
+pub const H_PR_RMAP: usize = 3;
+pub const H_PR_CMAP: usize = 4;
+pub const H_RMAP: usize = 5;
+pub const H_CMAP: usize = 6;
+pub const H_ROW_SC: usize = 7;
+/// The permutation, for the device-side solve: the block elimination order
+/// and the matrix's scalar partition. A permuted block's width is the
+/// distance of its first permuted scalar ([`H_SC_START`]) to the next's.
+pub const H_ORDER: usize = 8;
+pub const H_PART: usize = 9;
+/// The header of every supernode, [`SN_HEAD`] words: its columns q, its
+/// rows h, its first scalar column, its panel's offset in the factor, the
 /// offset of its rows below in the row map (`H_ROW_SC`), and its first
 /// inverted diagonal tile ([`H_INV_TILES`]; 0 for a supernode of at most
 /// [`NB`] columns, which has none).
-pub const H_SOLVE_HEAD: usize = 13;
-pub const SOLVE_HEAD: usize = 6;
+pub const H_SN_HEAD: usize = 10;
+pub const SN_HEAD: usize = 6;
 /// The inverted 32 x 32 diagonal tiles of the supernodes wider than
 /// [`NB`], 2 words each: the supernode and the tile's first column.
-pub const H_INV_TILES: usize = 14;
+pub const H_INV_TILES: usize = 11;
 /// Values per inverted diagonal tile: the inverse column-major (for the
 /// forward solve), then row-major (for the backward solve).
 pub const INV_TILE: usize = 2 * 32 * 32;
@@ -571,15 +569,14 @@ impl Plan {
                 [q, self.dims[2 * s + 1], col0, self.val_ptr[s], self.row_sc_off[s], first]
             })
             .collect();
-        // the kernels read no sup_begin, pair_ptr or row_sc_off: the pairs
-        // carry their descendant and maps, the solve head a supernode's
-        // offset into row_sc
-        let arrays: [(usize, &[u32]); 15] = [
+        // What a supernode has (its dims, its panel, its rows below) is in
+        // its head and nowhere else; a pair carries its descendant and
+        // maps; a permuted block's width is the distance between two of
+        // sc_start. So the kernels read no dims, val_ptr, sup_begin,
+        // pair_ptr, row_sc_off or blk_width.
+        let arrays: [(usize, &[u32]); 12] = [
             (H_ORDER, &self.order),
-            (H_BLK_WIDTH, &self.blk_width),
             (H_PART, &self.part),
-            (H_DIMS, &self.dims),
-            (H_VAL_PTR, &self.val_ptr),
             (H_SC_START, &self.sc_start),
             (H_PR_D, &pr_d),
             (H_PR_R0, &pr_r0),
@@ -588,7 +585,7 @@ impl Plan {
             (H_RMAP, &self.rmap),
             (H_CMAP, &self.cmap),
             (H_ROW_SC, &self.row_sc),
-            (H_SOLVE_HEAD, &head),
+            (H_SN_HEAD, &head),
             (H_INV_TILES, &inv),
         ];
         for (slot, v) in arrays {
@@ -650,7 +647,7 @@ pub(crate) struct LevelWork {
     /// field (field f of row r at `f * rows + r`, so a warp's loads of a field
     /// are contiguous): the descendant's row at its column 0 (a factor
     /// offset), the target's x index, and the descendant (its height, width
-    /// and first column in its solve header, `H_SOLVE_HEAD`).
+    /// and first column in its solve header, `H_SN_HEAD`).
     pub g_rows: Vec<u32>,
     /// The gather rows' fields while the level is built, one vector a field.
     g_fields: [Vec<u32>; GATHER_ROW],
@@ -1642,12 +1639,12 @@ mod tests {
     fn the_inverse_tiles_follow_the_solve_heads() {
         let (p, _, _) = analyse(40);
         let words = p.pack();
-        let head = &words[words[H_SOLVE_HEAD] as usize..];
+        let head = &words[words[H_SN_HEAD] as usize..];
         let inv = &words[words[H_INV_TILES] as usize..];
         let (mut next, mut wide) = (0u32, 0);
         for s in 0..p.ns {
             let q = p.dims[2 * s];
-            let first = head[SOLVE_HEAD * s + 5];
+            let first = head[SN_HEAD * s + 5];
             if q as usize > NB {
                 assert_eq!(first, next, "supernode {s}: its first tile");
                 for (i, j0) in (0..q).step_by(32).enumerate() {
