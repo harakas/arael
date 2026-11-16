@@ -344,6 +344,13 @@ struct Bal {
 }
 
 fn decide_bal(cameras: usize, points: usize) -> SchurPlan {
+    // every camera sees every point -- BAL's covisibility, in miniature
+    decide_bal_seen(cameras, points, |_| (0..cameras).collect(), &arael::simple_lm::SparseFaerOptions::default())
+}
+
+/// [`decide_bal`] with point `j` seen by the cameras `seen(j)`, under
+/// `options`.
+fn decide_bal_seen(cameras: usize, points: usize, seen: impl Fn(usize) -> std::vec::Vec<usize>, options: &arael::simple_lm::SparseFaerOptions) -> SchurPlan {
     let mut b = Bal {
         cameras: refs::Vec::new(),
         points: refs::Vec::new(),
@@ -364,9 +371,11 @@ fn decide_bal(cameras: usize, points: usize) -> SchurPlan {
             hb: SelfBlock::new(),
         });
     }
-    // every camera sees every point -- BAL's covisibility, in miniature
-    for i in 0..cameras {
-        for j in 0..points {
+    for j in 0..points {
+        let mut cams = seen(j);
+        cams.sort_unstable();
+        cams.dedup();
+        for i in cams {
             b.views.push(View {
                 cam: b.cameras.ref_at(i),
                 pt: b.points.ref_at(j),
@@ -379,9 +388,54 @@ fn decide_bal(cameras: usize, points: usize) -> SchurPlan {
     let mut params = std::vec::Vec::new();
     arael::simple_lm::RootProblem::serialize(&mut b, &mut params);
     let cfg = LmConfig { max_iters: 1, ..Default::default() };
-    let mut solver = SparseFaer::new();
+    let mut solver = SparseFaer::from_options(options);
     lm_solve(&params, &mut solver, &mut b, &cfg).unwrap();
     solver.plan().expect("a plan")
+}
+
+/// A device orders a large reduced system without a band by its own rule,
+/// where the CPU keeps the natural order or takes AMD: 600 cameras (1800
+/// parameters) left by 1000 points. Dense: three groups of cameras that
+/// share no point, and six cameras, the first, that see every point; the
+/// natural order eliminates those first and fills the whole factor, AMD
+/// leaves them last: AMD on the device, its factor the cheaper. Sparse (3
+/// cameras a point): AMD or nested dissection, the cheaper factor. An
+/// ordering the caller names is the device's too.
+#[test]
+#[cfg(feature = "gpu-cpu")]
+fn a_device_orders_a_large_reduced_system_by_its_own_rule() {
+    use arael::simple_lm::{GpuDevice, SparseFaerOptions};
+    let (cameras, points) = (600, 1000);
+    let (hubs, group) = (6, 198);
+    let dense = |j: usize| (0..hubs).chain((0..120).map(|m| hubs + (j % 3) * group + (37 * j + m) % group)).collect::<std::vec::Vec<_>>();
+    let sparse = |j: usize| vec![j % cameras, (17 * j + 300) % cameras, (5 * j + 150) % cameras];
+    let on_cpu = SparseFaerOptions::default();
+    let on_device = SparseFaerOptions::default().with_gpu(Some(GpuDevice::cpu()));
+
+    let cpu = decide_bal_seen(cameras, points, dense, &on_cpu);
+    let dev = decide_bal_seen(cameras, points, dense, &on_device);
+    assert!(cpu.reduced && dev.reduced);
+    assert_eq!((cpu.kept_params, dev.kept_params), (1800, 1800), "the cameras are kept");
+    assert_eq!(cpu.ordering, Some(ReducedOrdering::NaturalDense));
+    assert_eq!(dev.ordering, Some(ReducedOrdering::Amd), "a dense reduced system AMD factors cheaper, on a device");
+    assert!(dev.gpu_factor && !dev.envelope, "the device factors the reordered system");
+
+    let cpu = decide_bal_seen(cameras, points, sparse, &on_cpu);
+    let dev = decide_bal_seen(cameras, points, sparse, &on_device);
+    assert_eq!(cpu.ordering, Some(ReducedOrdering::Amd));
+    // sparse: nested dissection priced against AMD, the cheaper factor's order
+    assert!(matches!(dev.ordering, Some(ReducedOrdering::Amd | ReducedOrdering::NestedDissection)), "a sparse reduced system on a device: {:?}", dev.ordering);
+    assert!(dev.gpu_factor && !dev.envelope);
+
+    // named: the device takes it
+    let named = decide_bal_seen(cameras, points, dense, &on_device.clone().with_ordering(SolveOrdering::Natural));
+    assert_eq!(named.ordering, Some(ReducedOrdering::Natural));
+
+    // below the size (about 670 parameters on the CPU device, an integrated
+    // one) the device keeps the CPU's choice: 150 cameras, 450 parameters
+    let small = |j: usize| (0..30).map(|m| (37 * j + m) % 150).collect::<std::vec::Vec<_>>();
+    let dev = decide_bal_seen(150, 300, small, &on_device);
+    assert_eq!((dev.kept_params, dev.ordering), (450, Some(ReducedOrdering::NaturalDense)));
 }
 
 /// The bundle-adjustment shape: cameras couple only to points and points only

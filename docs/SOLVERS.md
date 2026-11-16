@@ -886,6 +886,19 @@ Clang) compiles them, contracting products into sums as the GPU
 compilers do, and a block's threads run as fibers that switch at
 barriers. It is slow, a test target only.
 
+A device orders a reduced system by its own rule under
+`SolveOrdering::Auto`: as the CPU while it is banded or small (under
+about 1650 parameters on a discrete GPU, 670 on an integrated one). Past
+that it prices orderings by their symbolic factors' flops: a dense
+system (over a quarter of its upper triangle) with a band over three
+fifths of it, which the CPU keeps in its natural order, takes AMD when
+AMD's factor has four fifths of the flops or less; a sparse one (a tenth
+or less) takes AMD or nested dissection, whichever has fewer. A device's
+factor pays for each kernel launch as well as for its arithmetic, so the
+CPU's choice is not its best: on bundle adjustment's camera systems the
+natural order is 20 to 30% slower from 2500 parameters on. An ordering
+named with `with_ordering` is taken as asked.
+
 The factor lives on the device, in the solver's scalar or in `f32` under
 `with_mixed_precision` with the same refinement against the `f64`
 matrix. On the reduced (Schur) route the device does the whole damped

@@ -162,7 +162,7 @@ fn print_header(rounds: usize, only: &Option<String>, systems: &Option<String>,
                 arael::simple_lm::SolveOrdering::Amd => "AMD",
                 arael::simple_lm::SolveOrdering::Natural => "natural order",
                 // the rule names its choice per dataset in the verbose output
-                _ => "arael's rule (natural where S is dense or banded, else AMD)",
+                _ => "arael's rule (CPU: natural where S is dense or banded, else AMD; a GPU: its own)",
             }))
         .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",
             cfg.abs_precision, cfg.rel_precision, cfg.patience, cfg.min_iters))

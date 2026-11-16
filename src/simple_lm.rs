@@ -4226,10 +4226,14 @@ pub enum ReducedOrdering {
     NaturalDense,
     /// A general sparse graph. AMD earns its keep -- and on the pose-graph
     /// shape it beats nested dissection outright. Also AMD because the
-    /// caller asked for it ([`SolveOrdering::Amd`]).
+    /// caller asked for it ([`SolveOrdering::Amd`]), and on a device for a
+    /// large dense system without a band that it factors cheaper than the
+    /// natural order does (see [`SolveOrdering::Auto`]).
     Amd,
     /// Nested dissection, because the caller asked for it
-    /// ([`SolveOrdering::NestedDissection`]).
+    /// ([`SolveOrdering::NestedDissection`]), or on a device for a large
+    /// sparse system without a band whose factor it leaves cheaper than AMD
+    /// does (see [`SolveOrdering::Auto`]).
     NestedDissection,
     /// The natural order, because the caller asked for it
     /// ([`SolveOrdering::Natural`]).
@@ -4351,22 +4355,185 @@ fn ordering_for(nnz: usize, n: usize, band: usize) -> ReducedOrdering {
     }
 }
 
-/// The reduced system's ordering under the caller's `request`: AMD, the
-/// natural order and nested dissection as asked; [`ordering_for`]'s choice
-/// under [`SolveOrdering::Auto`] and [`SolveOrdering::MarginalizeFirst`]
-/// (the reduction has eliminated the marginalized parameters already).
+/// The flops of a dense Cholesky factor (`n^3 / 3`) past which a discrete
+/// GPU prices a reordering of a reduced system that has no band
+/// ([`device_ordering_for`]): about 1650 parameters. Below it the factor's
+/// time there is its launches', and one dense supernode has the fewest.
+/// Measured on an RTX 4090 over bundle adjustment reduced systems of 1242
+/// to 3348 parameters (f32 and f64): the natural order is as fast or
+/// faster up to 1530 parameters, and slower from 1800 on.
+const DEVICE_REORDER_FLOPS: f64 = 1.5e9;
+
+/// [`DEVICE_REORDER_FLOPS`] of an integrated GPU (and the CPU device):
+/// about 670 parameters. Its factor's time follows the arithmetic from a
+/// smaller size on. Measured on an AMD integrated GPU (gfx1036) over
+/// bundle adjustment reduced systems of 441 to 3348 parameters: the orders
+/// tie up to 540 parameters; AMD is 12 to 44% faster in f64 from 900 on,
+/// and in f32 the same up to 1242 and 8 to 19% faster from 1530 on.
+const DEVICE_REORDER_FLOPS_INTEGRATED: f64 = 1.0e8;
+
+/// The density (the stored share of the upper triangle) at or below which
+/// a device prices nested dissection against AMD ([`device_ordering_for`]).
+/// Measured on an RTX 4090 over bundle adjustment reduced systems: from 57%
+/// down to 11% dense AMD's factor has the fewer flops (by 4 to 55%) and is
+/// the faster; at 8% (Ladybug-1723) nested dissection's has 14% fewer and
+/// is 12 to 19% faster a damped solve. The dissection takes 20 to 30 ms
+/// there, which a denser system would pay for nothing.
+const DEVICE_DISSECTION_DENSITY: f64 = 0.10;
+
+/// The share of the natural order's flops an AMD factor may take at most
+/// for a device to leave a dense system's natural order
+/// ([`device_ordering_for`]). Bundle adjustment's camera systems are at 39
+/// to 50% (the cameras that share no point); a trajectory's, whose band
+/// the natural order keeps, at 100 to 137%, and slower under AMD.
+const DEVICE_AMD_FLOPS: f64 = 0.8;
+
+/// The share of the system a dense reduced system's half-bandwidth stays
+/// under for a device to keep its natural order unpriced
+/// ([`device_ordering_for`]): the band is then mostly full, and the natural
+/// order factors under it. A trajectory's reduced system is at 20 to 50%
+/// (300 to 750 poses, AMD's factor at 100 to 137% of the natural order's
+/// flops, and the pricing 2 to 5 ms of its setup); bundle adjustment's
+/// camera system at 99 to 100%.
+const DEVICE_BAND: f64 = 0.6;
+
+/// What a device prices before it settles a reduced system's ordering
+/// ([`device_ordering_for`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DevicePricing {
+    /// Nothing: the ordering stands.
+    None,
+    /// AMD against the natural order ([`device_amd`]).
+    Amd,
+    /// Nested dissection against AMD ([`device_dissection`]).
+    Dissection,
+}
+
+/// The reduced system's ordering when a device (GPU) factors it, and what
+/// is priced against it.
+///
+/// A device's factor pays for each launch as well as for its arithmetic,
+/// so the rule differs from the CPU's ([`ordering_for`]) where the system
+/// has no band and is past the size one dense supernode factors fastest
+/// ([`DEVICE_REORDER_FLOPS`], or [`DEVICE_REORDER_FLOPS_INTEGRATED`] with
+/// `integrated`: the device shares the host's memory):
+///
+/// * dense (the CPU keeps its natural order) and its band wide
+///   ([`DEVICE_BAND`]): AMD when its factor is the cheaper
+///   ([`DEVICE_AMD_FLOPS`]), as on bundle adjustment's camera systems,
+///   where AMD still finds the cameras that share no point;
+/// * sparse (the CPU takes AMD): AMD, and where it is sparse enough
+///   ([`DEVICE_DISSECTION_DENSITY`]) nested dissection when its factor
+///   has fewer flops.
+///
+/// A banded system, and one below the size, are ordered as on the CPU.
+///
+/// ```ignore
+/// // 3348 parameters, 40% dense, no band (Ladybug-372's cameras)
+/// assert_eq!(device_ordering_for(false, 2_240_000, 3348, 3303), (ReducedOrdering::NaturalDense, DevicePricing::Amd));
+/// assert_eq!(ordering_for(2_240_000, 3348, 3303), ReducedOrdering::NaturalDense);
+/// ```
+fn device_ordering_for(integrated: bool, nnz: usize, n: usize, band: usize) -> (ReducedOrdering, DevicePricing) {
+    let cpu = ordering_for(nnz, n, band);
+    let banded = n > 0 && (band as f64) < 0.2 * n as f64;
+    let size = if integrated { DEVICE_REORDER_FLOPS_INTEGRATED } else { DEVICE_REORDER_FLOPS };
+    if banded || (n as f64).powi(3) / 3.0 < size {
+        return (cpu, DevicePricing::None);
+    }
+    let density = nnz as f64 / (n as f64 * (n as f64 + 1.0) / 2.0);
+    match cpu {
+        ReducedOrdering::Amd if density <= DEVICE_DISSECTION_DENSITY => (cpu, DevicePricing::Dissection),
+        ReducedOrdering::Amd => (cpu, DevicePricing::None),
+        _ if (band as f64) < DEVICE_BAND * n as f64 => (cpu, DevicePricing::None),
+        _ => (cpu, DevicePricing::Amd),
+    }
+}
+
+/// AMD priced against the natural order for a reduced system `s` a device
+/// factors: both orders' symbolic factors (under `params`, on `threads`
+/// threads). Returns the two flop counts (natural, AMD) and AMD's symbolic
+/// factor when it is the cheaper by [`DEVICE_AMD_FLOPS`], or `None` when
+/// an order has no symbolic factor.
+///
+/// ```ignore
+/// let (flops, amd) = device_amd(&schur.s, &params, 8)?;
+/// if let Some(symbolic) = amd { /* factor through it, in AMD's order */ }
+/// ```
+fn device_amd(
+    s: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+    params: &arael_faer::supernodal::SupernodalParams,
+    threads: usize,
+) -> Option<([f64; 2], Option<arael_faer::supernodal::SupernodalSymbolic>)> {
+    let candidates = vec![(0..s.nblk_cols()).collect(), arael_faer::supernodal::amd_block_order(s)];
+    let choice = arael_faer::supernodal::cheapest_block_order(s, params, candidates, threads)?;
+    let flops = [choice.flops[0], choice.flops[1]];
+    if !flops.iter().all(|f| f.is_finite()) {
+        return None;
+    }
+    // AMD under the share is the cheaper of the two: the symbolic kept is its
+    let amd = (flops[1] <= DEVICE_AMD_FLOPS * flops[0]).then_some(choice.symbolic);
+    Some((flops, amd))
+}
+
+/// Nested dissection priced against AMD for a reduced system `s` a device
+/// factors: both orders' symbolic factors (under `params`, on `threads`
+/// threads), the one of fewer flops chosen, AMD on a tie. Returns the
+/// choice (`winner` 0 AMD, 1 nested dissection) and the dissection, or
+/// `None` when neither order has a symbolic factor.
+///
+/// ```ignore
+/// let (choice, dissection) = device_dissection(&schur.s, &params, 8)?;
+/// let nested = choice.winner == 1;   // factor through choice.symbolic
+/// ```
+fn device_dissection(
+    s: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+    params: &arael_faer::supernodal::SupernodalParams,
+    threads: usize,
+) -> Option<(arael_faer::supernodal::BlockOrderChoice, arael_faer::nd::NestedDissection)> {
+    let dissection = arael_faer::nd::NestedDissection::of_blocks(s, arael_faer::nd::NdParams::default());
+    let candidates = vec![arael_faer::supernodal::amd_block_order(s), dissection.block_order().to_vec()];
+    arael_faer::supernodal::cheapest_block_order(s, params, candidates, threads).map(|choice| (choice, dissection))
+}
+
+/// Who chose a reduced system's ordering, for the verbose output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OrderedBy {
+    /// The caller, by a [`SolveOrdering`] that names one.
+    Asked,
+    /// The rule ([`ordering_for`]), a device's pricing included when it
+    /// kept the rule's choice.
+    Rule,
+    /// A device's pricing, which changed the rule's choice
+    /// ([`device_amd`], [`device_dissection`]).
+    Device,
+}
+
+/// The reduced system's ordering under the caller's `request`, who chose
+/// it (a device's pricing may change the rule's choice later), and what a
+/// device prices against it: AMD, the
+/// natural order and nested dissection as asked; under
+/// [`SolveOrdering::Auto`] and [`SolveOrdering::MarginalizeFirst`] (the
+/// reduction has eliminated the marginalized parameters already) the rule's
+/// choice: [`device_ordering_for`]'s when a device factors the system
+/// (`device`: whether it is an integrated one), else [`ordering_for`]'s.
 ///
 /// ```ignore
 /// // a banded reduced system: natural unless asked otherwise
-/// assert_eq!(reduced_ordering_for(SolveOrdering::Auto, nnz, n, band), ReducedOrdering::NaturalBanded);
-/// assert_eq!(reduced_ordering_for(SolveOrdering::Amd, nnz, n, band), ReducedOrdering::Amd);
+/// assert_eq!(reduced_ordering_for(SolveOrdering::Auto, None, nnz, n, band).0, ReducedOrdering::NaturalBanded);
+/// assert_eq!(reduced_ordering_for(SolveOrdering::Amd, None, nnz, n, band).0, ReducedOrdering::Amd);
 /// ```
-fn reduced_ordering_for(request: SolveOrdering, nnz: usize, n: usize, band: usize) -> ReducedOrdering {
+fn reduced_ordering_for(request: SolveOrdering, device: Option<bool>, nnz: usize, n: usize, band: usize) -> (ReducedOrdering, OrderedBy, DevicePricing) {
     match request {
-        SolveOrdering::Amd => ReducedOrdering::Amd,
-        SolveOrdering::Natural => ReducedOrdering::Natural,
-        SolveOrdering::NestedDissection => ReducedOrdering::NestedDissection,
-        SolveOrdering::Auto | SolveOrdering::MarginalizeFirst => ordering_for(nnz, n, band),
+        SolveOrdering::Amd => (ReducedOrdering::Amd, OrderedBy::Asked, DevicePricing::None),
+        SolveOrdering::Natural => (ReducedOrdering::Natural, OrderedBy::Asked, DevicePricing::None),
+        SolveOrdering::NestedDissection => (ReducedOrdering::NestedDissection, OrderedBy::Asked, DevicePricing::None),
+        SolveOrdering::Auto | SolveOrdering::MarginalizeFirst => match device {
+            Some(integrated) => {
+                let (ord, price) = device_ordering_for(integrated, nnz, n, band);
+                (ord, OrderedBy::Rule, price)
+            }
+            None => (ordering_for(nnz, n, band), OrderedBy::Rule, DevicePricing::None),
+        },
     }
 }
 
@@ -4383,13 +4550,23 @@ impl ReducedOrdering {
     fn is_natural(self) -> bool {
         matches!(self, ReducedOrdering::NaturalBanded | ReducedOrdering::NaturalDense | ReducedOrdering::Natural)
     }
-    /// The ordering and its reason, for the verbose output; `asked`: the
-    /// caller named it ([`SolveOrdering::Amd`]).
-    fn why(self, asked: bool, n: usize, nnz: usize, band: usize) -> String {
+    /// The ordering and its reason, for the verbose output; `by`: who chose
+    /// it.
+    fn why(self, by: OrderedBy, n: usize, nnz: usize, band: usize) -> String {
         let density = 100.0 * nnz as f64 / (n as f64 * (n as f64 + 1.0) / 2.0);
         match self {
-            ReducedOrdering::Amd if asked => std::format!(
+            ReducedOrdering::Amd if by == OrderedBy::Asked => std::format!(
                 "AMD -- asked for (half-bandwidth {} of {}, {:.0}% dense)",
+                band, n, density
+            ),
+            ReducedOrdering::Amd if by == OrderedBy::Device => std::format!(
+                "AMD -- on a device: S is {:.0}% dense with no band (half-bandwidth {} of {}), \
+                 past the size one dense supernode factors fastest, and its factor is the cheaper",
+                density, band, n
+            ),
+            ReducedOrdering::NestedDissection if by == OrderedBy::Device => std::format!(
+                "nested dissection -- on a device: S is a sparse graph with no band \
+                 (half-bandwidth {} of {}, {:.0}% dense), and its factor has fewer flops than AMD's",
                 band, n, density
             ),
             ReducedOrdering::Natural => std::format!(
@@ -4556,7 +4733,18 @@ pub enum SolveOrdering {
     /// * reduced system -- AMD, unless the reduction left it banded, or
     ///   dense enough (over a quarter of the upper triangle) that AMD has
     ///   nothing to find, where it is the natural order
-    ///   ([`ReducedOrdering`] names the choice).
+    ///   ([`ReducedOrdering`] names the choice);
+    /// * reduced system factored on a device
+    ///   ([`SparseFaerOptions::with_gpu`]) -- the same while it is banded
+    ///   or small (under about 1650 parameters on a discrete GPU, 670 on an
+    ///   integrated one); past that, where it is dense and its band over
+    ///   three fifths of it, AMD when its factor takes four fifths of the
+    ///   natural order's flops or less,
+    ///   and where it is sparse (a tenth of the upper triangle or less)
+    ///   AMD or nested dissection, whichever factor has fewer flops. A
+    ///   device's factor pays for each launch as well as for its
+    ///   arithmetic: on bundle adjustment's camera systems the natural
+    ///   order is 20 to 30% slower from 2500 parameters on.
     ///
     /// Note what Auto does NOT do: use a set the solver DETECTED itself as
     /// an ordering. Detection says which blocks are marginalizable, not
@@ -5002,6 +5190,25 @@ impl GpuDevice {
             GpuBackend::Cpu => device_stat(&self.cpu, arael_gpu::Device::allocations),
             #[allow(unreachable_patterns)]
             _ => 0,
+        }
+    }
+
+    /// Whether the device shares the host's memory: an integrated GPU, or
+    /// the CPU device. Opens the device, as its first solve would. `None`
+    /// when its runtime is not compiled in or it does not open: the solve
+    /// reports that.
+    fn integrated(&self) -> Option<bool> {
+        match self.backend {
+            #[cfg(feature = "gpu-cuda")]
+            GpuBackend::Cuda => device_in(&self.cuda, || arael_gpu::cuda::CudaDevice::new(self.index)).ok().map(|d| arael_gpu::Device::arch(&*d).integrated),
+            #[cfg(feature = "gpu-hip")]
+            GpuBackend::Hip => device_in(&self.hip, || arael_gpu::hip::HipDevice::new(self.index)).ok().map(|d| arael_gpu::Device::arch(&*d).integrated),
+            #[cfg(gpu_metal)]
+            GpuBackend::Metal => device_in(&self.metal, || arael_gpu::metal::MetalDevice::new(self.index)).ok().map(|d| arael_gpu::Device::arch(&*d).integrated),
+            #[cfg(feature = "gpu-cpu")]
+            GpuBackend::Cpu => device_in(&self.cpu, || arael_gpu::cpu::CpuDevice::new(self.index)).ok().map(|d| arael_gpu::Device::arch(&*d).integrated),
+            #[allow(unreachable_patterns)]
+            _ => None,
         }
     }
 }
@@ -7645,20 +7852,94 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // one code path, always correct, only the route changes.
         let t_schur_symbolic = lap(vb);
 
-        // Nested dissection of the reduced system, when the caller asked for
-        // it. Computed once: the viability gate and the factorization must both
+        // The reduced system's ordering: the caller's, else the rule's from
+        // S's block structure (nnz straight off the symbolic, no scalar CSC
+        // yet; band from the symbolic pass), the device's own rule when a
+        // device factors it. Decided once, so the gate prices the ordering
+        // the factorization takes.
+        // Nothing is factorized on the iterative route, so there is no fill to
+        // reduce, no device factor, and nested dissection is not worth computing.
+        let iterative = self.schur_solve.cg().is_some();
+        let band = if eliminated.is_empty() { 0 } else { schur.kept_bandwidth() };
+        // The device that factors it, as integrated or not; one that does
+        // not open is taken for a discrete one, and the solve reports it.
+        let device = match &self.sn_num.gpu {
+            Some(gpu) if !iterative && self.sn_take() => Some(gpu.integrated().unwrap_or(false)),
+            _ => None,
+        };
+        let (mut ord, mut ordered_by, pricing) = match reduced_ordering_for(self.ordering, device, schur.s.val_count(), schur.s.nrows(), band) {
+            (ReducedOrdering::NestedDissection, ..) if iterative => (ordering_for(schur.s.val_count(), schur.s.nrows(), band), OrderedBy::Rule, DevicePricing::None),
+            choice => choice,
+        };
+        // Nested dissection of the reduced system, when it is the ordering.
+        // Computed once: the viability gate and the factorization must both
         // weigh the SAME ordering, or the gate is deciding about a system it is
         // not going to build.
-        // Nothing is factorized on the iterative route, so there is no fill to
-        // reduce and the ordering is not worth computing.
-        let iterative = self.schur_solve.cg().is_some();
-        let nd = (!iterative && matches!(self.ordering, SolveOrdering::NestedDissection))
+        let mut nd = matches!(ord, ReducedOrdering::NestedDissection)
             .then(|| {
                 arael_faer::nd::NestedDissection::of_blocks(
                     &schur.s,
                     arael_faer::nd::NdParams::default(),
                 )
             });
+        // What a device prices: AMD against a dense system's natural order,
+        // nested dissection against a sparse one's AMD. The symbolic factor
+        // of a reordering that wins is kept for the route below. An order
+        // without a symbolic factor leaves the ordering as it stands, and the
+        // route's own analysis reports the failure.
+        let mut priced_sn: Option<arael_faer::supernodal::SupernodalSymbolic> = None;
+        if pricing != DevicePricing::None {
+            let sn_params = arael_faer::supernodal::SupernodalParams {
+                batch_ratio: self.sn_batch_ratio,
+                ..self.sn_params_base()
+            };
+            let dense = 100.0 * schur.s.val_count() as f64 / (schur.s.nrows() as f64 * (schur.s.nrows() as f64 + 1.0) / 2.0);
+            match pricing {
+                DevicePricing::Amd => {
+                    if let Some((flops, amd)) = device_amd(&schur.s, &sn_params, self.ctx.threads()) {
+                        if vb {
+                            info!(
+                                "schur: reduced system on a device, {:.0}% dense -- natural order {:.2e} flops, \
+                                 block-AMD {:.2e} ({:.0}% of it, taken at {:.0}% or less): {}",
+                                dense,
+                                flops[0],
+                                flops[1],
+                                100.0 * flops[1] / flops[0],
+                                100.0 * DEVICE_AMD_FLOPS,
+                                if amd.is_some() { "block-AMD" } else { "natural order" },
+                            );
+                        }
+                        if amd.is_some() {
+                            ord = ReducedOrdering::Amd;
+                            ordered_by = OrderedBy::Device;
+                            priced_sn = amd;
+                        }
+                    }
+                }
+                DevicePricing::Dissection => {
+                    if let Some((choice, dissection)) = device_dissection(&schur.s, &sn_params, self.ctx.threads()) {
+                        let nested = choice.winner == 1;
+                        if vb {
+                            info!(
+                                "schur: reduced system on a device, {:.0}% dense -- block-AMD {:.2e} flops, \
+                                 nested dissection {:.2e}: {}",
+                                dense,
+                                choice.flops[0],
+                                choice.flops[1],
+                                if nested { "nested dissection" } else { "block-AMD" },
+                            );
+                        }
+                        if nested {
+                            ord = ReducedOrdering::NestedDissection;
+                            ordered_by = OrderedBy::Device;
+                            nd = Some(dissection);
+                        }
+                        priced_sn = Some(choice.symbolic);
+                    }
+                }
+                DevicePricing::None => {}
+            }
+        }
 
         // The reduction is a GEMM loop over pairs of observers plus a
         // one-column update per observer, and the tile shapes both need come
@@ -7701,16 +7982,6 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
         let mut fill_ratio = None;
         let mut route_flops = None;
-        let band = if eliminated.is_empty() { 0 } else { schur.kept_bandwidth() };
-        // The reduced system's ordering: the caller's, else the rule's from
-        // S's block structure (nnz straight off the symbolic, no scalar CSC
-        // yet; band from the symbolic pass). Decided once, so the gate
-        // prices the ordering the factorization takes.
-        let ord = match (&nd, self.ordering) {
-            // asked for and not computed: the iterative route factors nothing
-            (None, SolveOrdering::NestedDissection) => ordering_for(schur.s.val_count(), schur.s.nrows(), band),
-            _ => reduced_ordering_for(self.ordering, schur.s.val_count(), schur.s.nrows(), band),
-        };
         // Set when the reduction barely shrinks the system, which disqualifies
         // the shortcut below however good the flop ratio looks.
         let mut keeps_most_of_the_system = false;
@@ -8194,22 +8465,24 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.l_vals = Vec::new();
             self.factor_mem = Vec::new();
             self.solve_mem = Vec::new();
-            let block_order: Option<Vec<usize>> = match &nd {
-                Some(nd) => Some(nd.block_order().to_vec()),
-                None => match ord {
-                    ReducedOrdering::Amd | ReducedOrdering::NestedDissection => {
-                        Some(arael_faer::supernodal::amd_block_order(&schur.s))
-                    }
-                    ReducedOrdering::NaturalBanded | ReducedOrdering::NaturalDense | ReducedOrdering::Natural => None,
-                },
-            };
-            let sn = match reduced_sn {
-                // Built by the envelope gate, in the natural order this route
-                // uses when the envelope was on the table at all.
+            // The symbolic factor: the one a device's pricing kept (in the
+            // order it chose), or the envelope gate's (in the natural order
+            // this route uses when the envelope was on the table at all),
+            // else built here under the ordering.
+            let sn = match priced_sn.or(reduced_sn) {
                 Some(sn) => sn,
                 None => arael_faer::supernodal::SupernodalSymbolic::new(
                     &schur.s,
-                    block_order.as_deref(),
+                    match &nd {
+                        Some(nd) => Some(nd.block_order().to_vec()),
+                        None => match ord {
+                            ReducedOrdering::Amd | ReducedOrdering::NestedDissection => {
+                                Some(arael_faer::supernodal::amd_block_order(&schur.s))
+                            }
+                            ReducedOrdering::NaturalBanded | ReducedOrdering::NaturalDense | ReducedOrdering::Natural => None,
+                        },
+                    }
+                    .as_deref(),
                     &arael_faer::supernodal::SupernodalParams {
                         batch_ratio: self.sn_batch_ratio,
                         ..self.sn_params_base()
@@ -8222,13 +8495,18 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if vb {
                 info!(
                     "schur: reduced system {} params ({:.0}% dense, half-bandwidth {}), \
-                     factoring with the block supernodal Cholesky -- {} supernodes, {} factor values",
+                     factoring with the block supernodal Cholesky -- {} supernodes, {} factor values, {:.2e} flops",
                     nk,
                     100.0 * schur.s.scalar_upper_nnz() as f64
                         / (nk as f64 * (nk as f64 + 1.0) / 2.0),
                     band,
                     sn.n_supernodes(),
                     sn.factor_val_count(),
+                    sn.flops(),
+                );
+                info!(
+                    "schur: ordering the reduced system by {}",
+                    ord.why(ordered_by, nk, schur.s.scalar_upper_nnz(), band),
                 );
             }
             self.sn_sym = Some(Arc::new(sn));
@@ -8278,7 +8556,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 );
                 info!(
                     "schur: ordering the reduced system by {}",
-                    ord.why(matches!(self.ordering, SolveOrdering::Amd), nk, self.s_row_idx.len(), band),
+                    ord.why(ordered_by, nk, self.s_row_idx.len(), band),
                 );
             }
             self.size_llt_buffers(&llt_symbolic);
@@ -9426,7 +9704,7 @@ mod tests {
     /// shape; Auto and MarginalizeFirst leave it to the rule.
     #[test]
     fn a_named_ordering_is_the_reduced_systems() {
-        use super::{reduced_ordering_for, SolveOrdering};
+        use super::{reduced_ordering_for, DevicePricing, OrderedBy, SolveOrdering};
         let n = 10_000;
         // (nnz, band, the rule's choice): banded, a general sparse graph, dense
         let shapes = [
@@ -9436,14 +9714,20 @@ mod tests {
         ];
         for (nnz, band, rule) in shapes {
             assert_eq!(ordering_for(nnz, n, band), rule);
-            for (request, want) in [
-                (SolveOrdering::Auto, rule),
-                (SolveOrdering::MarginalizeFirst, rule),
-                (SolveOrdering::Amd, ReducedOrdering::Amd),
-                (SolveOrdering::Natural, ReducedOrdering::Natural),
-                (SolveOrdering::NestedDissection, ReducedOrdering::NestedDissection),
+            for (request, want, by) in [
+                (SolveOrdering::Auto, rule, OrderedBy::Rule),
+                (SolveOrdering::MarginalizeFirst, rule, OrderedBy::Rule),
+                (SolveOrdering::Amd, ReducedOrdering::Amd, OrderedBy::Asked),
+                (SolveOrdering::Natural, ReducedOrdering::Natural, OrderedBy::Asked),
+                (SolveOrdering::NestedDissection, ReducedOrdering::NestedDissection, OrderedBy::Asked),
             ] {
-                assert_eq!(reduced_ordering_for(request, nnz, n, band), want, "{request:?} on a system the rule orders {rule:?}");
+                assert_eq!(reduced_ordering_for(request, None, nnz, n, band), (want, by, DevicePricing::None), "{request:?} on a system the rule orders {rule:?}");
+                // a named ordering is the device's too
+                if by == OrderedBy::Asked {
+                    for integrated in [false, true] {
+                        assert_eq!(reduced_ordering_for(request, Some(integrated), nnz, n, band), (want, by, DevicePricing::None), "{request:?} on a device");
+                    }
+                }
             }
         }
         // the natural orders have an envelope to factor under, the others none
@@ -9456,10 +9740,152 @@ mod tests {
         ] {
             assert_eq!(o.is_natural(), natural, "{o:?}");
         }
-        // the reason names a request
-        assert!(ReducedOrdering::Amd.why(true, n, 3 * n, n - 1).starts_with("AMD -- asked for"));
-        assert!(ReducedOrdering::Amd.why(false, n, 3 * n, n - 1).starts_with("AMD -- S is a general sparse graph"));
-        assert!(ReducedOrdering::Natural.why(false, n, 3 * n, n - 1).starts_with("natural order -- asked for"));
+        // the reason names who chose
+        assert!(ReducedOrdering::Amd.why(OrderedBy::Asked, n, 3 * n, n - 1).starts_with("AMD -- asked for"));
+        assert!(ReducedOrdering::Amd.why(OrderedBy::Rule, n, 3 * n, n - 1).starts_with("AMD -- S is a general sparse graph"));
+        assert!(ReducedOrdering::Amd.why(OrderedBy::Device, n, 3 * n, n - 1).starts_with("AMD -- on a device"));
+        assert!(ReducedOrdering::NestedDissection.why(OrderedBy::Device, n, 3 * n, n - 1).starts_with("nested dissection -- on a device"));
+        assert!(ReducedOrdering::Natural.why(OrderedBy::Asked, n, 3 * n, n - 1).starts_with("natural order -- asked for"));
+    }
+
+    /// A device's rule: the CPU's ordering, with a pricing where the system
+    /// has no band and is past the size one dense supernode factors fastest
+    /// (smaller on an integrated GPU): AMD against a dense system's natural
+    /// order, nested dissection against a sparse enough one's AMD.
+    #[test]
+    fn a_device_prices_large_reduced_systems_without_a_band() {
+        use super::{device_ordering_for, reduced_ordering_for, DevicePricing, OrderedBy, SolveOrdering, DEVICE_REORDER_FLOPS, DEVICE_REORDER_FLOPS_INTEGRATED};
+        use DevicePricing::{Amd, Dissection, None as Nothing};
+        let dense = |n: usize, part: f64| (part * (n * (n + 1) / 2) as f64) as usize;
+        // (n, nnz, band, the CPU's choice, what a discrete GPU prices):
+        // bundle adjustment's reduced systems at 138, 170, 200 and 372
+        // cameras, 800 and 1400 of Ladybug-1723's and all of them, then
+        // trajectories (slam: 900 poses, banded; 450 and 300, a band of a
+        // third and of half the system), a dense system of a wide band, and
+        // a small sparse graph
+        let cases = [
+            (1242, dense(1242, 0.57), 1241, ReducedOrdering::NaturalDense, Nothing),
+            (1530, dense(1530, 0.54), 1529, ReducedOrdering::NaturalDense, Nothing),
+            (1800, dense(1800, 0.52), 1799, ReducedOrdering::NaturalDense, Amd),
+            (3348, dense(3348, 0.40), 3303, ReducedOrdering::NaturalDense, Amd),
+            (7200, dense(7200, 0.19), 6201, ReducedOrdering::Amd, Nothing),
+            (12600, dense(12600, 0.11), 11979, ReducedOrdering::Amd, Nothing),
+            (15498, dense(15498, 0.08), 13869, ReducedOrdering::Amd, Dissection),
+            (5400, dense(5400, 0.30), 906, ReducedOrdering::NaturalDense, Nothing),
+            (5400, dense(5400, 0.10), 906, ReducedOrdering::NaturalBanded, Nothing),
+            (2700, dense(2700, 0.52), 906, ReducedOrdering::NaturalDense, Nothing),
+            (1800, dense(1800, 0.69), 900, ReducedOrdering::NaturalDense, Nothing),
+            (2700, dense(2700, 0.52), 1700, ReducedOrdering::NaturalDense, Amd),
+            (900, dense(900, 0.05), 899, ReducedOrdering::Amd, Nothing),
+        ];
+        for (n, nnz, band, cpu, price) in cases {
+            assert_eq!(ordering_for(nnz, n, band), cpu, "the CPU's rule at {n} parameters");
+            assert_eq!(device_ordering_for(false, nnz, n, band), (cpu, price), "a discrete GPU's rule at {n} parameters");
+            assert_eq!(reduced_ordering_for(SolveOrdering::Auto, Some(false), nnz, n, band), (cpu, OrderedBy::Rule, price));
+            assert_eq!(reduced_ordering_for(SolveOrdering::Auto, None, nnz, n, band), (cpu, OrderedBy::Rule, Nothing));
+        }
+        // an integrated GPU prices from a smaller size: bundle adjustment at
+        // 49, 60, 100 and 138 cameras; a banded system as the CPU there too
+        for (n, part, price) in [(441, 0.84, Nothing), (540, 0.75, Nothing), (900, 0.62, Amd), (1242, 0.57, Amd)] {
+            assert_eq!(device_ordering_for(true, dense(n, part), n, n - 1), (ReducedOrdering::NaturalDense, price), "an integrated GPU's rule at {n} parameters");
+            assert_eq!(device_ordering_for(false, dense(n, part), n, n - 1), (ReducedOrdering::NaturalDense, Nothing));
+        }
+        assert_eq!(device_ordering_for(true, dense(5400, 0.10), 5400, 906), (ReducedOrdering::NaturalBanded, Nothing));
+        // the sizes: a dense factor's flops
+        for (integrated, flops) in [(false, DEVICE_REORDER_FLOPS), (true, DEVICE_REORDER_FLOPS_INTEGRATED)] {
+            let edge = (3.0 * flops).cbrt() as usize;
+            assert_eq!(device_ordering_for(integrated, dense(edge - 1, 0.5), edge - 1, edge - 2).1, Nothing);
+            assert_eq!(device_ordering_for(integrated, dense(edge + 1, 0.5), edge + 1, edge).1, Amd);
+        }
+    }
+
+    /// AMD priced against the natural order: taken when its factor has four
+    /// fifths of the natural order's flops or less. Blocks that all couple
+    /// to the first few (eliminated first, the natural order fills the whole
+    /// factor; AMD leaves them last): AMD. A band, which the natural order
+    /// factors without fill: the natural order stands.
+    #[test]
+    fn a_devices_amd_is_priced_against_the_natural_order() {
+        use super::{device_amd, DEVICE_AMD_FLOPS};
+        use arael_faer::bsc::SymbolicSparseBlockColMat;
+        use arael_faer::supernodal::SupernodalParams;
+        let build = |n: usize, cells: &[(usize, usize)]| {
+            let part: Vec<super::SparseIndex> = (0..=n).map(|b| 3 * b as super::SparseIndex).collect();
+            SymbolicSparseBlockColMat::covering(part.clone(), part, cells.len(), |k| (3 * cells[k].0, 3 * cells[k].1))
+        };
+        // 4 hubs first, then 3 groups of 60 blocks, each group fully coupled
+        let (hubs, group, n) = (4usize, 60usize, 4 + 3 * 60);
+        let mut cells = Vec::new();
+        for b in 0..n {
+            cells.push((b, b));
+            for h in 0..hubs.min(b) {
+                cells.push((h, b));
+            }
+            if b >= hubs {
+                let g = (b - hubs) / group;
+                for c in hubs + g * group..b {
+                    cells.push((c, b));
+                }
+            }
+        }
+        let hubbed = build(n, &cells);
+        let (flops, amd) = device_amd(&hubbed, &SupernodalParams::default(), 1).expect("both orders factor it");
+        assert!(flops[1] <= DEVICE_AMD_FLOPS * flops[0], "AMD's factor is the cheaper: {flops:?}");
+        let amd = amd.expect("AMD is taken");
+        assert_eq!(amd.flops(), flops[1], "AMD's symbolic factor is handed on");
+
+        // a band of 3 blocks: no fill in the natural order
+        let n = 300usize;
+        let cells: Vec<(usize, usize)> = (0..n).flat_map(|b| (b.saturating_sub(3)..=b).map(move |c| (c, b))).collect();
+        let (flops, amd) = device_amd(&build(n, &cells), &SupernodalParams::default(), 1).unwrap();
+        assert!(flops[1] > DEVICE_AMD_FLOPS * flops[0], "{flops:?}");
+        assert!(amd.is_none(), "the natural order stands");
+    }
+
+    /// The dissection priced against AMD: both orders' symbolic factors, the
+    /// one of fewer flops chosen and handed on, AMD on a tie. On a chain of
+    /// blocks no order adds fill: a tie, AMD.
+    #[test]
+    fn a_devices_dissection_is_priced_against_amd() {
+        use super::device_dissection;
+        use arael_faer::bsc::SymbolicSparseBlockColMat;
+        use arael_faer::supernodal::SupernodalParams;
+        // a 24 x 24 grid of 2-wide blocks, each coupled to its right and lower neighbour
+        let side = 24usize;
+        let part: Vec<super::SparseIndex> = (0..=side * side).map(|b| 2 * b as super::SparseIndex).collect();
+        let mut cells = Vec::new();
+        for r in 0..side {
+            for c in 0..side {
+                let b = r * side + c;
+                cells.push((b, b));
+                if c + 1 < side {
+                    cells.push((b, b + 1));
+                }
+                if r + 1 < side {
+                    cells.push((b, b + side));
+                }
+            }
+        }
+        // scalar coordinates: a block's first scalar
+        let grid = SymbolicSparseBlockColMat::covering(part.clone(), part, cells.len(), |k| (2 * cells[k].0, 2 * cells[k].1));
+        let (choice, dissection) = device_dissection(&grid, &SupernodalParams::default(), 1).expect("both orders factor a grid");
+        assert_eq!(choice.flops.len(), 2);
+        assert!(choice.flops.iter().all(|f| f.is_finite() && *f > 0.0), "{:?}", choice.flops);
+        let cheaper = if choice.flops[1] < choice.flops[0] { 1 } else { 0 };
+        assert_eq!(choice.winner, cheaper, "the factor of fewer flops, AMD on a tie: {:?}", choice.flops);
+        assert_eq!(choice.symbolic.flops(), choice.flops[choice.winner], "the winner's symbolic factor is handed on");
+        assert_eq!(dissection.block_order().len(), side * side);
+        if choice.winner == 1 {
+            assert_eq!(choice.order, dissection.block_order());
+        }
+
+        // a chain: either order factors it without fill
+        let n = 200usize;
+        let part: Vec<super::SparseIndex> = (0..=n).map(|b| 3 * b as super::SparseIndex).collect();
+        let cells: Vec<(usize, usize)> = (0..n).flat_map(|b| if b + 1 < n { vec![(b, b), (b, b + 1)] } else { vec![(b, b)] }).collect();
+        let chain = SymbolicSparseBlockColMat::covering(part.clone(), part, cells.len(), |k| (3 * cells[k].0, 3 * cells[k].1));
+        let (choice, _) = device_dissection(&chain, &SupernodalParams::default(), 1).unwrap();
+        assert!(choice.winner == 0 || choice.flops[1] < choice.flops[0], "AMD keeps a tie: {:?}", choice.flops);
     }
 
     use super::*;

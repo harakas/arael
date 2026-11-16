@@ -307,8 +307,11 @@ in both directions -- `Never` for the `sparse` rows, `Force` for the `schur` one
 reduced system S is camera-camera, and a 3D point makes a CLIQUE of every camera
 that sees it, so S is a union of cliques -- the structure AMD is worst at. The
 benchmark therefore orders S with nested dissection (`BAL_ORDERING=auto` goes back
-to arael's own rule: AMD, or the natural order where S is dense or banded, as at
-Ladybug-372 and below; `amd` and `natural` name one). It is not a small effect: `cargo run -r
+to arael's own rule: on the CPU AMD, or the natural order where S is dense or
+banded, as at Ladybug-372 and below; on a GPU the device's rule, AMD from about
+1650 camera parameters on (670 on an integrated GPU) and nested dissection where
+its factor is the cheaper;
+`amd` and `natural` name one). It is not a small effect: `cargo run -r
 --bin schur_stats` measures S under AMD and reports 4716 ms to factorize it on
 Ladybug-1723, where under nested dissection the WHOLE Schur iteration -- assembly,
 reduction, factorization, solve -- takes 1796 ms. The same swap moves the fill
@@ -425,7 +428,7 @@ produced it.
 | `BAL_PCG_ITERS` | comma-separated CG iteration caps for g2o's PCG row, one row each; `0` is uncapped |
 | `BAL_PCG_TOLS` | comma-separated inner-solve tolerances, same (crossed with the caps) |
 | `DRIVER=fixed` | arael's fixed damping ladder instead of the gain-ratio driver it defaults to here |
-| `BAL_ORDERING` | `nd` (default), `auto`, `amd` or `natural` -- elimination ordering of the reduced camera system: nested dissection, arael's own rule (the natural order where S is dense or banded, AMD otherwise), AMD always, the natural order always. A typo is an error |
+| `BAL_ORDERING` | `nd` (default), `auto`, `amd` or `natural` -- elimination ordering of the reduced camera system: nested dissection, arael's own rule (on the CPU the natural order where S is dense or banded, AMD otherwise; on a GPU the device's, see docs/SOLVERS.md), AMD always, the natural order always. A typo is an error |
 | `BAL_SCHUR_POLICY=auto` | let the fill analysis decide the reduction instead of forcing it |
 | `ARAEL_F32_FACTOR`, `ARAEL_REFINE_TOL` | the f32 factor under the f64 rows: refinement steps at most, and the relative residual to refine to (defaults 4 and 1e-10) |
 | `ARAEL_GPU` | `cuda`, `hip`, or either with a device index (`cuda:1`): the supernodal block factorization and its solve of the `sparse` and `schur` rows on that device, the factor f32 there under `ARAEL_F32_FACTOR`. Needs the binary built with `--features gpu-cuda` (or `gpu-hip`) |

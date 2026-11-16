@@ -185,9 +185,9 @@ impl Route {
 /// `BAL_ORDERING=nd|auto|amd|natural`. Nested dissection (`nd`) by
 /// default: a 3D point makes a clique of the cameras that see it, and AMD
 /// drowns in cliques -- at Ladybug-1723 it factorizes S in 1508 ms against
-/// AMD's 4730. `auto` is arael's own rule (the natural order where S is
-/// dense or banded, AMD otherwise); `amd` and `natural` name one. A typo is
-/// an error.
+/// AMD's 4730. `auto` is arael's own rule (on the CPU the natural order
+/// where S is dense or banded, AMD otherwise; on a GPU the device's);
+/// `amd` and `natural` name one. A typo is an error.
 pub fn schur_ordering() -> arael::simple_lm::SolveOrdering {
     use arael::simple_lm::SolveOrdering as O;
     match std::env::var("BAL_ORDERING").as_deref() {
