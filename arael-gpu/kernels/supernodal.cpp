@@ -6,9 +6,10 @@
 // it solves (wide.h, in front of this) and LU; the tile sizes (NB, TB, TK,
 // PAIR_*, XR_CH) and the plan header's slots (H_*) come from plan.rs
 // as #defines, THREADS (the block size of every kernel but k_trsm, which
-// runs TRSM_ROWS, and k_tile_inv), SCALAR_BYTES and the device's sizes
-// (SYRK_BLOCK, SYRK_TB, TRSM_ROWS, POTF2_UNROLL) from supernodal.rs. One
-// launch per level unless said.
+// runs TRSM_ROWS, k_potf2, which runs DIAG_WARPS warps, and k_tile_inv),
+// SCALAR_BYTES and the device's sizes (SYRK_BLOCK, SYRK_TB, TRSM_ROWS,
+// POTF2_UNROLL, DIAG_WARPS) from supernodal.rs. One launch per level unless
+// said.
 //
 // The solve's kernels take a `gate`: they do nothing unless gate[0] is
 // nonzero, so a refinement can stop on the device and the steps launched
@@ -427,6 +428,78 @@ DEVICE_INLINE void potf2_warp(GLOBAL F* factor, u32 tile, u32 h, u32 nb, u32 lan
     if (bad && lane == 0) fail[0] = s + 1;
 }
 
+// A full NB x NB tile factored by a block's first 4 warps (DIAG_WARPS 4),
+// every thread of the block calling it for its barriers: warp w keeps
+// columns w, w + 4, ... of every row (lane r: row r; the lower part, zeros
+// above), column k's owner (warp k % 4) takes the pivot and scales the
+// column, which reaches the warps through `col` (2 NB values, its halves
+// by turns), one block barrier a column. Each entry gets potf2_full's
+// multiply-adds, in its order, shared by four warps where potf2_full is
+// bound by one warp's issue. Column k of L goes to
+// out.put(k, value) on its owner's lanes. Returns whether a pivot was not
+// positive (it continues with 1), on that pivot's owner. Warps past the
+// fourth only meet the barriers.
+template <typename Out>
+DEVICE_INLINE bool potf2_4w(THREAD F (&a)[NB / 4], u32 lane, u32 warp, THREAD Out& out, SHARED_PTR F* col) {
+    bool bad = false;
+#pragma unroll
+    for (u32 k = 0; k < NB; k++) {
+        SHARED_PTR F* ck = col + (k % 2) * NB;
+        if (warp == k % 4) {
+            F d = shfl(a[k / 4], k);
+            if (!(d > F(0))) {
+                bad = true;
+                d = F(1);
+            }
+            F rk = rsqrt(d);
+            a[k / 4] = lane == k ? d * rk : a[k / 4] * rk;
+            out.put(k, a[k / 4]);
+            ck[lane] = a[k / 4];
+        }
+        BARRIER();
+        if (warp < 4) {
+#pragma unroll
+            for (u32 i = 0; i < NB / 4; i++) {
+                u32 c = 4 * i + warp;
+                if (c > k) a[i] -= ck[lane] * ck[c];
+            }
+        }
+    }
+    return bad;
+}
+
+#if DIAG_WARPS != 1 && DIAG_WARPS != 4
+#error "supernodal.cpp: DIAG_WARPS is 1 or 4"
+#endif
+#if DIAG_WARPS == 4 && THREADS < 4 * NB
+#error "supernodal.cpp: a k_syrk block holds the 4 warps of potf2_4w"
+#endif
+
+// The nb x nb lower diagonal tile at `tile` (column stride h) of
+// supernode s factored in place by the block, every thread calling it
+// (thread t): a full tile by its first 4 warps (potf2_4w) with DIAG_WARPS
+// 4, else by its first warp (potf2_warp). A pivot that is not positive
+// sets fail[0] to s plus one and continues with 1.
+DEVICE_INLINE void potf2_block(GLOBAL F* factor, u32 tile, u32 h, u32 nb, u32 t, GLOBAL u32* fail, u32 s, SHARED_PTR F* col) {
+#if DIAG_WARPS == 4
+    // the branch is uniform: the block's tile is full or not
+    if (nb == NB) {
+        u32 lane = t % NB;
+        u32 warp = t / NB;
+        F a[NB / 4];
+#pragma unroll
+        for (u32 i = 0; i < NB / 4; i++) {
+            u32 c = 4 * i + warp;
+            a[i] = (warp < 4 && c <= lane) ? factor[tile + c * h + lane] : F(0);
+        }
+        ColsOut out = {factor, tile, h, lane, NB, NB};
+        if (potf2_4w(a, lane, warp, out, col)) fail[0] = s + 1;
+        return;
+    }
+#endif
+    if (t < NB) potf2_warp(factor, tile, h, nb, t, fail, s, col);
+}
+
 // k_small_factor's diagonal warp output: the panel, and for the diagonal
 // block's rows the shared copies, `l` (the diagonal block, column-major, q
 // rows) and `l11` (the step's tile, NB rows).
@@ -637,17 +710,17 @@ KERNEL_THREADS_REGS(THREADS) void k_chain(GLOBAL const u32* RESTRICT levels, u32
 }
 
 // Panel step, part one, for a level's first step: the NB x NB diagonal
-// tile at (0, 0) of every big panel of the level, one warp per panel. The
-// later steps' diagonal tiles are factored by the step before them, at the
-// end of k_syrk.
-KERNEL_THREADS_REGS(NB) void k_potf2(GLOBAL const u32* RESTRICT panels, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+// tile at (0, 0) of every big panel of the level, a block of DIAG_WARPS
+// warps per panel (potf2_block). The later steps' diagonal tiles are
+// factored by the step before them, at the end of k_syrk.
+KERNEL_THREADS_REGS(DIAG_WARPS * NB) void k_potf2(GLOBAL const u32* RESTRICT panels, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
     SHARED F col[2 * NB];
     // the supernodes' heads: q, h, first column, panel offset, ...
     u32 o_head = plan[H_SN_HEAD];
     u32 s = panels[block_x()];
     u32 q = plan[o_head + SN_HEAD * s];
     u32 h = plan[o_head + SN_HEAD * s + 1];
-    potf2_warp(factor, plan[o_head + SN_HEAD * s + 3], h, min(q, NB), thread_x(), fail, s, col);
+    potf2_block(factor, plan[o_head + SN_HEAD * s + 3], h, min(q, NB), thread_x(), fail, s, col);
 }
 
 #if NB * NB % TRSM_ROWS != 0 || TRSM_ROWS < NB
@@ -692,6 +765,14 @@ KERNEL_THREADS(TRSM_ROWS) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npa
     u32 nb = min(q - j, NB);
     u32 panel = plan[o_head + SN_HEAD * s + 3];
     u32 t = thread_x();
+    // the thread's row, loaded first: its latency behind the tile's and the
+    // barriers'. Unrolled to the constant NB, skipping the columns past nb,
+    // so every index into v is a constant and the row stays in registers;
+    // otherwise v goes to memory and each step of the solve waits on a load.
+    // (The columns past nb hold zeros and stay zero.)
+    u32 i = j + nb + idx * TRSM_ROWS + t;
+    F v[NB];
+    UNROLL_32(c, v[c] = (i < h && c < nb) ? factor[panel + (j + c) * h + i] : F(0);)
     // consecutive threads read consecutive rows of a column; the passes are
     // independent loads, all in flight at once
 #pragma unroll
@@ -706,14 +787,7 @@ KERNEL_THREADS(TRSM_ROWS) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npa
     BARRIER();
     if (t < nb) dinv[t] = F(1) / lc[t * NB + t];
     BARRIER();
-    u32 i = j + nb + idx * TRSM_ROWS + t;
     if (i < h) {
-        // Unrolled to the constant NB, skipping the columns past nb, so every
-        // index into v is a constant and the row stays in registers;
-        // otherwise v goes to memory and each step of the solve waits on a
-        // load. (The columns past nb hold zeros and stay zero.)
-        F v[NB];
-        UNROLL_32(c, v[c] = c < nb ? factor[panel + (j + c) * h + i] : F(0);)
         UNROLL_32(k, if (k < nb) {
             v[k] *= dinv[k];
             UNROLL_32(c, if (c > k) v[c] -= v[k] * lc[k * NB + c];)
@@ -860,19 +934,21 @@ template <u32 T> DEVICE_INLINE void mma_store(THREAD simdgroup_float8x8 (&c)[MMA
 // update covers rows and columns [max(k1, cbeg), ...) only, and factors no
 // diagonal tile. The columns stream through
 // shared memory NB at a time into the tile's accumulators, so a tile is
-// read and written once per update; the loop's trip count is constant, so
-// with SYRK_BLOCK = NB it is a single pass. A thread takes the
+// read and written once per update (an f32 tile of 32 loaded with the
+// first slab); the loop's trip count is constant, so with SYRK_BLOCK = NB
+// it is a single pass. A thread takes the
 // rows tx + 16 r and columns ty + 16 c, so neighbouring threads read and
 // write neighbouring rows; with TILE_MMA the SIMD groups take the tile's
 // 8 x 8 blocks, and its products reach the threads through shared memory.
 // The block index walks the panels' tile counts.
 // The block of a panel's tile (0, 0), which alone writes the next diagonal
-// tile (at k1, SYRK_TB >= NB), then factors it (potf2_warp). In f64 with
-// POTF2_UNROLL the kernel is held to two blocks a multiprocessor:
-// potf2_full would take it to 168 registers, one block; held, it spills a
-// little in the tail, which measured faster on bundle adjustment's wide
-// steps and 1.5% slower on SLAM's narrow ones.
-#if SCALAR_BYTES == 8 && POTF2_UNROLL
+// tile (at k1, SYRK_TB >= NB), then factors it (potf2_block). In f64 with
+// POTF2_UNROLL and one warp factoring, the kernel is held to two blocks a
+// multiprocessor: potf2_full would take it to 168 registers, one block;
+// held, it spills a little in the tail, which measured faster on bundle
+// adjustment's wide steps and 1.5% slower on SLAM's narrow ones. With four
+// warps it fits two blocks unheld (89 registers on an NVIDIA GPU).
+#if SCALAR_BYTES == 8 && POTF2_UNROLL && DIAG_WARPS == 1
 #define SYRK_ENTRY KERNEL_THREADS_BLOCKS(THREADS, 2)
 #else
 #define SYRK_ENTRY KERNEL_THREADS(THREADS)
@@ -968,6 +1044,21 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
     F acc[SYRK_R * SYRK_R];
 #pragma unroll
     for (u32 z = 0; z < SYRK_R * SYRK_R; z++) acc[z] = F(0);
+#if SYRK_R == 2 && SCALAR_BYTES == 4
+    // the tile's own values, loaded now: their latency behind the slabs'.
+    // Only f32 tiles of 32: in tiles of 64 and in f64 it measured slower on
+    // an AMD integrated GPU, and in f64 no faster on an NVIDIA discrete GPU.
+    F cv[SYRK_R * SYRK_R];
+#pragma unroll
+    for (u32 r = 0; r < SYRK_R; r++) {
+#pragma unroll
+        for (u32 c = 0; c < SYRK_R; c++) {
+            u32 i = tx + 16 * r;
+            u32 jj = ty + 16 * c;
+            cv[r * SYRK_R + c] = (i < nrows && jj < ncols && row0 + i >= col0 + jj) ? factor[panel + (col0 + jj) * h + row0 + i] : F(0);
+        }
+    }
+#endif
     for (u32 sl = 0; sl < SYRK_BLOCK / NB; sl++) {
         u32 kb = k0 + sl * NB;
         if (kb >= k1) break;
@@ -1010,16 +1101,20 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
         for (u32 c = 0; c < SYRK_R; c++) {
             u32 i = tx + 16 * r;
             u32 jj = ty + 16 * c;
+#if SYRK_R == 2 && SCALAR_BYTES == 4
+            if (i < nrows && jj < ncols && row0 + i >= col0 + jj) factor[panel + (col0 + jj) * h + row0 + i] = cv[r * SYRK_R + c] - acc[r * SYRK_R + c];
+#else
             if (i < nrows && jj < ncols && row0 + i >= col0 + jj) factor[panel + (col0 + jj) * h + row0 + i] -= acc[r * SYRK_R + c];
+#endif
         }
     }
 #endif
     // the uniform branch: tile (0, 0) at k1 is the next diagonal tile
     if (ti == 0 && tj == 0 && cs == k1) {
-        // the block's writes seen by its first warp, and its reads of `sa`
-        // done (potf2_warp's column)
+        // the block's writes seen by its factoring warps, and its reads of
+        // `sa` done (the factor's column)
         BARRIER();
-        if (t < NB) potf2_warp(factor, panel + k1 * h + k1, h, min(q - k1, NB), t, fail, s, sa);
+        potf2_block(factor, panel + k1 * h + k1, h, min(q - k1, NB), t, fail, s, sa);
     }
 }
 

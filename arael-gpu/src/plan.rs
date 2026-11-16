@@ -172,11 +172,18 @@ pub struct GpuSupernodalParams {
     /// choice ([`Self::syrk_tile_on`]).
     pub syrk_tile: Option<u32>,
     /// Whether the panel steps factor a diagonal tile of [`NB`] columns
-    /// with its pivots unrolled and each column broadcast through shared
-    /// memory (`potf2_full`) instead of the loop with shuffles; both
-    /// compute the same factor. `None` takes the device's choice
-    /// ([`Self::potf2_unroll_on`]).
+    /// on one warp ([`diag_warps`](Self::diag_warps) 1, or a tile
+    /// narrower than [`NB`]) with its pivots unrolled and each column
+    /// broadcast through shared memory (`potf2_full`) instead of the loop
+    /// with shuffles; both compute the same factor. `None` takes the
+    /// device's choice ([`Self::potf2_unroll_on`]).
     pub potf2_unroll: Option<bool>,
+    /// The warps that factor a panel step's diagonal tile of [`NB`]
+    /// columns, 1 or 4: on 4 every warp keeps every fourth column and the
+    /// pivots' columns reach them through shared memory (`potf2_4w`); the
+    /// factor is the same. A tile narrower than [`NB`] takes one warp.
+    /// `None` takes the device's choice ([`Self::diag_warps_on`]).
+    pub diag_warps: Option<u32>,
     /// The narrowest supernode (columns, more than [`NB`]) whose triangular
     /// solves run over many blocks, a launch per
     /// [`trsv_block`](Self::trsv_block) columns; a narrower one is solved
@@ -285,6 +292,22 @@ impl GpuSupernodalParams {
         self.potf2_unroll.unwrap_or(!arch.integrated)
     }
 
+    /// [`diag_warps`](Self::diag_warps) on the device `arch`, unset: 4 on
+    /// NVIDIA and AMD GPUs, 1 on Apple GPUs and the CPU device. Measured on
+    /// bundle adjustment reduced systems: 4 is faster on an NVIDIA discrete
+    /// GPU (the f32 factor 1.5 to 11%, f64 under 1%) and on an AMD
+    /// integrated GPU (0.4 to 6%). Apple GPUs are not measured.
+    ///
+    /// ```ignore
+    /// let warps = GpuSupernodalParams::default().diag_warps_on(dev.arch());
+    /// ```
+    pub fn diag_warps_on(&self, arch: &crate::Arch) -> u32 {
+        self.diag_warps.unwrap_or(match arch.vendor {
+            crate::Vendor::Nvidia | crate::Vendor::Amd => 4,
+            crate::Vendor::Apple | crate::Vendor::Cpu => 1,
+        })
+    }
+
     /// [`trsv_wide`](Self::trsv_wide) on the device `arch`, unset: 512 on a
     /// discrete GPU, 1024 on an integrated GPU or the CPU device. Measured
     /// on bundle adjustment, SLAM and pose graph systems: an NVIDIA discrete
@@ -369,6 +392,7 @@ impl Default for GpuSupernodalParams {
             trsm_rows: None,
             syrk_tile: None,
             potf2_unroll: None,
+            diag_warps: None,
             trsv_wide: None,
             trsv_block: None,
             pair_tiles: None,
@@ -1341,6 +1365,7 @@ mod tests {
             trsm_rows: None,
             syrk_tile: None,
             potf2_unroll: None,
+            diag_warps: None,
             trsv_wide: None,
             trsv_block: None,
             pair_tiles: Some(false),
@@ -1740,6 +1765,20 @@ mod tests {
         assert_eq!((unset.potf2_unroll_on(&arch(2, 32, true)), unset.potf2_unroll_on(&discrete(128))), (false, true));
         let set = GpuSupernodalParams { potf2_unroll: Some(true), ..unset };
         assert_eq!((set.potf2_unroll_on(&arch(2, 32, true)), set.potf2_unroll_on(&discrete(128))), (true, true));
+    }
+
+    /// Unset, four warps factor a full diagonal tile on NVIDIA and AMD
+    /// devices, one on Apple devices and the CPU device; set, what it says
+    /// on every device.
+    #[test]
+    fn the_diag_warps_are_the_devices_unless_set() {
+        let unset = GpuSupernodalParams::default();
+        let apple = crate::Arch { vendor: crate::Vendor::Apple, ..discrete(10) };
+        let cpu = crate::Arch { vendor: crate::Vendor::Cpu, ..arch(1, 32, true) };
+        let devices = [arch(2, 32, true), discrete(128), apple, cpu];
+        assert_eq!(devices.each_ref().map(|d| unset.diag_warps_on(d)), [4, 4, 1, 1]);
+        let set = GpuSupernodalParams { diag_warps: Some(1), ..unset };
+        assert_eq!(devices.each_ref().map(|d| set.diag_warps_on(d)), [1, 1, 1, 1]);
     }
 
     /// Unset, `k_syrk` takes tiles of 32, except 64 for an f32 factor on an

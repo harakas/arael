@@ -214,12 +214,19 @@ writes the counts into the trace.
   mostly have fewer blocks than multiprocessors, and 64 rows on an AMD
   integrated GPU, which they fill. Discrete AMD GPUs are not measured.
 - `potf2_unroll`: whether the panel steps factor a 32-column diagonal tile
-  with its 32 pivots unrolled and each column broadcast through shared
-  memory, instead of a loop with shuffles; the factor is the same. Unset,
-  on a discrete GPU and not on an integrated one (or the CPU device):
-  unrolled is faster on an NVIDIA discrete GPU and slower on an AMD
-  integrated GPU, where its registers lower the occupancy of the whole
-  trailing update. Discrete AMD GPUs are not measured.
+  on one warp with its 32 pivots unrolled and each column broadcast
+  through shared memory, instead of a loop with shuffles; the factor is
+  the same. Unset, on a discrete GPU and not on an integrated one (or the
+  CPU device): unrolled is faster on an NVIDIA discrete GPU and slower on
+  an AMD integrated GPU, where its registers lower the occupancy of the
+  whole trailing update. Discrete AMD GPUs are not measured.
+- `diag_warps`: the warps that factor a panel step's 32-column diagonal
+  tile, 1 or 4. On 4 each warp keeps every fourth column and each pivot's
+  column reaches them through shared memory; the factor is the same. A
+  narrower tile takes one warp. Unset, 4 on NVIDIA and AMD GPUs, 1 on
+  Apple GPUs and the CPU device: 4 is faster on an NVIDIA discrete GPU
+  (much of it in f32) and on an AMD integrated GPU. Apple GPUs are not
+  measured.
 - `trsv_wide`: the narrowest supernode (columns) whose triangular solves
   run over many blocks, a launch per `trsv_block` columns: one block
   solves the launch's diagonal block, the others take the block before it

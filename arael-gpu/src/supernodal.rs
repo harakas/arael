@@ -230,6 +230,9 @@ pub struct GpuSupernodal<F: Scalar, D: Device> {
     syrk_block: u32,
     /// Rows per block of `k_trsm` ([`GpuSupernodalParams::trsm_rows`]).
     trsm_rows: u32,
+    /// Threads per block of `k_potf2`: its warps
+    /// ([`GpuSupernodalParams::diag_warps`]).
+    potf2_threads: u32,
     /// The inverted diagonal tiles, a `k_tile_inv` block each.
     n_inv: u32,
     levels: Vec<Level>,
@@ -290,7 +293,9 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         assert!(trsm_rows as usize >= NB && (NB * NB).is_multiple_of(trsm_rows as usize), "trsm_rows {trsm_rows} is at least {NB} and divides {NB} * {NB}");
         let syrk_tile = params.syrk_tile_on(dev.arch(), fs);
         assert!(syrk_tile == 32 || syrk_tile == 64, "syrk_tile {syrk_tile} is 32 or 64");
-        let sizes = DeviceSizes { syrk_block, syrk_tile, trsm_rows, potf2_unroll: params.potf2_unroll_on(dev.arch()), trsv_block: params.trsv_block_on(dev.arch()) };
+        let diag_warps = params.diag_warps_on(dev.arch());
+        assert!(diag_warps == 1 || diag_warps == 4, "diag_warps {diag_warps} is 1 or 4");
+        let sizes = DeviceSizes { syrk_block, syrk_tile, trsm_rows, potf2_unroll: params.potf2_unroll_on(dev.arch()), diag_warps, trsv_block: params.trsv_block_on(dev.arch()) };
         let plan = Plan::new(sn, asym);
         let lw = build_levels(&plan, params, dev.arch(), fs);
         let lu = params.lane_unroll.unwrap_or(if fs == 4 { 4 } else { 8 });
@@ -462,6 +467,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             seed_lanes,
             syrk_block,
             trsm_rows,
+            potf2_threads: diag_warps * NB as u32,
             n_inv: n_inv as u32,
             levels,
             steps,
@@ -574,7 +580,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             // the first step's diagonal tiles; each later one is factored by
             // the syrk of the step before it
             if !l.trsm_grid.is_empty() {
-                self.run(&self.k.potf2, l.n_big, NB as u32, 0, &[list(l.big), plan, factor, fail])?;
+                self.run(&self.k.potf2, l.n_big, self.potf2_threads, 0, &[list(l.big), plan, factor, fail])?;
             }
             // With a lookahead, a block's last step updates the next block's
             // columns, forks, and updates the rest on the main stream while
@@ -897,6 +903,7 @@ struct DeviceSizes {
     syrk_tile: u32,
     trsm_rows: u32,
     potf2_unroll: bool,
+    diag_warps: u32,
     trsv_block: u32,
 }
 
@@ -905,10 +912,11 @@ struct DeviceSizes {
 /// slots of [`crate::plan`].
 fn defines(scalar: &str, scalar_bytes: usize, lu: usize, seed_lanes: u32, sizes: DeviceSizes) -> String {
     use plan::*;
-    let DeviceSizes { syrk_block, syrk_tile, trsm_rows, potf2_unroll, trsv_block } = sizes;
+    let DeviceSizes { syrk_block, syrk_tile, trsm_rows, potf2_unroll, diag_warps, trsv_block } = sizes;
     let mut s = format!(
         "#define SCALAR {scalar}\n#define SCALAR_BYTES {scalar_bytes}u\n#define LU {lu}u\n#define THREADS {THREADS}u\n#define SEED_LANES {seed_lanes}u\n\
-         #define SYRK_BLOCK {syrk_block}u\n#define SYRK_TB {syrk_tile}u\n#define TRSM_ROWS {trsm_rows}u\n#define POTF2_UNROLL {}\n#define TRSV_BLOCK {trsv_block}u\n",
+         #define SYRK_BLOCK {syrk_block}u\n#define SYRK_TB {syrk_tile}u\n#define TRSM_ROWS {trsm_rows}u\n#define POTF2_UNROLL {}\n#define DIAG_WARPS {diag_warps}u\n\
+         #define TRSV_BLOCK {trsv_block}u\n",
         potf2_unroll as u32
     );
     let consts = [
@@ -987,6 +995,7 @@ mod tests {
             trsm_rows: None,
             syrk_tile: None,
             potf2_unroll: None,
+            diag_warps: None,
             trsv_wide: None,
             trsv_block: None,
             pair_tiles: None,
@@ -1178,12 +1187,12 @@ mod tests {
         }
     }
 
-    /// The kernels' SYRK_BLOCK, SYRK_TB, TRSM_ROWS, POTF2_UNROLL and
-    /// TRSV_BLOCK are the sizes asked for (`defines` brings `plan`'s names into scope, which
+    /// The kernels' SYRK_BLOCK, SYRK_TB, TRSM_ROWS, POTF2_UNROLL,
+    /// DIAG_WARPS and TRSV_BLOCK are the sizes asked for (`defines` brings `plan`'s names into scope, which
     /// once shadowed its flag).
     #[test]
     fn the_defines_carry_the_device_sizes() {
-        let base = DeviceSizes { syrk_block: 32, syrk_tile: 64, trsm_rows: 64, potf2_unroll: false, trsv_block: 128 };
+        let base = DeviceSizes { syrk_block: 32, syrk_tile: 64, trsm_rows: 64, potf2_unroll: false, diag_warps: 1, trsv_block: 128 };
         let d = |sizes| defines("float", 4, 1, 32, sizes);
         assert!(d(base).contains("#define SYRK_BLOCK 32u\n"));
         assert!(d(DeviceSizes { syrk_block: 256, ..base }).contains("#define SYRK_BLOCK 256u\n"));
@@ -1193,6 +1202,8 @@ mod tests {
         assert!(d(DeviceSizes { trsm_rows: 128, ..base }).contains("#define TRSM_ROWS 128u\n"));
         assert!(d(base).contains("#define POTF2_UNROLL 0\n"));
         assert!(d(DeviceSizes { potf2_unroll: true, ..base }).contains("#define POTF2_UNROLL 1\n"));
+        assert!(d(base).contains("#define DIAG_WARPS 1u\n"));
+        assert!(d(DeviceSizes { diag_warps: 4, ..base }).contains("#define DIAG_WARPS 4u\n"));
         assert!(d(DeviceSizes { trsv_block: 256, ..base }).contains("#define TRSV_BLOCK 256u\n"));
     }
 
@@ -1265,10 +1276,10 @@ mod tests {
             })
         });
         let rows = [32, 64, 128].map(|r| GpuSupernodalParams { trsm_rows: Some(r), ..GpuSupernodalParams::default() });
-        let unrolls = [false, true].map(|u| GpuSupernodalParams { potf2_unroll: Some(u), ..GpuSupernodalParams::default() });
+        let unrolls = [(1, false), (1, true), (4, false), (4, true)].map(|(w, u)| GpuSupernodalParams { diag_warps: Some(w), potf2_unroll: Some(u), ..GpuSupernodalParams::default() });
         let f64s = has_f64(&*dev, "the f64 factor");
         for params in blocks.chain(rows).chain(unrolls).chain(both_syrks()) {
-            let sizes = (params.syrk_block, params.syrk_tile, params.trsm_rows, params.potf2_unroll, params.lookahead);
+            let sizes = (params.syrk_block, params.syrk_tile, params.trsm_rows, params.potf2_unroll, params.diag_warps, params.lookahead);
             let widest = (0..sn.n_supernodes()).map(|s| sn.supernode_dims(s).0).max().unwrap();
             if params.lookahead == Some(true) && widest > 2 * params.syrk_block.unwrap() as usize {
                 // the lookahead splits some block's last update: there are
@@ -1280,7 +1291,7 @@ mod tests {
                 let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
                 g.factorize(a.vals()).unwrap();
                 let err = factor_err(&sn, &g.factor_values().unwrap(), &cpu);
-                assert!(err < 1e-12, "factor err/max {err}, syrk block, syrk tile, trsm rows, potf2 unroll {sizes:?}");
+                assert!(err < 1e-12, "factor err/max {err}, syrk block, syrk tile, trsm rows, potf2 unroll, diag warps, lookahead {sizes:?}");
                 let mut x = rhs.clone();
                 g.solve(&mut x).unwrap();
                 let res = rel_residual(&dense, sn.dim(), &x, &rhs);
@@ -1289,7 +1300,7 @@ mod tests {
             let mut g32 = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params, wide(&*dev)).unwrap();
             g32.factorize(a.vals()).unwrap();
             let err = factor_err(&sn, &widen(&g32.factor_values().unwrap()), &cpu);
-            assert!(err < 1e-5, "f32 factor err/max {err}, syrk block, syrk tile, trsm rows, potf2 unroll {sizes:?}");
+            assert!(err < 1e-5, "f32 factor err/max {err}, syrk block, syrk tile, trsm rows, potf2 unroll, diag warps, lookahead {sizes:?}");
             let mut x = rhs.clone();
             g32.solve(&mut x).unwrap();
             let res = rel_residual(&dense, sn.dim(), &x, &rhs);
@@ -1386,8 +1397,9 @@ mod tests {
     fn the_row_kernels_keep_their_rows_in_registers() {
         let (a, _, _, sn) = setup(10);
         let dev = device();
-        fn check<F: Scalar>(dev: &Arc<TestDevice>, sn: &SupernodalSymbolic, a: &Matrix) {
-            let g = GpuSupernodal::<F, _>::new(dev, sn, a.symbolic(), &GpuSupernodalParams::default(), Wide::F64).unwrap();
+        fn check<F: Scalar>(dev: &Arc<TestDevice>, sn: &SupernodalSymbolic, a: &Matrix, diag_warps: u32) {
+            let params = GpuSupernodalParams { diag_warps: Some(diag_warps), ..GpuSupernodalParams::default() };
+            let g = GpuSupernodal::<F, _>::new(dev, sn, a.symbolic(), &params, Wide::F64).unwrap();
             let k = &g.k;
             let kernels = [
                 ("small_factor", &k.small_factor),
@@ -1406,12 +1418,16 @@ mod tests {
             ];
             for (name, kernel) in kernels {
                 let local = kernel.local_bytes().unwrap();
-                let allowed = if name == "syrk" && F::CPP == "double" && cfg!(feature = "cuda") { 256 } else { 0 };
-                assert!(local <= allowed, "k_{name} in {}: {} registers, {local} bytes of local memory", F::CPP, kernel.registers().unwrap());
+                // k_syrk held to two blocks a multiprocessor spills a little
+                let held = name == "syrk" && F::CPP == "double" && diag_warps == 1 && GpuSupernodalParams::default().potf2_unroll_on(dev.arch());
+                let allowed = if held && cfg!(feature = "cuda") { 256 } else { 0 };
+                assert!(local <= allowed, "k_{name} in {}, {diag_warps} diagonal warps: {} registers, {local} bytes of local memory", F::CPP, kernel.registers().unwrap());
             }
         }
-        check::<f64>(&dev, &sn, &a);
-        check::<f32>(&dev, &sn, &a);
+        for diag_warps in [1, 4] {
+            check::<f64>(&dev, &sn, &a, diag_warps);
+            check::<f32>(&dev, &sn, &a, diag_warps);
+        }
     }
 
     #[test]
@@ -1447,6 +1463,50 @@ mod tests {
             check::<f64>(&dev, &sn, &asym, &mut a, base, good);
         }
         check::<f32>(&dev, &sn, &asym, &mut a, base, good);
+    }
+
+    /// A pivot that is not positive is reported wherever it lies in the
+    /// root's panel steps (every supernode on them), the diagonal tiles
+    /// factored on one warp or on four: in the first step's tile
+    /// (`k_potf2`), in a later full tile and in the last, narrower one (the
+    /// end of `k_syrk`). The first and the last diagonal entry of every
+    /// block of the root in turn is made negative (the root's last column
+    /// lies in the narrower tile).
+    #[test]
+    fn a_pivot_that_is_not_positive_is_reported_from_any_diagonal_tile() {
+        let (mut a, _, _, sn) = setup(10);
+        let asym = a.symbolic().clone();
+        let root = sn.n_supernodes() - 1;
+        let (q, _) = sn.supernode_dims(root);
+        assert!(q > 2 * crate::plan::NB && q % crate::plan::NB != 0, "the root spans full tiles and a narrower last one: {q} columns");
+        let blocks: Vec<usize> = (0..asym.nblk_cols()).filter(|&j| sn.supernode_of(sn.position_of(j)) == root).collect();
+        // a diagonal block's first and last diagonal entries
+        let diag = |j: usize| {
+            let b = asym.col_range(j).find(|&b| asym.blk_row(b) == j).unwrap();
+            let w = asym.block_dims(b).0;
+            let base = asym.val_range(b).start;
+            [base, base + (w - 1) * (w + 1)]
+        };
+        let dev = device();
+        fn check<F: Scalar>(dev: &Arc<TestDevice>, sn: &SupernodalSymbolic, a: &mut Matrix, at: &[usize]) {
+            for warps in [1, 4] {
+                let params = GpuSupernodalParams { diag_warps: Some(warps), ..panel_steps_only() };
+                let mut g = GpuSupernodal::<F, _>::new(dev, sn, a.symbolic(), &params, wide(&**dev)).unwrap();
+                assert!(g.levels.last().is_some_and(|l| !l.trsm_grid.is_empty()), "the root on the panel steps");
+                for &base in at {
+                    let good = a.vals()[base];
+                    a.vals_mut()[base] = -1.0;
+                    assert!(matches!(g.factorize(a.vals()), Err(FactorizeError::NotPositiveDefinite)), "{warps} warps, a negative entry at {base}");
+                    a.vals_mut()[base] = good;
+                    g.factorize(a.vals()).unwrap();
+                }
+            }
+        }
+        let at: Vec<usize> = blocks.iter().flat_map(|&j| diag(j)).collect();
+        if has_f64(&*dev, "the f64 factor") {
+            check::<f64>(&dev, &sn, &mut a, &at);
+        }
+        check::<f32>(&dev, &sn, &mut a, &at);
     }
 
     /// Values and right-hand sides in f32 go through the same kernels as
