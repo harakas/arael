@@ -84,7 +84,13 @@ The probed CPU cases need `clang++` (`ARAEL_CPU_PROBE_CXX` names another).
 Traces go to `/tmp/devmap-traces` (`DEVMAP_TRACES`); `gen/regen.sh` builds
 the cases again from them without running the benches. The probed
 problems are Ladybug-49 and Ladybug-138 (`BAL_CPU_SIZES="49 138"`, about
-1.5 and 5 minutes a solve) and slam with 120 poses (`SLAM_CPU_POSES`).
+1.5 and 5 minutes a solve) and slam with 120 poses (`SLAM_CPU_POSES`);
+an empty list runs none. `BAL_CPU_ATTEMPT_SIZES` adds bal problems probed
+for one attempt, for those too large to probe a whole solve:
+
+```sh
+BAL_CPU_SIZES= SLAM_CPU_POSES= BAL_CPU_ATTEMPT_SIZES=372 tools/devmap/gen/run.sh cpu
+```
 
 ## Testing the viewer
 

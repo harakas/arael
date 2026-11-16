@@ -4,7 +4,10 @@
 #
 # cpu:  the CPU device with its access probe (clang): small problems, every
 #       read and write measured. BAL_CPU_SIZES (default "49 138") and
-#       SLAM_CPU_POSES (default 120) pick the problems.
+#       SLAM_CPU_POSES (default 120) pick the problems, empty for none;
+#       BAL_CPU_ATTEMPT_SIZES (default none) the bal problems probed for one
+#       attempt (BENCH_SOLVE_ONLY=1 BENCH_MAX_ITERS=1), too large to probe a
+#       whole solve.
 # cuda, hip: the GPU at the benchmark's size: the launch sequence and the
 #       buffers, reads and writes from the kernels' signatures.
 #
@@ -24,6 +27,8 @@ trace() { # runtime bench id title problem model env...
     local bin=bal-bench
     [ "$bench" = slam ] && bin=slam-bench
     echo "== $id"
+    # regen.sh takes the title from here
+    echo "$title" > "$out/$id.title"
     # a GPU's launches are timed (one at a time); under the probe a time says nothing
     local timed=0
     [ "$rt" != cpu ] && timed=1
@@ -44,12 +49,20 @@ for rt in "$@"; do
         export ARAEL_CPU_PROBE=1
         # Ladybug-49 takes about 1.5 minutes probed, Ladybug-138 about 5: the larger one
         # launches factor kernels the smaller does not (k_pair_update, k_small_factor, k_bwd_gemv)
-        for n in ${BAL_CPU_SIZES:-49 138}; do
+        for n in ${BAL_CPU_SIZES-49 138}; do
             trace cpu bal bal-$n-f32-cpu "bal Ladybug-$n, f32 model, CPU device (probed)" "bal Ladybug-$n" f32 BAL_ONLY=$n "BAL_SYSTEMS=arael LM f32 schur" BAL_NO_MEM=1
             trace cpu bal bal-$n-f64-cpu "bal Ladybug-$n, f64 model, CPU device (probed)" "bal Ladybug-$n" f64 BAL_ONLY=$n "BAL_SYSTEMS=arael LM f64 schur" BAL_NO_MEM=1
         done
-        trace cpu slam slam-${SLAM_CPU_POSES:-120}-f32-cpu "slam ${SLAM_CPU_POSES:-120} poses, f32 model, CPU device (probed)" "slam ${SLAM_CPU_POSES:-120} poses" f32 SLAM_POSES=${SLAM_CPU_POSES:-120} "SLAM_SYSTEMS=arael LM f32" SLAM_NO_MEM=1
-        trace cpu slam slam-${SLAM_CPU_POSES:-120}-f64-cpu "slam ${SLAM_CPU_POSES:-120} poses, f64 model, CPU device (probed)" "slam ${SLAM_CPU_POSES:-120} poses" f64 SLAM_POSES=${SLAM_CPU_POSES:-120} "SLAM_SYSTEMS=arael LM f64" SLAM_NO_MEM=1
+        # one attempt: the factor kernels a smaller problem does not launch
+        for n in ${BAL_CPU_ATTEMPT_SIZES-}; do
+            for m in f32 f64; do
+                trace cpu bal bal-$n-$m-cpu "bal Ladybug-$n, $m model, CPU device (probed, one attempt)" "bal Ladybug-$n" $m BAL_ONLY=$n "BAL_SYSTEMS=arael LM $m schur\$" BAL_NO_MEM=1 BENCH_SOLVE_ONLY=1 BENCH_MAX_ITERS=1
+            done
+        done
+        for n in ${SLAM_CPU_POSES-120}; do
+            trace cpu slam slam-$n-f32-cpu "slam $n poses, f32 model, CPU device (probed)" "slam $n poses" f32 SLAM_POSES=$n "SLAM_SYSTEMS=arael LM f32" SLAM_NO_MEM=1
+            trace cpu slam slam-$n-f64-cpu "slam $n poses, f64 model, CPU device (probed)" "slam $n poses" f64 SLAM_POSES=$n "SLAM_SYSTEMS=arael LM f64" SLAM_NO_MEM=1
+        done
         unset ARAEL_CPU_PROBE
         ;;
     cuda | hip)

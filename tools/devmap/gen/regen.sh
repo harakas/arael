@@ -18,6 +18,8 @@ for pass in cpu gpu; do
             f=$("$here/donor.sh" "$bench" "$model")
             [ -n "$f" ] && from=(--patterns-from "$f")
         fi
-        python3 "$here/devmap.py" "$t" --id "$id" --title "$problem, $model model, $where" --problem "$problem" --model "$model" "${from[@]}"
+        title="$problem, $model model, $where"
+        [ -f "$out/$id.title" ] && title=$(cat "$out/$id.title")
+        python3 "$here/devmap.py" "$t" --id "$id" --title "$title" --problem "$problem" --model "$model" "${from[@]}"
     done
 done
