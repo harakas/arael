@@ -126,13 +126,30 @@ inline bool quick() { return getenv("BENCH_QUICK") != nullptr; }
 // benchmark wants; the sweep cuts it to two.
 //
 // BENCH_MAX_ITERS overrides it, to hold a configuration known not to converge
-// below the 100-iteration ceiling. The in-process rows (arael, factrs) do not
-// read it, so a capped run is a diagnostic, not a table.
+// below the 100-iteration ceiling, or for a diagnostic; the in-process rows
+// (benchmarks/harness/src/solver.rs) read it too. A capped run is a
+// diagnostic, not a table. A value that is not a count of at least 1 is an
+// error.
 inline int full_iters(int wanted) {
     if (quick()) return 2;
-    if (const char* m = getenv("BENCH_MAX_ITERS")) return atoi(m);
+    if (const char* m = getenv("BENCH_MAX_ITERS")) {
+        char* end = nullptr;
+        long n = strtol(m, &end, 10);
+        if (end == m || *end != '\0' || n < 1) {
+            fprintf(stderr, "BENCH_MAX_ITERS=%s: expected an iteration count of at least 1\n", m);
+            exit(2);
+        }
+        return (int)n;
+    }
     return wanted;
 }
+
+// BENCH_SOLVE_ONLY: the full solve alone, without the warmup and the probes,
+// as for the in-process rows. For one solve traced or probed (with
+// BENCH_MAX_ITERS=1, one attempt); the full solve stands in for the first
+// iteration's probe, so its first-iteration time counts only when it was one
+// clean accepted step, and there is no second.
+inline bool solve_only() { return getenv("BENCH_SOLVE_ONLY") != nullptr; }
 
 // Fastest of PROBE_SUBROUNDS runs of the same capped solve, after a discarded
 // warmup. Solve is any callable: Result(int max_iters).
@@ -148,15 +165,22 @@ Result probe(Solve solve, int max_iters) {
     return best;
 }
 
-// Run the probes and the full solve, and print the protocol line.
+// Run the probes and the full solve (the full solve alone under
+// solve_only()), and print the protocol line.
 //
 // Solve is Result(int max_iters) for the probes; Full is Result() for the real
 // run, which is the one that writes the solution out.
 template <typename Solve, typename Full>
 void report(Solve solve, Full full_solve) {
-    Result first = probe(solve, 1);
-    Result two = probe(solve, 2);
-    Result full = full_solve();
+    Result first, two, full;
+    if (solve_only()) {
+        full = full_solve();
+        first = full;
+    } else {
+        first = probe(solve, 1);
+        two = probe(solve, 2);
+        full = full_solve();
+    }
 
     std::string extra;
     if (two.accepted >= 2) {

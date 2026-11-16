@@ -317,7 +317,8 @@ carries the settings that produced it):
 | `RUN_ISAM` | include the GTSAM ISAM2 row (off by default: incremental, so not comparable to the batch rows) |
 | `RUN_PCG` | include g2o's iterative PCG rows (off by default; see below) |
 | `PGO_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
-| `BENCH_MAX_ITERS` | cap the solve below the 100-iteration ceiling. C++ runners only, so a capped run is a diagnostic, not a table |
+| `BENCH_MAX_ITERS` | every row's full solve held to this many iterations (damping retries included), the probes unchanged: a diagnostic, not a table |
+| `BENCH_SOLVE_ONLY` | every row runs its full solve alone, without the warmup and the probes. With `BENCH_MAX_ITERS=1` one attempt, for a trace or a probed run |
 | `G2O_PCG_TOL`, `G2O_PCG_ABSTOL`, `G2O_PCG_MAXITER` | PCG's inner-solve termination; defaults are g2o's shipped ones |
 | `G2O_PCG_STATS` | print PCG's CG iterations per solve; costs time inside the timed region, so never for a measurement |
 | `VERBOSE` | arael's per-iteration solver trace |

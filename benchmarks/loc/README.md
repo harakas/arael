@@ -259,6 +259,8 @@ what produced it.
 | `LOC_POSES` | scene size (60 default; landmarks scale as 4N) |
 | `LOC_COV` | covariance-recovery benchmark instead of the solve (`COV_BUDGET_S`, `COV_CELL_CAP_S`) |
 | `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
+| `BENCH_MAX_ITERS` | every row's full solve held to this many iterations (damping retries included), the probes unchanged: a diagnostic, not a table |
+| `BENCH_SOLVE_ONLY` | every row runs its full solve alone, without the warmup and the probes. With `BENCH_MAX_ITERS=1` one attempt, for a trace or a probed run |
 | `RUN_TINY` | include tiny-solver (off by default: an order of magnitude slower than the field) |
 | `LOC_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
 | `LOC_ARAEL_SOLVER` | `band` (default, `kd=11`) or `faer` (arael's general sparse solver) |

@@ -21,11 +21,9 @@ impl Header {
         self
     }
 
-    /// The one line every benchmark has: how many interleaved rounds, and how
-    /// many sub-rounds each probe runs.
+    /// The one line every benchmark has ([`rounds_value`]).
     pub fn rounds(self, rounds: usize) -> Self {
-        self.line("rounds", format!("{} [ROUNDS], {} probe sub-rounds per round",
-            rounds, crate::probe::PROBE_SUBROUNDS))
+        self.line("rounds", rounds_value(rounds))
     }
 
     /// And the pin, which every timing depends on.
@@ -46,6 +44,26 @@ impl Header {
             println!("{:<w$} : {}", key, value, w = w);
         }
     }
+}
+
+/// The rounds line's value: how many interleaved rounds, how many
+/// sub-rounds each probe runs (or none: the solve alone), and the full
+/// solve's cap when set.
+///
+/// ```ignore
+/// println!("rounds : {}", bench_harness::header::rounds_value(5));
+/// ```
+pub fn rounds_value(rounds: usize) -> String {
+    let probes = if crate::solver::solve_only() {
+        "the full solve alone, no warmup or probes [BENCH_SOLVE_ONLY]".to_string()
+    } else {
+        format!("{} probe sub-rounds per round", crate::probe::PROBE_SUBROUNDS)
+    };
+    let cap = match crate::solver::max_iters() {
+        Some(n) => format!(", the full solve held to {} iteration{}: a diagnostic [BENCH_MAX_ITERS]", n, if n == 1 { "" } else { "s" }),
+        None => String::new(),
+    };
+    format!("{} [ROUNDS], {}{}", rounds, probes, cap)
 }
 
 /// "run" or "skipped", for an optional system.

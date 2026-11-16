@@ -238,6 +238,8 @@ produced it.
 | `PLANE_SCHUR` | `auto` (default, declines here), `force` (marginalize the planes anyway) or `never` |
 | `PLANE_ENVELOPE` | `auto` (default), `always` or `never` -- how a reduced system is factored; needs `PLANE_SCHUR=force` to bite |
 | `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
+| `BENCH_MAX_ITERS` | every row's full solve held to this many iterations (damping retries included), the probes unchanged: a diagnostic, not a table |
+| `BENCH_SOLVE_ONLY` | every row runs its full solve alone, without the warmup and the probes. With `BENCH_MAX_ITERS=1` one attempt, for a trace or a probed run |
 | `PLANE_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
 | `PLANE_TOL`, `PLANE_TOL_F32` | the termination class, f64 and f32 |
 | `ARAEL_LAMBDA0`, `CERES_RADIUS0`, `G2O_LAMBDA_INIT`, `SYMFORCE_LAMBDA0` | initial damping, per system |

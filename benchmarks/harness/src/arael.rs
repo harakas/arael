@@ -249,6 +249,7 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
     // REPORT keeps the report of the full solve, for the table to print
     // under the row. The probes are capped solves and are not reported.
     const FULL_ITERS: usize = 100;
+    let full_iters = crate::solver::full_iters(FULL_ITERS);
     let report = std::env::var("REPORT").is_ok();
     let mut full_report: Option<String> = None;
     let mut failure: Option<String> = None;
@@ -290,7 +291,7 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
                 println!("  [par] {}", par);
             }
         }
-        if report && max_iters == FULL_ITERS {
+        if report && max_iters == full_iters {
             full_report = Some(r.pretty_report());
         }
         m.deserialize(&r.x);

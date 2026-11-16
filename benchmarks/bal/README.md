@@ -416,6 +416,8 @@ produced it.
 | env | effect |
 |-----|--------|
 | `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
+| `BENCH_MAX_ITERS` | every row's full solve held to this many iterations (damping retries included), the probes unchanged: a diagnostic, not a table |
+| `BENCH_SOLVE_ONLY` | every row runs its full solve alone, without the warmup and the probes. With `BENCH_MAX_ITERS=1` one attempt, for a trace or a probed run |
 | `BAL_ONLY` | substring; runs only the matching datasets (`1723-clean` reaches the exploratory one; `1723` also matches the raw file, which f32 cannot solve) |
 | `BAL_COV` | covariance-recovery benchmark instead of the solve (`COV_BUDGET_S` sets the per-cell budget) |
 | `BAL_COV_ORDERING` | covariance elimination ordering: `amd` (default here), `auto`, `nd`, `natural` |

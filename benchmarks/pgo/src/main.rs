@@ -360,8 +360,7 @@ fn print_header(rounds: usize, only: &Option<String>) {
     let ordering = arael_runner::ordering();
 
     println!("=== pgo-bench configuration ===");
-    println!("rounds            : {} [ROUNDS], {} probe sub-rounds per round",
-        rounds, bench_harness::probe::PROBE_SUBROUNDS);
+    println!("rounds            : {}", bench_harness::header::rounds_value(rounds));
     println!("datasets          : {} [PGO_ONLY]",
         only.as_deref().unwrap_or("all"));
     println!("systems           : {} [PGO_SYSTEMS]",

@@ -58,12 +58,51 @@ fn best_of<S>(solve: &mut impl FnMut(usize) -> Outcome<S>, max_iters: usize) -> 
     best.expect("PROBE_SUBROUNDS must be at least 1")
 }
 
-/// Drive the probes and the full solve.
+/// BENCH_MAX_ITERS: the iterations the reported solve runs, in place of
+/// the runner's own count, as for the C++ runners (`benchmarks/cpp/bench.h`).
+/// A capped run is a diagnostic, not a table. A value that is not a count of
+/// at least 1 is an error.
+pub fn max_iters() -> Option<usize> {
+    max_iters_from(std::env::var("BENCH_MAX_ITERS").ok().as_deref())
+}
+
+/// The iterations the reported solve runs: `wanted`, or [`max_iters`].
+pub fn full_iters(wanted: usize) -> usize {
+    max_iters().unwrap_or(wanted)
+}
+
+fn max_iters_from(v: Option<&str>) -> Option<usize> {
+    let v = v?;
+    match v.parse() {
+        Ok(n) if n >= 1 => Some(n),
+        _ => panic!("BENCH_MAX_ITERS={}: expected an iteration count of at least 1", v),
+    }
+}
+
+/// BENCH_SOLVE_ONLY=1: a row runs the reported solve alone, without the
+/// warmup and the probes, as do the C++ runners. For one solve traced or
+/// probed (with BENCH_MAX_ITERS=1, one attempt); its first-iteration time is
+/// the solve's own when it was one clean accepted step, and it has no
+/// full-iter.
+pub fn solve_only() -> bool {
+    std::env::var("BENCH_SOLVE_ONLY").is_ok()
+}
+
+/// Drive the probes and the full solve, the full solve held to
+/// [`full_iters`] and alone under [`solve_only`].
 ///
 /// `solve` must start from the problem's INITIAL state every time. A probe that
 /// left the model advanced gave the solve that followed a warm start it never
 /// asked for, and the iteration count changed under us.
-pub fn run<S>(full_iters: usize, mut solve: impl FnMut(usize) -> Outcome<S>) -> Row<S> {
+pub fn run<S>(full_iters: usize, solve: impl FnMut(usize) -> Outcome<S>) -> Row<S> {
+    drive(self::full_iters(full_iters), solve_only(), solve)
+}
+
+fn drive<S>(full_iters: usize, solve_only: bool, mut solve: impl FnMut(usize) -> Outcome<S>) -> Row<S> {
+    if solve_only {
+        let o = solve(full_iters);
+        return Row::new(o.ms, first_iter_ms(o.ms, o.attempts, o.accepted), o.attempts, o.solution).accepted(o.accepted);
+    }
     let _ = solve(1); // warmup, discarded
 
     let first = best_of(&mut solve, 1);
@@ -79,6 +118,7 @@ pub fn run<S>(full_iters: usize, mut solve: impl FnMut(usize) -> Outcome<S>) -> 
         .full_ms(two_ms)
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,7 +129,7 @@ mod tests {
     #[test]
     fn the_problem_reset_is_not_timed() {
         let reset = std::time::Duration::from_millis(30);
-        let row = run(3, |iters| {
+        let row = drive(3, false, |iters| {
             std::thread::sleep(reset); // the reset: rebuild/clone the problem
             let (ms, _) = timed(|| std::thread::sleep(std::time::Duration::from_millis(1)));
             Outcome { ms, accepted: iters, attempts: iters, solution: () }
@@ -99,5 +139,46 @@ mod tests {
             reset, row.first_iter_ms);
         assert!(row.solve_ms < 15.0,
             "the {:?} reset leaked into the solve: {} ms", reset, row.solve_ms);
+    }
+
+    /// The probes run at 1 and 2 iterations whatever the cap; the full
+    /// solve takes the cap.
+    #[test]
+    fn the_cap_holds_the_full_solve() {
+        let mut caps = Vec::new();
+        drive(7, false, |iters| {
+            caps.push(iters);
+            Outcome { ms: 1.0, accepted: iters, attempts: iters, solution: () }
+        });
+        assert_eq!(caps, [1, 1, 1, 2, 2, 7]);
+    }
+
+    /// Solve-only runs the full solve once, held to the cap, and reports
+    /// it: its first-iteration time only when it was one clean accepted
+    /// step, and no t(2).
+    #[test]
+    fn solve_only_is_one_capped_solve() {
+        let mut caps = Vec::new();
+        let row = drive(1, true, |iters| {
+            caps.push(iters);
+            Outcome { ms: 2.0, accepted: 1, attempts: 1, solution: () }
+        });
+        assert_eq!(caps, [1]);
+        assert_eq!((row.solve_ms, row.first_iter_ms, row.iterations, row.accepted, row.full_ms), (2.0, 2.0, 1, Some(1), None));
+        // a retried first step has no first-iteration time
+        let row = drive(3, true, |iters| Outcome { ms: 5.0, accepted: 2, attempts: iters, solution: () });
+        assert_eq!((row.solve_ms, row.iterations, row.accepted), (5.0, 3, Some(2)));
+        assert!(row.first_iter_ms.is_nan());
+    }
+
+    /// BENCH_MAX_ITERS is a count of at least 1; anything else is an
+    /// error.
+    #[test]
+    fn bench_max_iters_is_a_count() {
+        assert_eq!(max_iters_from(None), None);
+        assert_eq!(max_iters_from(Some("3")), Some(3));
+        for bad in ["0", "x", ""] {
+            assert!(std::panic::catch_unwind(|| max_iters_from(Some(bad))).is_err(), "{bad:?} accepted");
+        }
     }
 }
