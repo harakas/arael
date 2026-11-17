@@ -566,6 +566,10 @@ impl<D: Device> Device for Traced<D> {
                     shown.push(format!("{{\"bits\":\"{v:#018x}\"}}"));
                     Arg::Bits(v)
                 }
+                Arg::Bytes(bytes) => {
+                    shown.push(format!("{{\"table\":\"{} bytes\"}}", bytes.len()));
+                    Arg::Bytes(bytes)
+                }
             };
         }
         match lane {

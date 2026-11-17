@@ -85,6 +85,9 @@ typedef long long i64;
 #define KERNEL_THREADS_REGS(n) extern "C" __global__ __launch_bounds__(n)
 #define KERNEL_THREADS_BLOCKS(n, b) extern "C" __global__ __launch_bounds__(n)
 #endif
+// TABLE_PARAM(T) name: a struct parameter taken by value (Arg::Bytes), read
+// from the launch's parameter space.
+#define TABLE_PARAM(T) const T
 #define DEVICE __device__ inline
 // DEVICE_INLINE: a device function always inlined, for one whose array
 // parameters must stay in registers (a call keeps them in memory) and
@@ -221,6 +224,8 @@ ARAEL_UNFUSED(double, mul_rn, *)
 #define KERNEL_THREADS(n) [[max_total_threads_per_threadgroup(n)]] kernel
 #define KERNEL_THREADS_REGS(n) KERNEL_THREADS(n)
 #define KERNEL_THREADS_BLOCKS(n, b) KERNEL_THREADS(n)
+// (a TABLE_PARAM(T) parameter becomes a constant-space reference binding in
+// src/metal.rs's rewrite)
 #define DEVICE inline
 #define DEVICE_INLINE inline __attribute__((always_inline))
 #define RESTRICT __restrict
@@ -302,6 +307,7 @@ DEVICE float expm1(float x) {
 #define KERNEL_THREADS(n) extern "C"
 #define KERNEL_THREADS_REGS(n) extern "C"
 #define KERNEL_THREADS_BLOCKS(n, b) extern "C"
+#define TABLE_PARAM(T) const T
 #define DEVICE inline
 #define DEVICE_INLINE inline
 #define RESTRICT __restrict__

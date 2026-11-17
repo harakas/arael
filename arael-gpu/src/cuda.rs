@@ -108,7 +108,12 @@ struct TimedLaunch {
     launch: Launch,
     values: [u64; MAX_ARGS],
     args: usize,
+    tables: Tables,
 }
+
+/// A launch's [`Arg::Bytes`] arguments: (argument index, its bytes in
+/// aligned words). Empty, and not allocated, for a launch without one.
+type Tables = Vec<(usize, Vec<u64>)>;
 
 /// The timing of launches ([`Device::time_launches`]).
 struct Timer {
@@ -213,6 +218,25 @@ fn driver(e: impl core::fmt::Display) -> GpuError {
     GpuError::Driver(e.to_string())
 }
 
+/// Panics unless parameter `index` of `function` takes `bytes` bytes, the
+/// size of the [`Arg::Bytes`] given for it: the driver copies the
+/// parameter's size from the argument, past it if the argument is smaller.
+/// A driver before CUDA 12.4 has no parameter sizes to check against.
+fn check_table(function: &CudaFunction, index: usize, bytes: usize) {
+    use std::sync::OnceLock;
+    let (mut offset, mut size) = (0usize, 0usize);
+    // Safety: a query of the function's parameter; the outputs live through the call.
+    let info = |offset: &mut usize, size: &mut usize| unsafe { cudarc::driver::sys::cuFuncGetParamInfo(function.cu_function(), index, offset, size) };
+    // the symbol's lookup panics when the driver has none
+    static HAS_INFO: OnceLock<bool> = OnceLock::new();
+    if !*HAS_INFO.get_or_init(|| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| info(&mut 0, &mut 0))).is_ok()) {
+        return;
+    }
+    if info(&mut offset, &mut size) == cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        assert_eq!(size, bytes, "a table argument of {bytes} bytes for parameter {index}, which takes {size}");
+    }
+}
+
 impl CudaDevice {
     /// Device `index`. [`GpuError::Unavailable`] when there is no such
     /// device or the CUDA driver is not installed.
@@ -271,10 +295,15 @@ impl CudaDevice {
     }
 
     /// Queues `function` on `stream` with the argument slots `values`.
-    fn issue(&self, function: &CudaFunction, stream: &CudaStream, launch: Launch, values: &mut [u64; MAX_ARGS], args: usize) -> Result<(), GpuError> {
+    fn issue(&self, function: &CudaFunction, stream: &CudaStream, launch: Launch, values: &mut [u64; MAX_ARGS], args: usize, tables: &mut Tables) -> Result<(), GpuError> {
         let mut params = [core::ptr::null_mut::<core::ffi::c_void>(); MAX_ARGS];
         for (p, v) in params.iter_mut().zip(values.iter_mut()) {
             *p = v as *mut u64 as *mut core::ffi::c_void;
+        }
+        // a table's parameter points at its words: the driver copies as many
+        // bytes as the kernel's parameter has
+        for (i, words) in tables.iter_mut() {
+            params[*i] = words.as_mut_ptr() as *mut core::ffi::c_void;
         }
         let [gx, gy, gz] = launch.grid;
         let [bx, by, bz] = launch.block;
@@ -294,7 +323,8 @@ impl CudaDevice {
         };
         timer.start.record(stream).map_err(driver)?;
         let mut values = launch.values;
-        self.issue(&launch.function, stream, launch.launch, &mut values, launch.args)?;
+        let mut tables = launch.tables.clone();
+        self.issue(&launch.function, stream, launch.launch, &mut values, launch.args, &mut tables)?;
         timer.end.record(stream).map_err(driver)?;
         timer.end.synchronize().map_err(driver)?;
         let ms = timer.start.elapsed_ms(&timer.end).map_err(driver)?;
@@ -652,7 +682,8 @@ impl Device for CudaDevice {
         // many bytes from the slot as the kernel's parameter has (the low
         // bytes on a little-endian host).
         let mut values = [0u64; MAX_ARGS];
-        for (slot, arg) in values.iter_mut().zip(args) {
+        let mut tables = Tables::new();
+        for (i, (slot, arg)) in values.iter_mut().zip(args).enumerate() {
             *slot = match *arg {
                 Arg::Block(b, offset) => {
                     assert!(offset <= b.len, "argument offset {offset} past the block's {} bytes", b.len);
@@ -663,10 +694,15 @@ impl Device for CudaDevice {
                 Arg::F32(v) => v.to_bits() as u64,
                 Arg::F64(v) => v.to_bits(),
                 Arg::Bits(v) => v,
+                Arg::Bytes(bytes) => {
+                    check_table(&kernel.function, i, bytes.len());
+                    tables.push((i, crate::table_words(bytes)));
+                    0
+                }
             };
         }
         if self.timing.load(Ordering::Acquire) {
-            let timed = TimedLaunch { function: kernel.function.clone(), lane, launch, values, args: args.len() };
+            let timed = TimedLaunch { function: kernel.function.clone(), lane, launch, values, args: args.len(), tables };
             let mut timer = self.timer();
             return match timer.capture.as_mut() {
                 // kept for the graph's replays
@@ -677,7 +713,7 @@ impl Device for CudaDevice {
                 None => self.run_timed(&mut timer, &timed),
             };
         }
-        self.issue(&kernel.function, stream, launch, &mut values, args.len())
+        self.issue(&kernel.function, stream, launch, &mut values, args.len(), &mut tables)
     }
 
     fn time_launches(&self, on: bool) {

@@ -434,6 +434,31 @@ pub enum Arg<'a, B> {
     F64(f64),
     /// Eight bytes as they are, little-endian: a wide scalar's value ([`Wide::arg`]).
     Bits(u64),
+    /// A struct taken by value: its bytes, at most [`TABLE_BYTES`]. The
+    /// kernel declares it `TABLE_PARAM(T) name` (`arael_gpu.h`), with `T`
+    /// of exactly these bytes, and reads it from the launch's parameters,
+    /// not from device memory: for a table of launch constants.
+    ///
+    /// ```ignore
+    /// // struct Cols { u64 w[3]; };  KERNEL void k(GLOBAL u8* b, TABLE_PARAM(Cols) c)
+    /// let cols = [0u64, 256, 512];
+    /// dev.launch(&k, Launch::linear(n, 256), &[Arg::Block(&b, 0), Arg::Bytes(bytemuck::cast_slice(&cols))])?;
+    /// ```
+    Bytes(&'a [u8]),
+}
+
+/// The most bytes an [`Arg::Bytes`] takes: the parameter space every
+/// runtime gives a launch (CUDA's and HIP's 4 KB, Metal's `setBytes`).
+pub const TABLE_BYTES: usize = 4096;
+
+/// `bytes` copied into 8-byte aligned words, the last one zero-padded: an
+/// [`Arg::Bytes`] as a launch keeps it, so that a kernel's struct of
+/// `u64`s reads it in place.
+pub(crate) fn table_words(bytes: &[u8]) -> Vec<u64> {
+    assert!(bytes.len() <= TABLE_BYTES, "a table argument of {} bytes, at most {TABLE_BYTES}", bytes.len());
+    let mut w = vec![0u64; bytes.len().div_ceil(8)];
+    bytemuck::cast_slice_mut::<u64, u8>(&mut w)[..bytes.len()].copy_from_slice(bytes);
+    w
 }
 
 impl<B> Clone for Arg<'_, B> {

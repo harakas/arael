@@ -4,10 +4,12 @@
 //!
 //! An entry is a line that starts with `KERNEL...` (or a name ending in
 //! `_ENTRY`, a macro standing for one), then `void name(params) {`. A
-//! parameter is a buffer, `GLOBAL [const] T* [RESTRICT] name`, or a scalar,
-//! `T name`. Each becomes a binding, and the body starts by copying the
-//! bindings into locals of the written names and types, so a body that
-//! assigns to a parameter works as with a by-value argument:
+//! parameter is a buffer, `GLOBAL [const] T* [RESTRICT] name`, a scalar,
+//! `T name`, or a table, `TABLE_PARAM(T) name`. Each becomes a binding, and
+//! the body starts by copying the buffers and scalars into locals of the
+//! written names and types, so a body that assigns to a parameter works as
+//! with a by-value argument; a table becomes a constant reference of its
+//! name (`constant T& name = arael_a<i>;`), not a copy:
 //!
 //! ```text
 //! KERNEL_THREADS(256) void k(GLOBAL float* RESTRICT x, u32 n) {
@@ -32,6 +34,9 @@ pub(crate) enum Param {
     Buffer,
     /// A value of the written type: `setBytes:length:atIndex:`.
     Scalar(String),
+    /// A struct taken by value, `TABLE_PARAM(T) name` ([`crate::Arg::Bytes`]):
+    /// `setBytes:length:atIndex:`, read in place as a constant reference.
+    Table(String),
 }
 
 /// A kernel entry of a source.
@@ -180,7 +185,14 @@ fn parameters(name: &str, written: &str) -> Result<(Vec<String>, String, Vec<Par
         if ty.is_empty() || var.is_empty() || var.as_bytes()[0].is_ascii_digit() {
             return Err(format!("kernel `{name}`: parameter {i} (`{p}`) is not `type name`"));
         }
-        if ty.contains('&') || ty.contains('[') {
+        if let Some(table) = ty.strip_prefix("TABLE_PARAM(").and_then(|t| t.strip_suffix(')')) {
+            let table = table.trim();
+            bindings.push(format!("constant {table}& arael_a{i} [[buffer({i})]]"));
+            params.push(Param::Table(table.to_string()));
+            prologue.push_str(&format!(" constant {table}& {var} = arael_a{i};"));
+            continue;
+        }
+        if ty.contains('&') || ty.contains('[') || ty.contains('(') {
             return Err(format!("kernel `{name}`: parameter {i} (`{p}`) is neither a pointer nor a value"));
         }
         if ty.contains('*') {
@@ -216,6 +228,21 @@ mod tests {
              GLOBAL const float* RESTRICT x = arael_a0; GLOBAL W* y = arael_a1; u32 n = arael_a2;\n    y[0] = x[n];\n}\n"
         );
         assert_eq!(entries, vec![Entry { name: "k".into(), params: vec![Param::Buffer, Param::Buffer, Param::Scalar("u32".into())], dynamic_shared: false }]);
+    }
+
+    /// A table parameter becomes a constant reference binding of the
+    /// struct, its name a reference to it, not a copy.
+    #[test]
+    fn a_table_becomes_a_constant_reference() {
+        let src = "KERNEL void k(GLOBAL u8* RESTRICT b, TABLE_PARAM(Cols) c, u32 n) {\n    b[n] = c.w[0];\n}\n";
+        let (out, entries) = rewrite(src).unwrap();
+        assert_eq!(
+            out,
+            "KERNEL void k(GLOBAL u8* arael_a0 [[buffer(0)]], constant Cols& arael_a1 [[buffer(1)]], constant u32& arael_a2 [[buffer(2)]], \
+             uint3 arael_tid [[thread_position_in_threadgroup]], uint3 arael_bid [[threadgroup_position_in_grid]], \
+             uint3 arael_bdim [[threads_per_threadgroup]]) { GLOBAL u8* RESTRICT b = arael_a0; constant Cols& c = arael_a1; u32 n = arael_a2;\n    b[n] = c.w[0];\n}\n"
+        );
+        assert_eq!(entries[0].params, vec![Param::Buffer, Param::Table("Cols".into()), Param::Scalar("u32".into())]);
     }
 
     #[test]

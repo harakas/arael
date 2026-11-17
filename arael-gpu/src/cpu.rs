@@ -279,7 +279,13 @@ struct Recorded {
     slots: [u64; MAX_ARGS],
     /// With the access probe: the block arguments (index, address, bytes).
     blocks: Vec<(usize, usize, usize)>,
+    tables: Tables,
 }
+
+/// A launch's [`Arg::Bytes`] arguments: (argument index, its bytes in
+/// aligned words, which the kernel's struct reads in place). Empty, and not
+/// allocated, for a launch without one.
+type Tables = Vec<(usize, Vec<u64>)>;
 
 /// The launches a capture recorded, run again by a replay.
 pub struct CpuGraph {
@@ -370,11 +376,11 @@ impl CpuDevice {
     /// One launch run, its accesses counted when the probe is on, and
     /// timed by the host's clock when asked: a launch runs to its end
     /// here, so a replay's launches are timed one by one as they are.
-    fn run(&self, kernel: &CpuKernel, launch: &Launch, slots: &[u64; MAX_ARGS], blocks: &[(usize, usize, usize)]) -> Result<(), GpuError> {
+    fn run(&self, kernel: &CpuKernel, launch: &Launch, slots: &[u64; MAX_ARGS], blocks: &[(usize, usize, usize)], tables: &Tables) -> Result<(), GpuError> {
         let clock = self.timing.load(Ordering::Acquire).then(std::time::Instant::now);
         let ran = match &self.probe {
-            Some(p) => p.lock().unwrap_or_else(|e| e.into_inner()).launch(blocks, || run(kernel, launch, slots)),
-            None => run(kernel, launch, slots),
+            Some(p) => p.lock().unwrap_or_else(|e| e.into_inner()).launch(blocks, || run(kernel, launch, slots, tables)),
+            None => run(kernel, launch, slots, tables),
         };
         if let Some(clock) = clock {
             self.times.lock().unwrap_or_else(|e| e.into_inner()).push(clock.elapsed().as_secs_f64());
@@ -481,11 +487,15 @@ fn load(lib: &[u8]) -> Result<libloading::Library, GpuError> {
 }
 
 /// Run one launch: its argument slots handed to the launcher.
-fn run(kernel: &CpuKernel, launch: &Launch, slots: &[u64; MAX_ARGS]) -> Result<(), GpuError> {
+fn run(kernel: &CpuKernel, launch: &Launch, slots: &[u64; MAX_ARGS], tables: &Tables) -> Result<(), GpuError> {
     let mut slots = *slots;
     let mut params = [core::ptr::null_mut::<c_void>(); MAX_ARGS];
     for (p, v) in params.iter_mut().zip(slots.iter_mut()) {
         *p = v as *mut u64 as *mut c_void;
+    }
+    // a table's parameter points at its words, read in place as the struct
+    for (i, words) in tables {
+        params[*i] = words.as_ptr() as *mut c_void;
     }
     let [gx, gy, gz] = launch.grid;
     let [bx, by, bz] = launch.block;
@@ -645,7 +655,8 @@ impl Device for CpuDevice {
         crate::fault::check("launch")?;
         assert!(args.len() <= MAX_ARGS, "a launch takes at most {MAX_ARGS} arguments");
         let mut slots = [0u64; MAX_ARGS];
-        for (slot, arg) in slots.iter_mut().zip(args) {
+        let mut tables = Tables::new();
+        for (i, (slot, arg)) in slots.iter_mut().zip(args).enumerate() {
             *slot = match *arg {
                 Arg::Block(b, offset) => {
                     assert!(offset <= b.len, "argument offset {offset} past the block's {} bytes", b.len);
@@ -656,6 +667,10 @@ impl Device for CpuDevice {
                 Arg::F32(v) => v.to_bits() as u64,
                 Arg::F64(v) => v.to_bits(),
                 Arg::Bits(v) => v,
+                Arg::Bytes(bytes) => {
+                    tables.push((i, crate::table_words(bytes)));
+                    0
+                }
             };
         }
         let blocks: Vec<(usize, usize, usize)> = match &self.probe {
@@ -668,12 +683,12 @@ impl Device for CpuDevice {
             if let Some((t, recorded)) = capture.as_mut()
                 && *t == me
             {
-                recorded.push(Recorded { kernel: kernel.clone(), launch, slots, blocks });
+                recorded.push(Recorded { kernel: kernel.clone(), launch, slots, blocks, tables });
                 return Ok(());
             }
         }
         let _stream = self.stream();
-        self.run(kernel, &launch, &slots, &blocks)
+        self.run(kernel, &launch, &slots, &blocks, &tables)
     }
 
     fn launch_on(&self, lane: Lane, kernel: &CpuKernel, launch: Launch, args: &[Arg<'_, CpuBlock>]) -> Result<(), GpuError> {
@@ -734,7 +749,7 @@ impl Device for CpuDevice {
         self.not_capturing("a replay")?;
         let _stream = self.stream();
         for l in &graph.launches {
-            self.run(&l.kernel, &l.launch, &l.slots, &l.blocks)?;
+            self.run(&l.kernel, &l.launch, &l.slots, &l.blocks, &l.tables)?;
         }
         Ok(())
     }

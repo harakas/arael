@@ -307,7 +307,12 @@ struct TimedLaunch {
     lane: Lane,
     launch: Launch,
     values: [u64; MAX_ARGS],
+    tables: Tables,
 }
+
+/// A launch's [`Arg::Bytes`] arguments: (argument index, its bytes in
+/// aligned words). Empty, and not allocated, for a launch without one.
+type Tables = Vec<(usize, Vec<u64>)>;
 
 /// The timing of launches ([`Device::time_launches`]).
 struct Timer {
@@ -556,10 +561,15 @@ impl HipDevice {
     }
 
     /// Queues `function` on `stream` with the argument slots `values`.
-    fn issue(&self, function: rt::hipFunction_t, stream: rt::hipStream_t, launch: Launch, values: &mut [u64; MAX_ARGS]) -> Result<(), GpuError> {
+    fn issue(&self, function: rt::hipFunction_t, stream: rt::hipStream_t, launch: Launch, values: &mut [u64; MAX_ARGS], tables: &mut Tables) -> Result<(), GpuError> {
         let mut params = [core::ptr::null_mut::<c_void>(); MAX_ARGS];
         for (p, v) in params.iter_mut().zip(values.iter_mut()) {
             *p = v as *mut u64 as *mut c_void;
+        }
+        // a table's parameter points at its words: the runtime copies as many
+        // bytes as the kernel's parameter has
+        for (i, words) in tables.iter_mut() {
+            params[*i] = words.as_mut_ptr() as *mut c_void;
         }
         let [gx, gy, gz] = launch.grid;
         let [bx, by, bz] = launch.block;
@@ -581,7 +591,8 @@ impl HipDevice {
         // SAFETY: the device's stream and the timer's events.
         check(self.l, unsafe { self.l.rt.hipEventRecord(timer.start, stream) }, "hipEventRecord")?;
         let mut values = launch.values;
-        self.issue(launch.function, stream, launch.launch, &mut values)?;
+        let mut tables = launch.tables.clone();
+        self.issue(launch.function, stream, launch.launch, &mut values, &mut tables)?;
         let mut ms = 0f32;
         // SAFETY: as above; the elapsed time is asked once the end event is reached.
         unsafe {
@@ -846,7 +857,8 @@ impl Device for HipDevice {
         };
         assert!(args.len() <= MAX_ARGS, "a launch takes at most {MAX_ARGS} arguments");
         let mut values = [0u64; MAX_ARGS];
-        for (slot, arg) in values.iter_mut().zip(args) {
+        let mut tables = Tables::new();
+        for (i, (slot, arg)) in values.iter_mut().zip(args).enumerate() {
             *slot = match *arg {
                 Arg::Block(b, offset) => {
                     assert!(offset <= b.len, "argument offset {offset} past the block's {} bytes", b.len);
@@ -857,10 +869,14 @@ impl Device for HipDevice {
                 Arg::F32(v) => v.to_bits() as u64,
                 Arg::F64(v) => v.to_bits(),
                 Arg::Bits(v) => v,
+                Arg::Bytes(bytes) => {
+                    tables.push((i, crate::table_words(bytes)));
+                    0
+                }
             };
         }
         if self.timing.load(Ordering::Acquire) {
-            let timed = TimedLaunch { function: kernel.function, _module: kernel.module.clone(), lane, launch, values };
+            let timed = TimedLaunch { function: kernel.function, _module: kernel.module.clone(), lane, launch, values, tables };
             let mut timer = self.timer();
             return match timer.capture.as_mut() {
                 // kept for the graph's replays
@@ -871,7 +887,7 @@ impl Device for HipDevice {
                 None => self.run_timed(&mut timer, &timed),
             };
         }
-        self.issue(kernel.function, stream, launch, &mut values)
+        self.issue(kernel.function, stream, launch, &mut values, &mut tables)
     }
 
     fn time_launches(&self, on: bool) {

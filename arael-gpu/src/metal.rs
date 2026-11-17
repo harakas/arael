@@ -266,6 +266,8 @@ impl MetalKernel {
 enum Bound {
     Buffer(Retained<ProtocolObject<dyn MTLBuffer>>, usize),
     Bytes([u8; 8], usize),
+    /// An [`Arg::Bytes`] table's bytes, in aligned words.
+    Table(Vec<u64>, usize),
 }
 
 /// A launch as a graph keeps it: the kernel, its shape and its arguments
@@ -685,6 +687,8 @@ impl MetalDevice {
                 Bound::Buffer(b, offset) => unsafe { enc.setBuffer_offset_atIndex(Some(b), *offset, i) },
                 // SAFETY: `len` bytes of the value, copied by Metal now.
                 Bound::Bytes(v, len) => unsafe { enc.setBytes_length_atIndex(NonNull::from(v).cast(), *len, i) },
+                // SAFETY: `len` bytes of the table's words (at least that many), copied by Metal now.
+                Bound::Table(words, len) => unsafe { enc.setBytes_length_atIndex(NonNull::new(words.as_ptr() as *mut u64).expect("a table's words").cast(), *len, i) },
             }
         }
         if kernel.inner.entry.dynamic_shared {
@@ -918,6 +922,9 @@ impl Device for MetalDevice {
                 (Arg::I32(v), Param::Scalar(_)) => Bound::Bytes((v as u32 as u64).to_le_bytes(), 4),
                 (Arg::F32(v), Param::Scalar(_)) => Bound::Bytes((v.to_bits() as u64).to_le_bytes(), 4),
                 (Arg::Bits(v), Param::Scalar(_)) => Bound::Bytes(v.to_le_bytes(), 8),
+                (Arg::Bytes(bytes), Param::Table(_)) => Bound::Table(crate::table_words(bytes), bytes.len()),
+                (Arg::Bytes(_), p) => panic!("kernel `{}`: argument {i} is a table, the parameter {p:?}", entry.name),
+                (_, Param::Table(t)) => panic!("kernel `{}`: argument {i} is not a table, the parameter a `TABLE_PARAM({t})`", entry.name),
                 (Arg::F64(_), _) => panic!("kernel `{}`: argument {i} is an f64, which Metal does not have", entry.name),
                 (_, Param::Buffer) => panic!("kernel `{}`: argument {i} is a value, the parameter a buffer", entry.name),
                 (Arg::Block(..), Param::Scalar(t)) => panic!("kernel `{}`: argument {i} is a buffer, the parameter a `{t}`", entry.name),
