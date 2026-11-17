@@ -14,9 +14,9 @@
 // the plan header's slots (SE, SO, SP, ST_*, SK_*, SB_*; SHEADER of them),
 // the words of
 // an eliminated block's record (SE_*, SE_REC of them, in the table at SE),
-// of an observer's (SO_*, SO_REC, at SO) and of a pair's (SP_*, SP_REC, at
-// SP), the
-// refinement state's words (R_*) and flags (F_*) come from schur.rs as
+// of an observer's (SO_*, SO_REC, at SO), of a pair's (SP_*, SP_REC, at
+// SP) and of a pair's expanded record (PX_*, PX_REC, in a block of their
+// own), the refinement state's words (R_*) and flags (F_*) come from schur.rs as
 // #defines. Kernels launched with THREADS threads per block, or PLANE where
 // said.
 //
@@ -275,6 +275,22 @@ DEVICE_INLINE void tile_products(THREAD R* acc, THREAD const u32* ij, u32 n, u32
     }
 }
 
+// Each pair's expanded record (PX_REC words, in the plan's order) for
+// k_schur_tiles: of its observer of the tile's row block (oa) the value
+// offset of W in w, of its observer of the column block (ob) the value offset
+// of its coupling tile in h and its sizes. Once per structure, a thread a
+// pair, so the tile kernel reads a pair in one step.
+KERNEL_THREADS(THREADS) void k_schur_pairs(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL u32* RESTRICT px, u32 np) {
+    u32 p = global_x();
+    if (p >= np) return;
+    u32 pr = H.w[SP] + SP_REC * p;
+    u32 ra = H.w[SO] + SO_REC * plan[pr + SP_OA];
+    u32 rb = H.w[SO] + SO_REC * plan[pr + SP_OB];
+    px[PX_REC * p + PX_W_OFF] = plan[ra + SO_W_OFF];
+    px[PX_REC * p + PX_C_OFF] = plan[rb + SO_CA_OFF];
+    px[PX_REC * p + PX_DIMS] = plan[rb + SO_DIMS];
+}
+
 // df32: registers uncapped, as capped to fit more blocks the accumulators of
 // several groups spill (CUDA); f64 and f32 run faster capped.
 #if R_DF32
@@ -282,7 +298,7 @@ DEVICE_INLINE void tile_products(THREAD R* acc, THREAD const u32* ij, u32 n, u32
 #else
 #define TILES_ENTRY KERNEL_THREADS(TILE_LANES * TILE_WARPS)
 #endif
-TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const V* RESTRICT h, GLOBAL const R* RESTRICT w, GLOBAL R* RESTRICT s) {
+TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const u32* RESTRICT pairs, GLOBAL const V* RESTRICT h, GLOBAL const R* RESTRICT w, GLOBAL R* RESTRICT s) {
     // the launch's shared memory (schur.rs, tiles_shared_bytes): the groups'
     // W_oa, their C_ob, the units' sums of a split tile, in R
     DYNAMIC_SHARED(R, ws_all);
@@ -304,8 +320,6 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(Schu
     if (t == NONE) return;
     SHARED_PTR R* ws = ws_all + (unit * TILE_GROUPS + g) * KW * EW;
     SHARED_PTR R* cs = cs_all + (unit * TILE_GROUPS + g) * KW * EW;
-    u32 o_so = H.w[SO];
-    u32 o_sp = H.w[SP];
     u32 val = plan[H.w[ST_VAL_OFF] + t];
     u32 wr = plan[H.w[ST_WR] + t];
     u32 wc = plan[H.w[ST_WC] + t];
@@ -351,15 +365,14 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(Schu
         // ob observes the tile's column block: C_ob has wc rows
         u32 wb = 0u;
         if (p < p1) {
-            // the pair's observers' records: W_oa's place from oa's, the
-            // rest from ob's (both observe the pair's eliminated block)
-            u32 pr = o_sp + SP_REC * p;
-            u32 rb = o_so + SO_REC * plan[pr + SP_OB];
-            u32 db = plan[rb + SO_DIMS];
+            // the pair's expanded record (k_schur_pairs): W_oa's place, C_ob's
+            // and ob's sizes (both observe the pair's eliminated block)
+            u32 pr = PX_REC * p;
+            woff = pairs[pr + PX_W_OFF];
+            cb = pairs[pr + PX_C_OFF];
+            u32 db = pairs[pr + PX_DIMS];
             we = DIMS_WE(db);
             tb = DIMS_TRANS(db);
-            cb = plan[rb + SO_CA_OFF];
-            woff = plan[o_so + SO_REC * plan[pr + SP_OA] + SO_W_OFF];
             wb = wc;
         }
         // the step's widest pair, uniform in the unit (one group's too, for
