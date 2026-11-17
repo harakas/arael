@@ -16,8 +16,10 @@
 //! structure is uploaded once; a refresh writes and uploads the values only
 //! ([`Staging`]).
 //!
-//! The block starts with a layout table: the byte offset of every column,
-//! one `u64` each, in the order [`columns`] gives them. The kernels read a
+//! The layout table holds the byte offset of every column in the block, one
+//! `u64` each, in the order [`columns`] gives them, and the kernels take it
+//! as a launch parameter (`Arg::Bytes`, `TABLE_PARAM(ArgLayout) L`, read
+//! from the launch's parameters, not from device memory). A kernel reads a
 //! column through its slot of the table (`ARAEL_COL_<name>`), so a root's
 //! kernels compile once whatever the problem's size, and only the offsets
 //! change with it.
@@ -547,14 +549,15 @@ fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: 
     (v, structure, values)
 }
 
-/// Where every column sits in the block: the table first, then each column
-/// on a 256-byte boundary. The table and the structure columns end at
-/// `structure_bytes`, the values columns at `host_bytes`: what the host
-/// writes. The kernels write the rest.
+/// Where every column sits in the block: each column on a 256-byte
+/// boundary. The structure columns end at `structure_bytes`, the values
+/// columns at `host_bytes`: what the host writes. The kernels write the
+/// rest. `table`: the offsets as the kernels take them, the layout table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Layout {
     columns: Vec<Column>,
     offsets: Vec<usize>,
+    table: Vec<u64>,
     structure_bytes: usize,
     host_bytes: usize,
     bytes: usize,
@@ -563,7 +566,7 @@ struct Layout {
 impl Layout {
     fn new((columns, structure, values): (Vec<Column>, usize, usize)) -> Self {
         let align = |b: usize| b.div_ceil(256) * 256;
-        let mut at = align(columns.len() * 8);
+        let mut at = 0;
         let mut offsets = Vec::with_capacity(columns.len());
         let (mut structure_bytes, mut host_bytes) = (at, at);
         for (k, c) in columns.iter().enumerate() {
@@ -576,12 +579,19 @@ impl Layout {
                 host_bytes = at;
             }
         }
-        Layout { columns, offsets, structure_bytes, host_bytes, bytes: at }
+        let table = offsets.iter().map(|&o| o as u64).collect();
+        Layout { columns, offsets, table, structure_bytes, host_bytes, bytes: at }
     }
 
-    /// The `#define`s of the table's slots, for the kernels.
+    /// The `#define`s of the table's size and slots, for the kernels.
     fn defines(&self) -> String {
-        self.columns.iter().enumerate().map(|(k, c)| format!("#define ARAEL_COL_{} {k}\n", c.name)).collect()
+        let slots: String = self.columns.iter().enumerate().map(|(k, c)| format!("#define ARAEL_COL_{} {k}\n", c.name)).collect();
+        format!("#define ARAEL_COLS {}\n{slots}", self.columns.len())
+    }
+
+    /// The layout table as a launch's argument.
+    fn arg<B>(&self) -> Arg<'_, B> {
+        Arg::Bytes(arael_gpu::bytemuck::cast_slice(&self.table))
     }
 
     fn index(&self) -> HashMap<String, usize> {
@@ -849,15 +859,14 @@ fn tiles(
     (entity, cross)
 }
 
-/// The block's table and structure columns into `image` (the structure
-/// range): the entity tables' indices and tiles, the referenced fields'
-/// step offsets, the cross tiles, the instances' slots and their groupings
-/// by entity and by tile. Returns per referenced field, per slot, the
-/// step's first live global index (the key of its reference).
+/// The block's structure columns into `image` (the structure range): the
+/// entity tables' indices and tiles, the referenced fields' step offsets,
+/// the cross tiles, the instances' slots and their groupings by entity and
+/// by tile. Returns per referenced field, per slot, the step's first live
+/// global index (the key of its reference).
 #[allow(clippy::too_many_arguments)]
 fn write_structure(
     image: &mut [u8],
-    layout: &Layout,
     offset: &HashMap<String, usize>,
     shape: &DeviceShape,
     st: &DeviceStructure,
@@ -871,9 +880,6 @@ fn write_structure(
         let o = offset[name];
         image[o..o + bytes.len()].copy_from_slice(bytes);
     };
-    for (k, &o) in layout.offsets.iter().enumerate() {
-        image[8 * k..8 * k + 8].copy_from_slice(&(o as u64).to_le_bytes());
-    }
     for (e, (idx, tile)) in st.idx.iter().zip(entity_tiles).enumerate() {
         put(image, &format!("E{e}_IDX"), cast_slice(idx));
         put(image, &format!("E{e}_TILE"), cast_slice(tile));
@@ -999,9 +1005,9 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         };
         let mut block = dev.alloc(layout.bytes)?;
         let offset = layout.index();
-        // the structure: the table and the structure columns, copied once
+        // the structure: the structure columns, copied once
         let mut host = HostBuf::new(&**dev, staging, layout.structure_bytes)?;
-        let ref_index = write_structure(host.bytes_mut(&**dev)?, &layout, &offset, &shape, &st, &slots, &cross_slots, &entity_tiles, &cross_tiles);
+        let ref_index = write_structure(host.bytes_mut(&**dev)?, &offset, &shape, &st, &slots, &cross_slots, &entity_tiles, &cross_tiles);
         host.upload(&**dev, &mut block, 0, layout.structure_bytes)?;
         drop(host);
         let staged = HostBuf::new(&**dev, staging, layout.host_bytes - layout.structure_bytes)?;
@@ -1070,13 +1076,13 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     }
 
     /// The block's sections, for the tools that inspect a device's work
-    /// ([`Device::describe`]): the layout table, then every column with its
-    /// group (`structure`: written once; `values`: rewritten per solve;
-    /// `computed`: written by the kernels), stored type and meaning.
+    /// ([`Device::describe`]): every column with its group (`structure`:
+    /// written once; `values`: rewritten per solve; `computed`: written by
+    /// the kernels), stored type and meaning.
     fn sections(&self) -> Vec<Section> {
         let l = &self.layout;
         let (f, w) = (if core::mem::size_of::<T>() == 4 { "f32" } else { "f64" }, self.wide.name());
-        let mut v = vec![Section::new("L", 0, l.columns.len() * 8, 8, "u64").group("table").doc("the layout table: each column's byte offset in the block")];
+        let mut v = Vec::with_capacity(l.columns.len());
         for (c, &at) in l.columns.iter().zip(&l.offsets) {
             let group = if at < l.structure_bytes {
                 "structure"
@@ -1215,23 +1221,24 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         }
         self.gather(x, true)?;
         let _constraints = Scope::new(&*self.dev, "constraints");
-        let (b, h, g, cost) = (Arg::Block(&self.block, 0), Arg::Block(h.0, h.1), Arg::Block(g.0, g.1), Arg::Block(cost.0, cost.1));
+        let (b, l) = (Arg::Block(&self.block, 0), self.layout.arg());
+        let (h, g, cost) = (Arg::Block(h.0, h.1), Arg::Block(g.0, g.1), Arg::Block(cost.0, cost.1));
         for (c, &n) in self.counts.iter().enumerate() {
             if n == 0 {
                 continue;
             }
             let (k, shape) = (&self.kernels.constraints[c], &self.shape.constraints[c]);
-            self.run(&k.gh, n, &[b, Arg::U32(n as u32)])?;
-            self.dev.launch(&k.csum, Launch::linear(THREADS, THREADS), &[b, cost, Arg::U32(parts(n) as u32)])?;
+            self.run(&k.gh, n, &[b, l, Arg::U32(n as u32)])?;
+            self.dev.launch(&k.csum, Launch::linear(THREADS, THREADS), &[b, l, cost, Arg::U32(parts(n) as u32)])?;
             // per side its entities' tiles and gradients, per pair its cross
             // tiles, a thread per entry
             for (&e, kr) in shape.sides.iter().zip(&k.sides) {
                 let (ne, se) = (self.shape.entities[e], self.slots[e]);
-                self.run(kr, se * (ne * (ne + 1) / 2 + ne), &[b, h, g, Arg::U32(se as u32)])?;
+                self.run(kr, se * (ne * (ne + 1) / 2 + ne), &[b, l, h, g, Arg::U32(se as u32)])?;
             }
             for (&(i, j, x), kx) in shape.pairs.iter().zip(&k.pairs) {
                 let (ni, nj, sx) = (self.shape.entities[shape.sides[i]], self.shape.entities[shape.sides[j]], self.cross_slots[x]);
-                self.run(kx, sx * ni * nj, &[b, h, Arg::U32(sx as u32)])?;
+                self.run(kx, sx * ni * nj, &[b, l, h, Arg::U32(sx as u32)])?;
             }
         }
         Ok(())
@@ -1244,14 +1251,14 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         self.zero(cost, 1)?;
         self.gather(x, false)?;
         let _constraints = Scope::new(&*self.dev, "constraints");
-        let (b, cost) = (Arg::Block(&self.block, 0), Arg::Block(cost.0, cost.1));
+        let (b, l, cost) = (Arg::Block(&self.block, 0), self.layout.arg(), Arg::Block(cost.0, cost.1));
         for (c, &n) in self.counts.iter().enumerate() {
             if n == 0 {
                 continue;
             }
             let k = &self.kernels.constraints[c];
-            self.run(&k.cost, n, &[b, Arg::U32(n as u32)])?;
-            self.dev.launch(&k.csum, Launch::linear(THREADS, THREADS), &[b, cost, Arg::U32(parts(n) as u32)])?;
+            self.run(&k.cost, n, &[b, l, Arg::U32(n as u32)])?;
+            self.dev.launch(&k.csum, Launch::linear(THREADS, THREADS), &[b, l, cost, Arg::U32(parts(n) as u32)])?;
         }
         Ok(())
     }
@@ -1584,6 +1591,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The block holds the columns alone, from byte 0 on 256-byte
+    /// boundaries; the layout table, each column's offset, is the kernels'
+    /// launch parameter, its size and slots their defines.
+    #[test]
+    fn the_layout_table_is_a_parameter_not_in_the_block() {
+        let col = |name: &str, elem, len| Column { name: name.into(), elem, len };
+        let layout = Layout::new((vec![col("E0_IDX", 4, 10), col("E0_VAL", 8, 100), col("C0_REC", 4, 1)], 1, 2));
+        assert_eq!(layout.offsets, [0, 256, 1280]);
+        assert_eq!(layout.table, [0, 256, 1280]);
+        assert_eq!((layout.structure_bytes, layout.host_bytes, layout.bytes), (256, 1280, 1536));
+        assert_eq!(layout.defines(), "#define ARAEL_COLS 3\n#define ARAEL_COL_E0_IDX 0\n#define ARAEL_COL_E0_VAL 1\n#define ARAEL_COL_C0_REC 2\n");
+        match layout.arg::<()>() {
+            Arg::Bytes(b) => assert_eq!(b, arael_gpu::bytemuck::cast_slice::<u64, u8>(&[0, 256, 1280])),
+            _ => panic!("the table is a bytes argument"),
+        }
+    }
 
     /// A kernel dump lands at `<dir>/<root>.<target>.<wide>.cu`, the
     /// directory made, and a dump that cannot be written is an error.

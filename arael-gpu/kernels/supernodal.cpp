@@ -14,6 +14,15 @@
 // The solve's kernels take a `gate`: they do nothing unless gate[0] is
 // nonzero, so a refinement can stop on the device and the steps launched
 // after it cost only their launches.
+//
+// The plan header (FACTOR_HEADER words: the word offset of each of the
+// plan's arrays, a slot H_* each) is a launch parameter of every kernel that
+// takes the plan (TABLE_PARAM(FactorHeader) H), read from the launch's
+// parameters, not from the plan; a helper takes the offsets it needs as
+// arguments.
+struct FactorHeader {
+    u32 w[FACTOR_HEADER];
+};
 
 #if THREADS % 32 != 0 || 1024 % THREADS != 0
 #error "supernodal.cpp: THREADS is a multiple of 32 dividing 1024"
@@ -99,7 +108,7 @@ KERNEL_THREADS(SEED_LANES) void k_seed_wide(GLOBAL const u32* RESTRICT tiles, GL
 // columns' rows; thread t owns elements t + u THREADS (u < PAIR_EPT) of the
 // piece, row fastest. `src` and `dst` are the factor: the descendant read
 // through `src`, the target written through `dst`.
-KERNEL_THREADS(THREADS) void k_pair_update(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT src, GLOBAL F* RESTRICT dst) {
+KERNEL_THREADS(THREADS) void k_pair_update(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const F* RESTRICT src, GLOBAL F* RESTRICT dst) {
     SHARED F sa[PAIR_KC * PAIR_NI];
     SHARED F sb[PAIR_KC * PAIR_NJ];
     SHARED u32 tr[PAIR_NI];
@@ -115,8 +124,8 @@ KERNEL_THREADS(THREADS) void k_pair_update(GLOBAL const u32* RESTRICT items, GLO
     u32 j0 = it[9];
     u32 ni = it[8] - i0;
     u32 nj = it[10] - j0;
-    if (t < ni) tr[t] = plan[plan[H_RMAP] + it[5] + i0 + t];
-    else if (t < ni + nj) tc[t - ni] = plan[plan[H_CMAP] + it[6] + j0 + t - ni];
+    if (t < ni) tr[t] = plan[H.w[H_RMAP] + it[5] + i0 + t];
+    else if (t < ni + nj) tc[t - ni] = plan[H.w[H_CMAP] + it[6] + j0 + t - ni];
     u32 ii[PAIR_EPT];
     u32 jj[PAIR_EPT];
     F acc[PAIR_EPT];
@@ -159,18 +168,18 @@ KERNEL_THREADS(THREADS) void k_pair_update(GLOBAL const u32* RESTRICT items, GLO
 // shared tile, the scatter through the pair's row and column maps, one
 // subtraction: atomic when the tile is shared with other items. An item of
 // one rectangle may cover a range [k0, k1) of its k (k1 = 0: all of it).
-KERNEL_THREADS(THREADS) void k_big_update(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT rects, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor) {
+KERNEL_THREADS(THREADS) void k_big_update(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT rects, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL F* RESTRICT factor) {
     SHARED F u[TB * TB];
     SHARED F sa[TK * TB];
     SHARED F sb[TK * TB];
     // the supernodes' heads: q, h, first column, panel offset, ...
-    u32 o_head = plan[H_SN_HEAD];
-    u32 o_pr_d = plan[H_PR_D];
-    u32 o_pr_r0 = plan[H_PR_R0];
-    u32 o_pr_rmap = plan[H_PR_RMAP];
-    u32 o_pr_cmap = plan[H_PR_CMAP];
-    u32 o_rmap = plan[H_RMAP];
-    u32 o_cmap = plan[H_CMAP];
+    u32 o_head = H.w[H_SN_HEAD];
+    u32 o_pr_d = H.w[H_PR_D];
+    u32 o_pr_r0 = H.w[H_PR_R0];
+    u32 o_pr_rmap = H.w[H_PR_RMAP];
+    u32 o_pr_cmap = H.w[H_PR_CMAP];
+    u32 o_rmap = H.w[H_RMAP];
+    u32 o_cmap = H.w[H_CMAP];
     u32 item = block_x();
     u32 s = items[BIG_ITEM * item];
     u32 row0 = items[BIG_ITEM * item + 1];
@@ -180,8 +189,6 @@ KERNEL_THREADS(THREADS) void k_big_update(GLOBAL const u32* RESTRICT items, GLOB
     u32 kb = items[BIG_ITEM * item + 5];
     u32 ke = items[BIG_ITEM * item + 6];
     u32 shared_tile = items[BIG_ITEM * item + 7];
-    u32 q = plan[o_head + SN_HEAD * s];
-    u32 h = plan[o_head + SN_HEAD * s + 1];
     u32 t = thread_x();
     const u32 nt = THREADS;
     u32 tx = t % 16;
@@ -262,6 +269,11 @@ KERNEL_THREADS(THREADS) void k_big_update(GLOBAL const u32* RESTRICT items, GLOB
         }
     }
     BARRIER();
+    // the target's head read here, not before the loop: its words would
+    // stay live through it (one register past the kernel's 64 in f32,
+    // spilled)
+    u32 q = plan[o_head + SN_HEAD * s];
+    u32 h = plan[o_head + SN_HEAD * s + 1];
     u32 panel = plan[o_head + SN_HEAD * s + 3];
     u32 nrows = min(h - row0, TB);
     u32 ncols = min(q - col0, TB);
@@ -596,9 +608,8 @@ DEVICE_INLINE void small_solve(THREAD F (&v)[NB], GLOBAL F* factor, u32 panel, u
 // other rows solve against the step's diagonal tile. A pivot that is not
 // positive sets fail[0] to the supernode plus one and continues with 1. The
 // caller has the block wait before `l` is used again.
-DEVICE_INLINE void small_factor(u32 s, GLOBAL const u32* plan, GLOBAL F* factor, GLOBAL u32* fail, SHARED_PTR F* l, u32 t, u32 nt) {
-    // the supernodes' heads: q, h, first column, panel offset, ...
-    u32 o_head = plan[H_SN_HEAD];
+DEVICE_INLINE void small_factor(u32 s, GLOBAL const u32* plan, u32 o_head, GLOBAL F* factor, GLOBAL u32* fail, SHARED_PTR F* l, u32 t, u32 nt) {
+    // the supernodes' heads (q, h, first column, panel offset, ...) at o_head
     u32 q = plan[o_head + SN_HEAD * s];
     u32 h = plan[o_head + SN_HEAD * s + 1];
     u32 panel = plan[o_head + SN_HEAD * s + 3];
@@ -639,22 +650,22 @@ DEVICE_INLINE void small_factor(u32 s, GLOBAL const u32* plan, GLOBAL F* factor,
 
 // The small supernodes' factors, one block per supernode of `list`
 // (small_factor).
-KERNEL_THREADS_REGS(THREADS) void k_small_factor(GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+KERNEL_THREADS_REGS(THREADS) void k_small_factor(GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
     DYNAMIC_SHARED(F, l);
-    small_factor(list[block_x()], plan, factor, fail, l, thread_x(), block_dim_x());
+    small_factor(list[block_x()], plan, H.w[H_SN_HEAD], factor, fail, l, thread_x(), block_dim_x());
 }
 
 // k_chain's update piece at `it` (as k_pair_update's) by one warp (lane
 // `lane`): the piece's elements 4 a lane at a time, their products straight
 // from the factor.
-DEVICE void warp_piece(GLOBAL const u32* it, GLOBAL const u32* plan, GLOBAL F* factor, u32 lane) {
+DEVICE void warp_piece(GLOBAL const u32* it, GLOBAL const u32* plan, u32 o_rmap, u32 o_cmap, GLOBAL F* factor, u32 lane) {
     u32 base = it[0];
     u32 dh = it[1];
     u32 dq = it[2];
     u32 panel = it[3];
     u32 hs = it[4];
-    u32 rm = plan[H_RMAP] + it[5];
-    u32 cm = plan[H_CMAP] + it[6];
+    u32 rm = o_rmap + it[5];
+    u32 cm = o_cmap + it[6];
     u32 i0 = it[7];
     u32 j0 = it[9];
     u32 ni = it[8] - i0;
@@ -690,19 +701,22 @@ DEVICE void warp_piece(GLOBAL const u32* it, GLOBAL const u32* plan, GLOBAL F* f
 // launch, so `factor` is one plain pointer (not the read-only path); `l`
 // is the factors' dynamic shared memory, for the widest of the chain's
 // targets.
-KERNEL_THREADS_REGS(THREADS) void k_chain(GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, GLOBAL F* factor, GLOBAL u32* RESTRICT fail) {
+KERNEL_THREADS_REGS(THREADS) void k_chain(GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL F* factor, GLOBAL u32* RESTRICT fail) {
     DYNAMIC_SHARED(F, l);
     u32 t = thread_x();
+    u32 o_head = H.w[H_SN_HEAD];
+    u32 o_rmap = H.w[H_RMAP];
+    u32 o_cmap = H.w[H_CMAP];
     for (u32 lv = 0; lv < nlevels; lv++) {
         u32 pieces = levels[4 * lv];
         u32 npieces = levels[4 * lv + 1];
         u32 targets = levels[4 * lv + 2];
         u32 ntargets = levels[4 * lv + 3];
-        for (u32 p = t / NB; p < npieces; p += THREADS / NB) warp_piece(plan + pieces + PAIR_ITEM * p, plan, factor, t % NB);
+        for (u32 p = t / NB; p < npieces; p += THREADS / NB) warp_piece(plan + pieces + PAIR_ITEM * p, plan, o_rmap, o_cmap, factor, t % NB);
         for (u32 g = 0; g < ntargets; g++) {
             // the updates in; the previous factor's reads of `l` done
             BARRIER();
-            small_factor(plan[targets + g], plan, factor, fail, l, t, THREADS);
+            small_factor(plan[targets + g], plan, o_head, factor, fail, l, t, THREADS);
         }
         // the level's factors in, read by the next level's updates
         BARRIER();
@@ -713,10 +727,10 @@ KERNEL_THREADS_REGS(THREADS) void k_chain(GLOBAL const u32* RESTRICT levels, u32
 // tile at (0, 0) of every big panel of the level, a block of DIAG_WARPS
 // warps per panel (potf2_block). The later steps' diagonal tiles are
 // factored by the step before them, at the end of k_syrk.
-KERNEL_THREADS_REGS(DIAG_WARPS * NB) void k_potf2(GLOBAL const u32* RESTRICT panels, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+KERNEL_THREADS_REGS(DIAG_WARPS * NB) void k_potf2(GLOBAL const u32* RESTRICT panels, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
     SHARED F col[2 * NB];
     // the supernodes' heads: q, h, first column, panel offset, ...
-    u32 o_head = plan[H_SN_HEAD];
+    u32 o_head = H.w[H_SN_HEAD];
     u32 s = panels[block_x()];
     u32 q = plan[o_head + SN_HEAD * s];
     u32 h = plan[o_head + SN_HEAD * s + 1];
@@ -734,13 +748,13 @@ KERNEL_THREADS_REGS(DIAG_WARPS * NB) void k_potf2(GLOBAL const u32* RESTRICT pan
 // off the columns after it, so a value gets the same multiply-adds in the
 // same order as in a left-looking solve, but the dependent chain is two
 // operations per column instead of one per column before it.
-KERNEL_THREADS(TRSM_ROWS) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 j, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor) {
+KERNEL_THREADS(TRSM_ROWS) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 j, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL F* RESTRICT factor) {
     // the diagonal tile's lower part, column-major: column k at lc[k NB]
     SHARED F lc[NB * NB];
     // the diagonal's reciprocals: one division per column, not per row
     SHARED F dinv[NB];
     // the supernodes' heads: q, h, first column, panel offset, ...
-    u32 o_head = plan[H_SN_HEAD];
+    u32 o_head = H.w[H_SN_HEAD];
     u32 idx = block_x();
     u32 p = 0;
     bool found = false;
@@ -953,7 +967,7 @@ template <u32 T> DEVICE_INLINE void mma_store(THREAD simdgroup_float8x8 (&c)[MMA
 #else
 #define SYRK_ENTRY KERNEL_THREADS(THREADS)
 #endif
-SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u32 kn, u32 cend, u32 cbeg, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u32 kn, u32 cend, u32 cbeg, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
 #if TILE_MMA
     // the slabs, then the tile's products (SYRK_TB^2 <= 2 NB SYRK_TB values)
     SHARED F sm[2 * NB * SYRK_TB];
@@ -964,7 +978,7 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
     SHARED F sb[NB * SYRK_TB];
 #endif
     // the supernodes' heads: q, h, first column, panel offset, ...
-    u32 o_head = plan[H_SN_HEAD];
+    u32 o_head = H.w[H_SN_HEAD];
     u32 idx = block_x();
     u32 p = 0;
     bool found = false;
@@ -1141,7 +1155,7 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
 #error "supernodal.cpp: k_big_pair's products take the place of its two slabs"
 #endif
 #endif
-KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor) {
+KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL F* RESTRICT factor) {
 #if TILE_MMA
     // the slabs, then the tile's products
     SHARED F sm[TB * TB];
@@ -1161,10 +1175,10 @@ KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL
     u32 kb = it[6];
     u32 ke = it[7];
     // the supernodes' heads: q, h, first column, panel offset, ...
-    u32 o_head = plan[H_SN_HEAD];
-    u32 d = plan[plan[H_PR_D] + pi];
+    u32 o_head = H.w[H_SN_HEAD];
+    u32 d = plan[H.w[H_PR_D] + pi];
     u32 dh = plan[o_head + SN_HEAD * d + 1];
-    u32 dp = plan[o_head + SN_HEAD * d + 3] + plan[plan[H_PR_R0] + pi];
+    u32 dp = plan[o_head + SN_HEAD * d + 3] + plan[H.w[H_PR_R0] + pi];
     u32 k_end = ke == 0 ? plan[o_head + SN_HEAD * d] : ke;
     u32 t = thread_x();
     const u32 nt = THREADS;
@@ -1220,8 +1234,8 @@ KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL
         }
     }
 #endif
-    u32 rm = plan[H_RMAP] + plan[plan[H_PR_RMAP] + pi] + i0;
-    u32 cm = plan[H_CMAP] + plan[plan[H_PR_CMAP] + pi] + j0;
+    u32 rm = H.w[H_RMAP] + plan[H.w[H_PR_RMAP] + pi] + i0;
+    u32 cm = H.w[H_CMAP] + plan[H.w[H_PR_CMAP] + pi] + j0;
     u32 panel = plan[o_head + SN_HEAD * s + 3];
     u32 h = plan[o_head + SN_HEAD * s + 1];
 #if TILE_MMA
@@ -1255,8 +1269,8 @@ KERNEL_THREADS(THREADS) void k_big_pair(GLOBAL const u32* RESTRICT items, GLOBAL
 // the descendant's final y from its target's x, atomically. `x` and `xa`
 // are the same vector: the descendants' y read through `x`, the targets
 // written through `xa`.
-DEVICE_INLINE void fwd_gather_rows(GLOBAL const u32* plan, GLOBAL const u32* rows, u32 n, u32 stride, GLOBAL const F* factor, GLOBAL const F* x, GLOBAL F* xa, u32 t, u32 nt) {
-    GLOBAL const u32* heads = plan + plan[H_SN_HEAD];
+DEVICE_INLINE void fwd_gather_rows(GLOBAL const u32* plan, u32 o_head, GLOBAL const u32* rows, u32 n, u32 stride, GLOBAL const F* factor, GLOBAL const F* x, GLOBAL F* xa, u32 t, u32 nt) {
+    GLOBAL const u32* heads = plan + o_head;
     for (u32 e = t; e < n; e += nt) {
         u32 dp = rows[e];
         u32 tgt = rows[stride + e];
@@ -1287,10 +1301,10 @@ DEVICE_INLINE void fwd_gather_rows(GLOBAL const u32* plan, GLOBAL const u32* row
 // The forward gather, one block per item of `items` (3 words: the word
 // offset into `plan` of its first row, its rows, the level's rows, which
 // part the fields; fwd_gather_rows).
-KERNEL_THREADS(THREADS) void k_fwd_gather(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT x, GLOBAL F* RESTRICT xa) {
+KERNEL_THREADS(THREADS) void k_fwd_gather(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT x, GLOBAL F* RESTRICT xa) {
     if (gate[0] == 0) return;
     GLOBAL const u32* it = items + 3 * block_x();
-    fwd_gather_rows(plan, plan + it[0], it[1], it[2], factor, x, xa, thread_x(), THREADS);
+    fwd_gather_rows(plan, H.w[H_SN_HEAD], plan + it[0], it[1], it[2], factor, x, xa, thread_x(), THREADS);
 }
 
 // A lane's share of sum_i a[a0 + i] b[b0 + i] over i = lane, lane + 32, ...:
@@ -1333,14 +1347,14 @@ DEVICE_INLINE F lane_dot(GLOBAL const F* a, u32 a0, SHARED_PTR const F* b, u32 b
 // solve's), so a lane of either solve reads its row of X, or of X^T,
 // coalesced. Lane c solves L x = e_c by forward substitution; past the
 // tile's nb columns X is zero.
-KERNEL_THREADS(32) void k_tile_inv(GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT inv) {
+KERNEL_THREADS(32) void k_tile_inv(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT inv) {
     // L's lower part, column k at ls[33 k]; then X, column c at ls[33 c]
     SHARED F ls[32 * 33];
     u32 tile = block_x();
-    GLOBAL const u32* it = plan + plan[H_INV_TILES] + 2 * tile;
+    GLOBAL const u32* it = plan + H.w[H_INV_TILES] + 2 * tile;
     u32 s = it[0];
     u32 j0 = it[1];
-    GLOBAL const u32* head = plan + plan[H_SN_HEAD] + SN_HEAD * s;
+    GLOBAL const u32* head = plan + H.w[H_SN_HEAD] + SN_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
     u32 panel = head[3];
@@ -1490,8 +1504,8 @@ DEVICE_INLINE void fwd_trsv_steps(GLOBAL const u32* head, GLOBAL const F* factor
 // registers (trsv_fwd_warp), a wider one in 32-column steps
 // (fwd_trsv_steps). `xs`: q values (dynamic shared memory for the widest
 // supernode q of the launch). `t` is the thread.
-DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL const F* inv, GLOBAL F* x, SHARED_PTR F* xs, u32 t) {
-    GLOBAL const u32* head = plan + plan[H_SN_HEAD] + SN_HEAD * s;
+DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, u32 o_head, GLOBAL const F* factor, GLOBAL const F* inv, GLOBAL F* x, SHARED_PTR F* xs, u32 t) {
+    GLOBAL const u32* head = plan + o_head + SN_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
     u32 col0 = head[2];
@@ -1513,19 +1527,18 @@ DEVICE_INLINE void fwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* f
 }
 
 // The forward trsv, one block per supernode of `list` (fwd_trsv_one).
-KERNEL_THREADS(THREADS) void k_fwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
+KERNEL_THREADS(THREADS) void k_fwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
     if (gate[0] == 0) return;
     DYNAMIC_SHARED(F, smem);
-    fwd_trsv_one(list[block_x()], plan, factor, inv, x, smem, thread_x());
+    fwd_trsv_one(list[block_x()], plan, H.w[H_SN_HEAD], factor, inv, x, smem, thread_x());
 }
 
 // Backward solve, part one: x_s -= L_below^T x for the columns [c0, c1) of
 // supernode s by the block of THREADS threads; the rows' x gathered into
 // `xr` XR_CH at a time, a warp per column with the lanes over the rows. A
 // column's sums do not depend on the range it is in. `t` is the thread.
-DEVICE_INLINE void bwd_gemv_cols(u32 s, u32 c0, u32 c1, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* xr, u32 t) {
-    u32 o_row_sc = plan[H_ROW_SC];
-    GLOBAL const u32* head = plan + plan[H_SN_HEAD] + SN_HEAD * s;
+DEVICE_INLINE void bwd_gemv_cols(u32 s, u32 c0, u32 c1, GLOBAL const u32* plan, u32 o_row_sc, u32 o_head, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* xr, u32 t) {
+    GLOBAL const u32* head = plan + o_head + SN_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
     u32 col0 = head[2];
@@ -1549,15 +1562,15 @@ DEVICE_INLINE void bwd_gemv_cols(u32 s, u32 c0, u32 c1, GLOBAL const u32* plan, 
 }
 
 // The GEMV item at `it`, 3 words: its supernode and columns [c0, c1).
-DEVICE_INLINE void bwd_gemv_item(GLOBAL const u32* it, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* xr, u32 t) {
-    bwd_gemv_cols(it[0], it[1], it[2], plan, factor, x, xr, t);
+DEVICE_INLINE void bwd_gemv_item(GLOBAL const u32* it, GLOBAL const u32* plan, u32 o_row_sc, u32 o_head, GLOBAL const F* factor, GLOBAL F* x, SHARED_PTR F* xr, u32 t) {
+    bwd_gemv_cols(it[0], it[1], it[2], plan, o_row_sc, o_head, factor, x, xr, t);
 }
 
 // The backward GEMV, one block per item (bwd_gemv_item).
-KERNEL_THREADS(THREADS) void k_bwd_gemv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT x) {
+KERNEL_THREADS(THREADS) void k_bwd_gemv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const F* RESTRICT factor, GLOBAL F* RESTRICT x) {
     if (gate[0] == 0) return;
     SHARED F xr[XR_CH];
-    bwd_gemv_item(items + 3 * block_x(), plan, factor, x, xr, thread_x());
+    bwd_gemv_item(items + 3 * block_x(), plan, H.w[H_ROW_SC], H.w[H_SN_HEAD], factor, x, xr, thread_x());
 }
 
 // The transposed trsv of the supernode at `head` by the block over its
@@ -1596,8 +1609,8 @@ DEVICE_INLINE void bwd_trsv_steps(GLOBAL const u32* head, GLOBAL const F* factor
 // of THREADS threads; a supernode of at most 32 columns by the first warp
 // in registers (trsv_bwd_warp), a wider one in 32-column steps from the
 // last (bwd_trsv_steps). `xs` and `t` as fwd_trsv_one's.
-DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* factor, GLOBAL const F* inv, GLOBAL F* x, SHARED_PTR F* xs, u32 t) {
-    GLOBAL const u32* head = plan + plan[H_SN_HEAD] + SN_HEAD * s;
+DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, u32 o_head, GLOBAL const F* factor, GLOBAL const F* inv, GLOBAL F* x, SHARED_PTR F* xs, u32 t) {
+    GLOBAL const u32* head = plan + o_head + SN_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
     u32 col0 = head[2];
@@ -1620,10 +1633,10 @@ DEVICE_INLINE void bwd_trsv_one(u32 s, GLOBAL const u32* plan, GLOBAL const F* f
 
 // The backward trsv, one block per supernode of `list` (bwd_trsv_one); its
 // registers uncapped, or trsv_bwd_warp's row spills in f64.
-KERNEL_THREADS_REGS(THREADS) void k_bwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
+KERNEL_THREADS_REGS(THREADS) void k_bwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
     if (gate[0] == 0) return;
     DYNAMIC_SHARED(F, smem);
-    bwd_trsv_one(list[block_x()], plan, factor, inv, x, smem, thread_x());
+    bwd_trsv_one(list[block_x()], plan, H.w[H_SN_HEAD], factor, inv, x, smem, thread_x());
 }
 
 #if TRSV_BLOCK % 32 != 0 || TRSV_BLOCK == 0
@@ -1637,7 +1650,7 @@ KERNEL_THREADS_REGS(THREADS) void k_bwd_trsv(GLOBAL const u32* RESTRICT gate, GL
 // itself (fwd_trsv_steps). Otherwise rows [a, b) past block j, a row a
 // thread, take block j - 1 off in its 32-column steps (trsv_row_step). A
 // launch writes each row in one item; the launches order the blocks.
-KERNEL_THREADS(THREADS) void k_fwd_trsv_wide(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
+KERNEL_THREADS(THREADS) void k_fwd_trsv_wide(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
     if (gate[0] == 0) return;
     SHARED F xs[2 * TRSV_BLOCK];
     GLOBAL const u32* it = items + TRSV_ITEM * block_x();
@@ -1645,7 +1658,7 @@ KERNEL_THREADS(THREADS) void k_fwd_trsv_wide(GLOBAL const u32* RESTRICT gate, GL
     u32 j = it[1];
     u32 a = it[2];
     u32 b = it[3];
-    GLOBAL const u32* head = plan + plan[H_SN_HEAD] + SN_HEAD * s;
+    GLOBAL const u32* head = plan + H.w[H_SN_HEAD] + SN_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
     u32 col0 = head[2];
@@ -1681,7 +1694,7 @@ KERNEL_THREADS(THREADS) void k_fwd_trsv_wide(GLOBAL const u32* RESTRICT gate, GL
 // itself (bwd_trsv_steps). Otherwise columns [a, b) before block k take
 // block k + 1's rows off, a warp per column, the lanes over the rows. A
 // launch writes each column in one item; the launches order the blocks.
-KERNEL_THREADS(THREADS) void k_bwd_trsv_wide(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
+KERNEL_THREADS(THREADS) void k_bwd_trsv_wide(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* RESTRICT x) {
     if (gate[0] == 0) return;
     SHARED F xs[2 * TRSV_BLOCK];
     GLOBAL const u32* it = items + TRSV_ITEM * block_x();
@@ -1689,7 +1702,7 @@ KERNEL_THREADS(THREADS) void k_bwd_trsv_wide(GLOBAL const u32* RESTRICT gate, GL
     u32 k = it[1];
     u32 a = it[2];
     u32 b = it[3];
-    GLOBAL const u32* head = plan + plan[H_SN_HEAD] + SN_HEAD * s;
+    GLOBAL const u32* head = plan + H.w[H_SN_HEAD] + SN_HEAD * s;
     u32 q = head[0];
     u32 h = head[1];
     u32 col0 = head[2];
@@ -1725,16 +1738,17 @@ KERNEL_THREADS(THREADS) void k_bwd_trsv_wide(GLOBAL const u32* RESTRICT gate, GL
 // one plain pointer (not the read-only path); `smem` is the trsvs' dynamic
 // shared memory, for the chain's widest supernode; `inv` their inverted
 // diagonal tiles.
-KERNEL_THREADS_REGS(THREADS) void k_fwd_chain(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* x) {
+KERNEL_THREADS_REGS(THREADS) void k_fwd_chain(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* x) {
     if (gate[0] == 0) return;
     DYNAMIC_SHARED(F, smem);
     u32 t = thread_x();
+    u32 o_head = H.w[H_SN_HEAD];
     for (u32 lv = 0; lv < nlevels; lv++) {
         GLOBAL const u32* rec = levels + 5 * lv;
-        fwd_gather_rows(plan, plan + rec[0], rec[1], rec[1], factor, x, x, t, THREADS);
+        fwd_gather_rows(plan, o_head, plan + rec[0], rec[1], rec[1], factor, x, x, t, THREADS);
         // the gathers in; the previous trsv's reads of `smem` done
         BARRIER();
-        fwd_trsv_one(rec[2], plan, factor, inv, x, smem, t);
+        fwd_trsv_one(rec[2], plan, o_head, factor, inv, x, smem, t);
         // its x, read by the next level's gathers
         BARRIER();
     }
@@ -1742,11 +1756,13 @@ KERNEL_THREADS_REGS(THREADS) void k_fwd_chain(GLOBAL const u32* RESTRICT gate, G
 
 // The backward half of k_fwd_chain's chain: its levels from the last, each
 // its GEMV items and its transposed trsv.
-KERNEL_THREADS_REGS(THREADS) void k_bwd_chain(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* x) {
+KERNEL_THREADS_REGS(THREADS) void k_bwd_chain(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const F* RESTRICT factor, GLOBAL const F* RESTRICT inv, GLOBAL F* x) {
     if (gate[0] == 0) return;
     SHARED F xr[XR_CH];
     DYNAMIC_SHARED(F, smem);
     u32 t = thread_x();
+    u32 o_head = H.w[H_SN_HEAD];
+    u32 o_row_sc = H.w[H_ROW_SC];
     u32 lv = nlevels;
     while (lv > 0) {
         lv -= 1;
@@ -1756,11 +1772,11 @@ KERNEL_THREADS_REGS(THREADS) void k_bwd_chain(GLOBAL const u32* RESTRICT gate, G
         u32 ng = rec[4];
         if (ng > 0) {
             GLOBAL const u32* it = plan + rec[3];
-            bwd_gemv_cols(it[0], it[1], it[3 * (ng - 1) + 2], plan, factor, x, xr, t);
+            bwd_gemv_cols(it[0], it[1], it[3 * (ng - 1) + 2], plan, o_row_sc, o_head, factor, x, xr, t);
         }
         // the GEMVs' x in; the previous trsv's reads of `smem` done
         BARRIER();
-        bwd_trsv_one(rec[2], plan, factor, inv, x, smem, t);
+        bwd_trsv_one(rec[2], plan, o_head, factor, inv, x, smem, t);
         // its x, read by the next (lower) level's GEMVs
         BARRIER();
     }
@@ -1769,37 +1785,37 @@ KERNEL_THREADS_REGS(THREADS) void k_bwd_chain(GLOBAL const u32* RESTRICT gate, G
 // The right-hand side x (T: W, or f32 for an f32 reduction's kept
 // solution) into the factor's ordering and scalar: one thread per permuted
 // block, k the thread's.
-template <typename T> DEVICE void perm_in(GLOBAL const u32* gate, GLOBAL const u32* plan, GLOBAL const T* x, GLOBAL F* xb, u32 nb, u32 k) {
+template <typename T> DEVICE void perm_in(GLOBAL const u32* gate, GLOBAL const u32* plan, u32 o_order, u32 o_sc, u32 o_part, GLOBAL const T* x, GLOBAL F* xb, u32 nb, u32 k) {
     if (gate[0] == 0) return;
     if (k < nb) {
-        u32 old = plan[plan[H_ORDER] + k];
-        u32 dst = plan[plan[H_SC_START] + k];
-        u32 w = plan[plan[H_SC_START] + k + 1] - dst;
-        u32 src = plan[plan[H_PART] + old];
+        u32 old = plan[o_order + k];
+        u32 dst = plan[o_sc + k];
+        u32 w = plan[o_sc + k + 1] - dst;
+        u32 src = plan[o_part + old];
         for (u32 i = 0; i < w; i++) xb[dst + i] = (F)x[src + i];
     }
 }
-KERNEL_THREADS(THREADS) void k_perm_in(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT x, GLOBAL F* RESTRICT xb, u32 nb) {
-    perm_in(gate, plan, x, xb, nb, global_x());
+KERNEL_THREADS(THREADS) void k_perm_in(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const W* RESTRICT x, GLOBAL F* RESTRICT xb, u32 nb) {
+    perm_in(gate, plan, H.w[H_ORDER], H.w[H_SC_START], H.w[H_PART], x, xb, nb, global_x());
 }
-KERNEL_THREADS(THREADS) void k_perm_in_f32(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const float* RESTRICT x, GLOBAL F* RESTRICT xb, u32 nb) {
-    perm_in(gate, plan, x, xb, nb, global_x());
+KERNEL_THREADS(THREADS) void k_perm_in_f32(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const float* RESTRICT x, GLOBAL F* RESTRICT xb, u32 nb) {
+    perm_in(gate, plan, H.w[H_ORDER], H.w[H_SC_START], H.w[H_PART], x, xb, nb, global_x());
 }
 
 // The solution back into the matrix's ordering, in T (as perm_in's).
-template <typename T> DEVICE void perm_out(GLOBAL const u32* gate, GLOBAL const u32* plan, GLOBAL const F* xb, GLOBAL T* x, u32 nb, u32 k) {
+template <typename T> DEVICE void perm_out(GLOBAL const u32* gate, GLOBAL const u32* plan, u32 o_order, u32 o_sc, u32 o_part, GLOBAL const F* xb, GLOBAL T* x, u32 nb, u32 k) {
     if (gate[0] == 0) return;
     if (k < nb) {
-        u32 old = plan[plan[H_ORDER] + k];
-        u32 src = plan[plan[H_SC_START] + k];
-        u32 w = plan[plan[H_SC_START] + k + 1] - src;
-        u32 dst = plan[plan[H_PART] + old];
+        u32 old = plan[o_order + k];
+        u32 src = plan[o_sc + k];
+        u32 w = plan[o_sc + k + 1] - src;
+        u32 dst = plan[o_part + old];
         for (u32 i = 0; i < w; i++) x[dst + i] = (T)xb[src + i];
     }
 }
-KERNEL_THREADS(THREADS) void k_perm_out(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT xb, GLOBAL W* RESTRICT x, u32 nb) {
-    perm_out(gate, plan, xb, x, nb, global_x());
+KERNEL_THREADS(THREADS) void k_perm_out(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const F* RESTRICT xb, GLOBAL W* RESTRICT x, u32 nb) {
+    perm_out(gate, plan, H.w[H_ORDER], H.w[H_SC_START], H.w[H_PART], xb, x, nb, global_x());
 }
-KERNEL_THREADS(THREADS) void k_perm_out_f32(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT xb, GLOBAL float* RESTRICT x, u32 nb) {
-    perm_out(gate, plan, xb, x, nb, global_x());
+KERNEL_THREADS(THREADS) void k_perm_out_f32(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL const F* RESTRICT xb, GLOBAL float* RESTRICT x, u32 nb) {
+    perm_out(gate, plan, H.w[H_ORDER], H.w[H_SC_START], H.w[H_PART], xb, x, nb, global_x());
 }

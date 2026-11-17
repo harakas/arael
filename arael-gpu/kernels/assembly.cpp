@@ -861,8 +861,17 @@ DEVICE void reduce_cross(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRIC
     h[flip == 0 ? base + cb * stride + ra : base + ra * stride + cb] += acc;
 }
 
-// A column of the layout table: block base plus the byte offset in slot k
-// of L, as T (COL_MUT: writable). The generated constraint kernels read
-// every column this way.
-#define COL(base, T, k) ((GLOBAL const T*)((base) + L[ARAEL_COL_##k]))
-#define COL_MUT(base, T, k) ((GLOBAL T*)((base) + L[ARAEL_COL_##k]))
+// The layout table: the byte offset of each of a root's ARAEL_COLS columns
+// in its block, a launch's parameter (TABLE_PARAM(ArgLayout) L) in every
+// generated constraint kernel.
+#ifdef ARAEL_COLS
+struct ArgLayout {
+    u64 w[ARAEL_COLS];
+};
+#endif
+
+// A column: block base plus the byte offset in slot k of the table L, as T
+// (COL_MUT: writable). The generated constraint kernels read every column
+// this way.
+#define COL(base, T, k) ((GLOBAL const T*)((base) + L.w[ARAEL_COL_##k]))
+#define COL_MUT(base, T, k) ((GLOBAL T*)((base) + L.w[ARAEL_COL_##k]))

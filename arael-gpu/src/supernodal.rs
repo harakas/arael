@@ -220,6 +220,8 @@ pub struct GpuSupernodal<F: Scalar, D: Device> {
     /// tiles, a word holding 1 (the gate of a solve that always runs), and
     /// every level's lists.
     ints: D::Block,
+    /// The plan's header, as the kernels take it: a launch parameter.
+    header: [u32; plan::HEADER],
     tiles: usize,
     on: usize,
     ntiles: u32,
@@ -407,6 +409,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         solve_steps.extend((l..levels.len()).map(Step::Level));
         let mut ints = dev.alloc(pk.words.len() * 4)?;
         dev.write(&mut ints, 0, bytemuck::cast_slice(&pk.words))?;
+        let header = pk.words[..plan::HEADER].try_into().expect("the plan's header");
         let nvals = asym.val_count();
         let n_inv = plan.inv_tiles().len() / 2;
         let sec = Sections::new(plan.factor_vals * fs, plan.n * fs, nvals * 8, plan.n * 8, n_inv * plan::INV_TILE * fs);
@@ -461,6 +464,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             dev: dev.clone(),
             k,
             ints,
+            header,
             tiles: 4 * at_tiles,
             on: 4 * at_on,
             ntiles: (plan.tiles.len() / 6) as u32,
@@ -547,7 +551,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     }
 
     fn factorize_with(&self, vals: (&D::Block, usize), seed: &D::Kernel, fail: (&D::Block, usize)) -> Result<(), GpuError> {
-        let plan = Arg::Block(&self.ints, 0);
+        let (plan, hd) = (Arg::Block(&self.ints, 0), Arg::Bytes(bytemuck::cast_slice(&self.header)));
         let list = |at: usize| Arg::Block(&self.ints, at);
         let factor = Arg::Block(&self.work, self.sec.factor);
         let fail = Arg::Block(fail.0, fail.1);
@@ -558,29 +562,29 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         for step in &self.steps {
             let l = match *step {
                 Step::Chain { records, n, shared } => {
-                    self.run(&self.k.chain, 1, THREADS, shared, &[list(records), Arg::U32(n), plan, factor, fail])?;
+                    self.run(&self.k.chain, 1, THREADS, shared, &[list(records), Arg::U32(n), plan, hd, factor, fail])?;
                     continue;
                 }
                 Step::Level(i) => &self.levels[i],
             };
             if l.n_pair_items > 0 {
-                let args = [list(l.pair_items), plan, factor, factor];
+                let args = [list(l.pair_items), plan, hd, factor, factor];
                 self.run(&self.k.pair_update, l.n_pair_items, THREADS, 0, &args)?;
             }
             if l.n_big_items > 0 {
-                let args = [list(l.big_items), list(l.big_rects), plan, factor];
+                let args = [list(l.big_items), list(l.big_rects), plan, hd, factor];
                 self.run(&self.k.big_update, l.n_big_items, THREADS, 0, &args)?;
             }
             if l.n_pair_tiles > 0 {
-                self.run(&self.k.big_pair, l.n_pair_tiles, THREADS, 0, &[list(l.pair_tiles), plan, factor])?;
+                self.run(&self.k.big_pair, l.n_pair_tiles, THREADS, 0, &[list(l.pair_tiles), plan, hd, factor])?;
             }
             if l.n_small > 0 {
-                self.run(&self.k.small_factor, l.n_small, l.small_threads, l.small_shared, &[list(l.small), plan, factor, fail])?;
+                self.run(&self.k.small_factor, l.n_small, l.small_threads, l.small_shared, &[list(l.small), plan, hd, factor, fail])?;
             }
             // the first step's diagonal tiles; each later one is factored by
             // the syrk of the step before it
             if !l.trsm_grid.is_empty() {
-                self.run(&self.k.potf2, l.n_big, self.potf2_threads, 0, &[list(l.big), plan, factor, fail])?;
+                self.run(&self.k.potf2, l.n_big, self.potf2_threads, 0, &[list(l.big), plan, hd, factor, fail])?;
             }
             // With a lookahead, a block's last step updates the next block's
             // columns, forks, and updates the rest on the main stream while
@@ -593,7 +597,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             let stepped = (|| -> Result<(), GpuError> {
                 for (step, (&tg, &sg)) in l.trsm_grid.iter().zip(&l.syrk_grid).enumerate() {
                     let j = Arg::U32((step * NB) as u32);
-                    let args = [list(l.big), Arg::U32(l.n_big), j, plan, factor];
+                    let args = [list(l.big), Arg::U32(l.n_big), j, plan, hd, factor];
                     if tg > 0 {
                         self.run_on(lane, &self.k.trsm, tg, self.trsm_rows, 0, &args)?;
                     }
@@ -603,7 +607,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                         if grid == 0 {
                             return Ok(());
                         }
-                        let args = [list(l.big), Arg::U32(l.n_big), Arg::U32(k0), Arg::U32(kn), Arg::U32(cend), Arg::U32(cbeg), plan, factor, fail];
+                        let args = [list(l.big), Arg::U32(l.n_big), Arg::U32(k0), Arg::U32(kn), Arg::U32(cend), Arg::U32(cbeg), plan, hd, factor, fail];
                         self.run_on(lane, &self.k.syrk, grid, THREADS, 0, &args)
                     };
                     if cend == u32::MAX {
@@ -630,7 +634,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         }
         // the solve's inverted diagonal tiles
         if self.n_inv > 0 {
-            self.run(&self.k.tile_inv, self.n_inv, 32, 0, &[plan, factor, Arg::Block(&self.work, self.sec.inv)])?;
+            self.run(&self.k.tile_inv, self.n_inv, 32, 0, &[plan, hd, factor, Arg::Block(&self.work, self.sec.inv)])?;
         }
         Ok(())
     }
@@ -680,51 +684,51 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     fn solve_with(&self, x: (&D::Block, usize), gate: (&D::Block, usize), f32_x: bool) -> Result<(), GpuError> {
         let (perm_in, perm_out) = if f32_x { (&self.k.perm_in_f32, &self.k.perm_out_f32) } else { (&self.k.perm_in, &self.k.perm_out) };
         let gate = Arg::Block(gate.0, gate.1);
-        let plan = Arg::Block(&self.ints, 0);
+        let (plan, hd) = (Arg::Block(&self.ints, 0), Arg::Bytes(bytemuck::cast_slice(&self.header)));
         let list = |at: usize| Arg::Block(&self.ints, at);
         let factor = Arg::Block(&self.work, self.sec.factor);
         let inv = Arg::Block(&self.work, self.sec.inv);
         let xb = Arg::Block(&self.work, self.sec.xb);
         let x = Arg::Block(x.0, x.1);
         let blocks = self.nb.div_ceil(THREADS).max(1);
-        self.run(perm_in, blocks, THREADS, 0, &[gate, plan, x, xb, Arg::U32(self.nb)])?;
+        self.run(perm_in, blocks, THREADS, 0, &[gate, plan, hd, x, xb, Arg::U32(self.nb)])?;
         for step in &self.solve_steps {
             let l = match *step {
                 Step::Chain { records, n, shared } => {
-                    self.run(&self.k.fwd_chain, 1, THREADS, shared, &[gate, list(records), Arg::U32(n), plan, factor, inv, xb])?;
+                    self.run(&self.k.fwd_chain, 1, THREADS, shared, &[gate, list(records), Arg::U32(n), plan, hd, factor, inv, xb])?;
                     continue;
                 }
                 Step::Level(i) => &self.levels[i],
             };
             if l.n_g > 0 {
-                self.run(&self.k.fwd_gather, l.n_g, THREADS, 0, &[gate, list(l.g_items), plan, factor, xb, xb])?;
+                self.run(&self.k.fwd_gather, l.n_g, THREADS, 0, &[gate, list(l.g_items), plan, hd, factor, xb, xb])?;
             }
             if l.n_narrow > 0 {
-                self.run(&self.k.fwd_trsv, l.n_narrow, THREADS, l.narrow_shared, &[gate, list(l.narrow), plan, factor, inv, xb])?;
+                self.run(&self.k.fwd_trsv, l.n_narrow, THREADS, l.narrow_shared, &[gate, list(l.narrow), plan, hd, factor, inv, xb])?;
             }
             for &(items, n) in &l.wide_fwd {
-                self.run(&self.k.fwd_trsv_wide, n, THREADS, 0, &[gate, list(items), plan, factor, inv, xb])?;
+                self.run(&self.k.fwd_trsv_wide, n, THREADS, 0, &[gate, list(items), plan, hd, factor, inv, xb])?;
             }
         }
         for step in self.solve_steps.iter().rev() {
             let l = match *step {
                 Step::Chain { records, n, shared } => {
-                    self.run(&self.k.bwd_chain, 1, THREADS, shared, &[gate, list(records), Arg::U32(n), plan, factor, inv, xb])?;
+                    self.run(&self.k.bwd_chain, 1, THREADS, shared, &[gate, list(records), Arg::U32(n), plan, hd, factor, inv, xb])?;
                     continue;
                 }
                 Step::Level(i) => &self.levels[i],
             };
             if l.n_bg > 0 {
-                self.run(&self.k.bwd_gemv, l.n_bg, THREADS, 0, &[gate, list(l.bg_items), plan, factor, xb])?;
+                self.run(&self.k.bwd_gemv, l.n_bg, THREADS, 0, &[gate, list(l.bg_items), plan, hd, factor, xb])?;
             }
             for &(items, n) in &l.wide_bwd {
-                self.run(&self.k.bwd_trsv_wide, n, THREADS, 0, &[gate, list(items), plan, factor, inv, xb])?;
+                self.run(&self.k.bwd_trsv_wide, n, THREADS, 0, &[gate, list(items), plan, hd, factor, inv, xb])?;
             }
             if l.n_narrow > 0 {
-                self.run(&self.k.bwd_trsv, l.n_narrow, THREADS, l.narrow_shared, &[gate, list(l.narrow), plan, factor, inv, xb])?;
+                self.run(&self.k.bwd_trsv, l.n_narrow, THREADS, l.narrow_shared, &[gate, list(l.narrow), plan, hd, factor, inv, xb])?;
             }
         }
-        self.run(perm_out, blocks, THREADS, 0, &[gate, plan, xb, x, Arg::U32(self.nb)])
+        self.run(perm_out, blocks, THREADS, 0, &[gate, plan, hd, xb, x, Arg::U32(self.nb)])
     }
 
     /// The factor's values, panel by panel in the symbolic's layout, read
@@ -931,6 +935,7 @@ fn defines(scalar: &str, scalar_bytes: usize, lu: usize, seed_lanes: u32, sizes:
         ("PAIR_EPT", PAIR_EPT),
         ("PAIR_KC", PAIR_KC),
         ("XR_CH", XR_CH),
+        ("FACTOR_HEADER", HEADER),
         ("H_SC_START", H_SC_START),
         ("H_PR_D", H_PR_D),
         ("H_PR_R0", H_PR_R0),

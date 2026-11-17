@@ -11,7 +11,8 @@
 // per block), TILE_GROUPS (a unit's lane groups) and ACC (the widest kept
 // block's square over a group's lanes, rounded up: the entries of a tile of
 // S per lane);
-// the plan header's slots (SE, SO, SP, ST_*, SK_*, SB_*), the words of
+// the plan header's slots (SE, SO, SP, ST_*, SK_*, SB_*; SHEADER of them),
+// the words of
 // an eliminated block's record (SE_*, SE_REC of them, in the table at SE),
 // of an observer's (SO_*, SO_REC, at SO) and of a pair's (SP_*, SP_REC, at
 // SP), the
@@ -22,6 +23,14 @@
 // Per-thread arrays are indexed only by constants once their loops unroll:
 // the loops run to EW or KW and skip what is past the block's width, so the
 // arrays stay in registers (arael_gpu.h's rule, from k_trsm).
+
+// The plan header: the word offset of each of the plan's arrays, a slot
+// each, a launch's parameter (TABLE_PARAM(SchurHeader) H, read from the
+// launch's parameters, not from the plan) in every kernel that takes the
+// plan.
+struct SchurHeader {
+    u32 w[SHEADER];
+};
 
 // One plane: the threads of the tile, rhs and symv kernels.
 #define PLANE 32u
@@ -112,10 +121,10 @@ DEVICE void ldlt_solve(GLOBAL const R* f, u32 w, THREAD R* v) {
 // diagonal tile (upper-stored) into `dfac` (see ldlt_solve), from its
 // Cholesky factor, and z = D^-1 b. A pivot that is not positive sets
 // fail[0] to the block's slot plus one and continues with 1.
-KERNEL_THREADS_REGS(THREADS) void k_schur_elim(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL R* RESTRICT dfac, GLOBAL R* RESTRICT z, GLOBAL u32* RESTRICT fail, u32 ne) {
+KERNEL_THREADS_REGS(THREADS) void k_schur_elim(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL R* RESTRICT dfac, GLOBAL R* RESTRICT z, GLOBAL u32* RESTRICT fail, u32 ne) {
     u32 e = global_x();
     if (e >= ne) return;
-    GLOBAL const u32* se = plan + plan[SE] + SE_REC * e;
+    GLOBAL const u32* se = plan + H.w[SE] + SE_REC * e;
     u32 w = se[SE_W];
     u32 diag = se[SE_DIAG_OFF];
     u32 orig = se[SE_ORIG_OFF];
@@ -172,19 +181,19 @@ KERNEL_THREADS_REGS(THREADS) void k_schur_elim(GLOBAL const u32* RESTRICT plan, 
 // idle): row i of W_o = C_o D_e^-1, row-major wo x we, the row of C_o
 // solved with D's factor (ldlt_solve). Neighbouring threads read and write
 // neighbouring rows.
-KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const R* RESTRICT dfac, GLOBAL R* RESTRICT w, u32 no) {
+KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const V* RESTRICT h, GLOBAL const R* RESTRICT dfac, GLOBAL R* RESTRICT w, u32 no) {
     u32 x = global_x();
     u32 o = x / KW;
     u32 i = x - o * KW;
     if (o >= no) return;
-    GLOBAL const u32* so = plan + plan[SO] + SO_REC * o;
+    GLOBAL const u32* so = plan + H.w[SO] + SO_REC * o;
     u32 dims = so[SO_DIMS];
     u32 wo = DIMS_WO(dims);
     if (i >= wo) return;
     u32 we = DIMS_WE(dims);
     u32 trans = DIMS_TRANS(dims);
     u32 ca = so[SO_CA_OFF];
-    u32 doff = plan[plan[SE] + SE_REC * so[SO_E] + SE_DFAC_OFF];
+    u32 doff = plan[H.w[SE] + SE_REC * so[SO_E] + SE_DFAC_OFF];
     u32 woff = so[SO_W_OFF];
     R c[EW];
 #pragma unroll
@@ -273,7 +282,7 @@ DEVICE_INLINE void tile_products(THREAD R* acc, THREAD const u32* ij, u32 n, u32
 #else
 #define TILES_ENTRY KERNEL_THREADS(TILE_LANES * TILE_WARPS)
 #endif
-TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const R* RESTRICT w, GLOBAL R* RESTRICT s) {
+TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const V* RESTRICT h, GLOBAL const R* RESTRICT w, GLOBAL R* RESTRICT s) {
     // the launch's shared memory (schur.rs, tiles_shared_bytes): the groups'
     // W_oa, their C_ob, the units' sums of a split tile, in R
     DYNAMIC_SHARED(R, ws_all);
@@ -287,7 +296,7 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const V* 
     // the unit, and so its tile, uniform in the unit: the pair loop's
     // guards on the tile's size stay branches
     u32 unit = warp_uniform(thread_x() / TILE_LANES);
-    GLOBAL const u32* item = plan + plan[SB_ITEMS] + (TILE_WARPS + 1) * block_x();
+    GLOBAL const u32* item = plan + H.w[SB_ITEMS] + (TILE_WARPS + 1) * block_x();
     bool split = item[0] != 0;
     u32 t = warp_uniform(item[1 + (split ? 0 : unit)]);
     // a unit without a tile ends here; a split block has no idle unit, and
@@ -295,16 +304,16 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const V* 
     if (t == NONE) return;
     SHARED_PTR R* ws = ws_all + (unit * TILE_GROUPS + g) * KW * EW;
     SHARED_PTR R* cs = cs_all + (unit * TILE_GROUPS + g) * KW * EW;
-    u32 o_so = plan[SO];
-    u32 o_sp = plan[SP];
-    u32 val = plan[plan[ST_VAL_OFF] + t];
-    u32 wr = plan[plan[ST_WR] + t];
-    u32 wc = plan[plan[ST_WC] + t];
-    u32 a = plan[plan[ST_A] + t];
-    u32 b = plan[plan[ST_B] + t];
-    u32 copy = plan[plan[ST_COPY_OFF] + t];
-    u32 p0 = plan[plan[ST_PAIR_PTR] + t];
-    u32 p1 = plan[plan[ST_PAIR_PTR] + t + 1];
+    u32 o_so = H.w[SO];
+    u32 o_sp = H.w[SP];
+    u32 val = plan[H.w[ST_VAL_OFF] + t];
+    u32 wr = plan[H.w[ST_WR] + t];
+    u32 wc = plan[H.w[ST_WC] + t];
+    u32 a = plan[H.w[ST_A] + t];
+    u32 b = plan[H.w[ST_B] + t];
+    u32 copy = plan[H.w[ST_COPY_OFF] + t];
+    u32 p0 = plan[H.w[ST_PAIR_PTR] + t];
+    u32 p1 = plan[H.w[ST_PAIR_PTR] + t + 1];
     bool diag = a == b;
     // the entries computed: a diagonal tile's upper ones, column by column
     u32 n = diag ? wr * (wr + 1) / 2 : wr * wc;
@@ -419,17 +428,17 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, GLOBAL const V* 
 // Stage 4, one block of PLANE threads per kept block: rhs_kept = b_k - sum
 // over the block's observers of C_o z_e, the lanes over the observers, a
 // warp sum per row.
-KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL const R* RESTRICT z, GLOBAL R* RESTRICT out) {
-    u32 o_se = plan[SE];
-    u32 o_so = plan[SO];
-    u32 o_kobs = plan[SK_OBS];
+KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL const R* RESTRICT z, GLOBAL R* RESTRICT out) {
+    u32 o_se = H.w[SE];
+    u32 o_so = H.w[SO];
+    u32 o_kobs = H.w[SK_OBS];
     u32 k = block_x();
     u32 lane = thread_x();
-    u32 s_off = plan[plan[SK_S_OFF] + k];
-    u32 orig = plan[plan[SK_ORIG_OFF] + k];
-    u32 wk = plan[plan[SK_W] + k];
-    u32 q0 = plan[plan[SK_OBS_PTR] + k];
-    u32 q1 = plan[plan[SK_OBS_PTR] + k + 1];
+    u32 s_off = plan[H.w[SK_S_OFF] + k];
+    u32 orig = plan[H.w[SK_ORIG_OFF] + k];
+    u32 wk = plan[H.w[SK_W] + k];
+    u32 q0 = plan[H.w[SK_OBS_PTR] + k];
+    u32 q1 = plan[H.w[SK_OBS_PTR] + k + 1];
     R acc[KW];
 #pragma unroll
     for (u32 i = 0; i < KW; i++) acc[i] = 0.0f;
@@ -462,24 +471,24 @@ KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, GLOBAL c
 
 // The kept blocks of the reduced solution (R) into the full vector (V), one
 // thread per kept block.
-KERNEL_THREADS(THREADS) void k_scatter_kept(GLOBAL const u32* RESTRICT plan, GLOBAL const R* RESTRICT xk, GLOBAL V* RESTRICT x, u32 nk) {
+KERNEL_THREADS(THREADS) void k_scatter_kept(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const R* RESTRICT xk, GLOBAL V* RESTRICT x, u32 nk) {
     u32 k = global_x();
     if (k >= nk) return;
-    u32 s_off = plan[plan[SK_S_OFF] + k];
-    u32 orig = plan[plan[SK_ORIG_OFF] + k];
-    u32 wk = plan[plan[SK_W] + k];
+    u32 s_off = plan[H.w[SK_S_OFF] + k];
+    u32 orig = plan[H.w[SK_ORIG_OFF] + k];
+    u32 wk = plan[H.w[SK_W] + k];
     for (u32 i = 0; i < wk; i++) x[orig + i] = (V)xk[s_off + i];
 }
 
 // Back-substitution, one thread per eliminated block: x_e = D_e^-1 (b_e -
 // sum_a C_a^T x_a) over its observers (ldlt_solve), the kept slices of `x`
 // in place.
-KERNEL_THREADS(THREADS) void k_schur_backsub(GLOBAL const u32* RESTRICT plan, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL const R* RESTRICT dfac, GLOBAL V* RESTRICT x, u32 ne) {
+KERNEL_THREADS(THREADS) void k_schur_backsub(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL const R* RESTRICT dfac, GLOBAL V* RESTRICT x, u32 ne) {
     u32 e = global_x();
     if (e >= ne) return;
     // the block's record; its observers end where the next block's start
-    GLOBAL const u32* se = plan + plan[SE] + SE_REC * e;
-    GLOBAL const u32* so = plan + plan[SO];
+    GLOBAL const u32* se = plan + H.w[SE] + SE_REC * e;
+    GLOBAL const u32* so = plan + H.w[SO];
     u32 w = se[SE_W];
     u32 orig = se[SE_ORIG_OFF];
     u32 doff = se[SE_DFAC_OFF];
@@ -517,24 +526,24 @@ KERNEL_THREADS(THREADS) void k_schur_backsub(GLOBAL const u32* RESTRICT plan, GL
 // a tile index times 2 plus 1 when k is its column block, whose transpose
 // then gives the rows), a warp sum per row; nothing unless gate[0] is
 // nonzero. No two blocks write the same entry.
-KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const u32* RESTRICT kt_ptr, GLOBAL const u32* RESTRICT kt, GLOBAL const R* RESTRICT s, GLOBAL const R* RESTRICT x, GLOBAL R* RESTRICT r) {
+KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const u32* RESTRICT kt_ptr, GLOBAL const u32* RESTRICT kt, GLOBAL const R* RESTRICT s, GLOBAL const R* RESTRICT x, GLOBAL R* RESTRICT r) {
     if (gate[0] == 0) return;
     u32 k = block_x();
     u32 lane = thread_x();
-    u32 o_soff = plan[SK_S_OFF];
+    u32 o_soff = H.w[SK_S_OFF];
     u32 k_off = plan[o_soff + k];
-    u32 wk = plan[plan[SK_W] + k];
+    u32 wk = plan[H.w[SK_W] + k];
     W acc[KW];
 #pragma unroll
     for (u32 i = 0; i < KW; i++) acc[i] = 0.0f;
     for (u32 q = kt_ptr[k] + lane; q < kt_ptr[k + 1]; q += PLANE) {
         u32 t = kt[q] >> 1;
         u32 transposed = kt[q] & 1u;
-        u32 val = plan[plan[ST_VAL_OFF] + t];
-        u32 wr = plan[plan[ST_WR] + t];
-        u32 wc = plan[plan[ST_WC] + t];
-        u32 a = plan[plan[ST_A] + t];
-        u32 b = plan[plan[ST_B] + t];
+        u32 val = plan[H.w[ST_VAL_OFF] + t];
+        u32 wr = plan[H.w[ST_WR] + t];
+        u32 wc = plan[H.w[ST_WC] + t];
+        u32 a = plan[H.w[ST_A] + t];
+        u32 b = plan[H.w[ST_B] + t];
         if (transposed == 0) {
             // rows of (k, b): S_kb x_b, a diagonal tile read from its upper triangle
             u32 b_off = plan[o_soff + b];

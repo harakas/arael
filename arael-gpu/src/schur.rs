@@ -632,6 +632,8 @@ pub struct GpuSchur<D: Device> {
     /// per kept block the tiles of S touching it, `kt_ptr` and `kt` (byte
     /// offsets), for the residual.
     ints: D::Block,
+    /// The plan's header, as the kernels take it: a launch parameter.
+    header: [u32; SHEADER],
     on: usize,
     kt_ptr: usize,
     kt: usize,
@@ -779,6 +781,7 @@ impl<D: Device> GpuSchur<D> {
                 Section::u32s("flags", sec.out + status_at + FLAGS_AT, N_FLAGS).doc("the solve's flags: refinement active, steps, revert, failed eliminated block, failed pivot"),
             ]
         });
+        let header = pk.words[..SHEADER].try_into().expect("the plan's header");
         Ok(GpuSchur {
             graph: None,
             graphs: true,
@@ -789,6 +792,7 @@ impl<D: Device> GpuSchur<D> {
             f32_reduction: params.f32_reduction,
             k,
             ints,
+            header,
             on,
             kt_ptr,
             kt,
@@ -964,16 +968,21 @@ impl<D: Device> GpuSchur<D> {
         self.dev.launch(kernel, Launch { grid: [blocks, 1, 1], block: [threads, 1, 1], shared_bytes }, args)
     }
 
+    /// The plan's header as a launch's argument.
+    fn header_arg(&self) -> Arg<'_, D::Block> {
+        Arg::Bytes(bytemuck::cast_slice(&self.header))
+    }
+
     /// Zero the flags and launch the reduction, from the uploaded values.
     fn launch_reduce(&self) -> Result<(), GpuError> {
-        let (s, plan) = (&self.sec, Arg::Block(&self.ints, 0));
+        let (s, plan, hd) = (&self.sec, Arg::Block(&self.ints, 0), self.header_arg());
         let w = |at: usize| Arg::Block(&self.work, at);
         self.run(&self.k.zero_u32, 1, PLANE, &[w(self.flag_at(0)), Arg::U32(N_FLAGS as u32)])?;
-        let elim = [plan, w(s.h), w(s.rhs), w(s.dfac), w(s.z), w(self.flag_at(F_ELIM)), Arg::U32(self.ne)];
+        let elim = [plan, hd, w(s.h), w(s.rhs), w(s.dfac), w(s.z), w(self.flag_at(F_ELIM)), Arg::U32(self.ne)];
         self.run(&self.k.elim, self.ne.div_ceil(THREADS), THREADS, &elim)?;
-        self.run(&self.k.w, (self.no * self.w_rows).div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.dfac), w(s.w), Arg::U32(self.no)])?;
-        self.run_shared(&self.k.tiles, self.tile_blocks, self.lanes * self.tile_warps, self.tile_shared, &[plan, w(s.h), w(s.w), w(s.s)])?;
-        self.run(&self.k.rhs, self.nk, PLANE, &[plan, w(s.h), w(s.rhs), w(s.z), w(s.rhs_kept)])
+        self.run(&self.k.w, (self.no * self.w_rows).div_ceil(THREADS), THREADS, &[plan, hd, w(s.h), w(s.dfac), w(s.w), Arg::U32(self.no)])?;
+        self.run_shared(&self.k.tiles, self.tile_blocks, self.lanes * self.tile_warps, self.tile_shared, &[plan, hd, w(s.h), w(s.w), w(s.s)])?;
+        self.run(&self.k.rhs, self.nk, PLANE, &[plan, hd, w(s.h), w(s.rhs), w(s.z), w(s.rhs_kept)])
     }
 
     /// Form S and the reduced right-hand side from the damped Hessian's tile
@@ -1041,7 +1050,7 @@ impl<D: Device> GpuSchur<D> {
         let residual = |gate| {
             copy(gate, s.r, s.rhs_kept)?;
             let (kt_ptr, kt) = (Arg::Block(&self.ints, self.kt_ptr), Arg::Block(&self.ints, self.kt));
-            self.run(&self.k.symv_sub, self.nk, PLANE, &[gate, plan, kt_ptr, kt, w(s.s), w(s.x_kept), w(s.r)])
+            self.run(&self.k.symv_sub, self.nk, PLANE, &[gate, plan, self.header_arg(), kt_ptr, kt, w(s.s), w(s.x_kept), w(s.r)])
         };
         {
             let _scope = Scope::new(&*self.dev, "solve");
@@ -1066,8 +1075,9 @@ impl<D: Device> GpuSchur<D> {
         }
         // the kept blocks into the full vector, then the eliminated ones
         let _scope = Scope::new(&*self.dev, "backsub");
-        self.run(&self.k.scatter_kept, self.nk.div_ceil(THREADS), THREADS, &[plan, w(s.x_kept), w(s.out), Arg::U32(self.nk)])?;
-        self.run(&self.k.backsub, self.ne.div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.rhs), w(s.dfac), w(s.out), Arg::U32(self.ne)])
+        let hd = self.header_arg();
+        self.run(&self.k.scatter_kept, self.nk.div_ceil(THREADS), THREADS, &[plan, hd, w(s.x_kept), w(s.out), Arg::U32(self.nk)])?;
+        self.run(&self.k.backsub, self.ne.div_ceil(THREADS), THREADS, &[plan, hd, w(s.h), w(s.rhs), w(s.dfac), w(s.out), Arg::U32(self.ne)])
     }
 
     /// One damped solve, entirely on the device, waiting once: form S and
@@ -1382,6 +1392,7 @@ fn defines(p: &SchurPlan, lanes: u32, tile_warps: u32, tile_groups: u32) -> Stri
             ("EW", p.ew_cap),
             ("KW", p.kw_cap),
             ("ACC", tile_acc(p.kw_max, lanes, tile_groups)),
+            ("SHEADER", SHEADER),
             ("SE", SE),
             ("SE_REC", SE_REC),
             ("SE_DIAG_OFF", SE_DIAG_OFF),

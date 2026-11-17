@@ -71,6 +71,18 @@ dev.launch_on(Lane::Side, &factor_next, small, &args)?; // alongside update_rest
 dev.join()?;
 ```
 
+A launch can take a struct by value, `Arg::Bytes` (the kernel declares
+`TABLE_PARAM(T) name`, `T` of exactly those bytes, at most `TABLE_BYTES`,
+4 KB): a table of launch constants, read from the launch's parameters,
+not from device memory. The solvers pass their plans' headers this way,
+the device assembly its layout table.
+
+```rust,ignore
+// struct Cols { u64 w[3]; };  KERNEL void k(GLOBAL u8* b, TABLE_PARAM(Cols) c)
+let cols = [0u64, 256, 512];
+dev.launch(&k, Launch::linear(n, 256), &[Arg::Block(&b, 0), Arg::Bytes(bytemuck::cast_slice(&cols))])?;
+```
+
 The refinement decides on the device whether the next step is due; the
 steps launched after it has converged do nothing. The first `solve` with a
 factor and a refinement setting runs its kernels and then captures them as
