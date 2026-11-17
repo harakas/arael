@@ -135,6 +135,8 @@ struct Level {
     /// The block of `k_small_factor`: a thread per row of the tallest small
     /// supernode, in whole warps, at most THREADS.
     small_threads: u32,
+    /// The level's panel-step supernodes, a [`plan::PANEL_REC`] record each
+    /// (supernode, q, h, panel offset), and their count.
     big: usize,
     n_big: u32,
     /// Per panel step, the grid sizes of `k_trsm` and `k_syrk`, and of the
@@ -352,7 +354,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 n_small: w.small_targets.len() as u32,
                 small_shared: small_shared as u32,
                 small_threads: small_h.next_multiple_of(32).clamp(32, THREADS),
-                big: 4 * pk.push(&w.big_targets),
+                big: 4 * pk.push(&w.big_targets.iter().flat_map(|&s| [s, plan.dims[2 * s as usize], plan.dims[2 * s as usize + 1], plan.val_ptr[s as usize]]).collect::<Vec<u32>>()),
                 n_big: w.big_targets.len() as u32,
                 trsm_grid: w.trsm_grid,
                 syrk_grid: w.syrk_grid,
@@ -584,7 +586,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             // the first step's diagonal tiles; each later one is factored by
             // the syrk of the step before it
             if !l.trsm_grid.is_empty() {
-                self.run(&self.k.potf2, l.n_big, self.potf2_threads, 0, &[list(l.big), plan, hd, factor, fail])?;
+                self.run(&self.k.potf2, l.n_big, self.potf2_threads, 0, &[list(l.big), factor, fail])?;
             }
             // With a lookahead, a block's last step updates the next block's
             // columns, forks, and updates the rest on the main stream while
@@ -597,7 +599,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             let stepped = (|| -> Result<(), GpuError> {
                 for (step, (&tg, &sg)) in l.trsm_grid.iter().zip(&l.syrk_grid).enumerate() {
                     let j = Arg::U32((step * NB) as u32);
-                    let args = [list(l.big), Arg::U32(l.n_big), j, plan, hd, factor];
+                    let args = [list(l.big), Arg::U32(l.n_big), j, factor];
                     if tg > 0 {
                         self.run_on(lane, &self.k.trsm, tg, self.trsm_rows, 0, &args)?;
                     }
@@ -607,7 +609,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                         if grid == 0 {
                             return Ok(());
                         }
-                        let args = [list(l.big), Arg::U32(l.n_big), Arg::U32(k0), Arg::U32(kn), Arg::U32(cend), Arg::U32(cbeg), plan, hd, factor, fail];
+                        let args = [list(l.big), Arg::U32(l.n_big), Arg::U32(k0), Arg::U32(kn), Arg::U32(cend), Arg::U32(cbeg), factor, fail];
                         self.run_on(lane, &self.k.syrk, grid, THREADS, 0, &args)
                     };
                     if cend == u32::MAX {
@@ -951,6 +953,11 @@ fn defines(scalar: &str, scalar_bytes: usize, lu: usize, seed_lanes: u32, sizes:
         ("INV_TILE", INV_TILE),
         ("TRSV_ITEM", TRSV_ITEM),
         ("SN_HEAD", plan::SN_HEAD),
+        ("PANEL_REC", PANEL_REC),
+        ("PANEL_S", PANEL_S),
+        ("PANEL_Q", PANEL_Q),
+        ("PANEL_H", PANEL_H),
+        ("PANEL_OFF", PANEL_OFF),
         ("GATHER_ROW", plan::GATHER_ROW),
     ];
     for (name, v) in consts {
@@ -1190,6 +1197,31 @@ mod tests {
         } else {
             check::<f32>(&dev, &a, &dense, &rhs, &sn, 1e-4);
         }
+    }
+
+    /// A level's panel-step supernodes are records on the device:
+    /// supernode, q, h and panel offset, as the plan has them.
+    #[test]
+    fn a_levels_big_panels_are_records_of_their_heads() {
+        let (a, _, _, sn) = setup(10);
+        let dev = device();
+        let g = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &panel_steps_only(), wide(&*dev)).unwrap();
+        let plan = Plan::new(&sn, a.symbolic());
+        let mut most = 0;
+        for l in &g.levels {
+            let n = l.n_big as usize;
+            if n == 0 {
+                continue;
+            }
+            let mut w = vec![0u32; plan::PANEL_REC * n];
+            dev.read(&g.ints, l.big, bytemuck::cast_slice_mut(&mut w)).unwrap();
+            for r in w.chunks_exact(plan::PANEL_REC) {
+                let s = r[plan::PANEL_S] as usize;
+                assert_eq!((r[plan::PANEL_Q], r[plan::PANEL_H], r[plan::PANEL_OFF]), (plan.dims[2 * s], plan.dims[2 * s + 1], plan.val_ptr[s]), "supernode {s}");
+            }
+            most = most.max(n);
+        }
+        assert!(most >= 2, "a level of several panels: {most}");
     }
 
     /// The kernels' SYRK_BLOCK, SYRK_TB, TRSM_ROWS, POTF2_UNROLL,

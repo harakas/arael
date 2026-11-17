@@ -726,15 +726,15 @@ KERNEL_THREADS_REGS(THREADS) void k_chain(GLOBAL const u32* RESTRICT levels, u32
 // Panel step, part one, for a level's first step: the NB x NB diagonal
 // tile at (0, 0) of every big panel of the level, a block of DIAG_WARPS
 // warps per panel (potf2_block). The later steps' diagonal tiles are
-// factored by the step before them, at the end of k_syrk.
-KERNEL_THREADS_REGS(DIAG_WARPS * NB) void k_potf2(GLOBAL const u32* RESTRICT panels, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+// factored by the step before them, at the end of k_syrk. The panel steps
+// take the level's big panels as records (PANEL_REC words: supernode, q, h,
+// panel offset), so a block finds its panel without reading a head.
+KERNEL_THREADS_REGS(DIAG_WARPS * NB) void k_potf2(GLOBAL const u32* RESTRICT panels, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
     SHARED F col[2 * NB];
-    // the supernodes' heads: q, h, first column, panel offset, ...
-    u32 o_head = H.w[H_SN_HEAD];
-    u32 s = panels[block_x()];
-    u32 q = plan[o_head + SN_HEAD * s];
-    u32 h = plan[o_head + SN_HEAD * s + 1];
-    potf2_block(factor, plan[o_head + SN_HEAD * s + 3], h, min(q, NB), thread_x(), fail, s, col);
+    // the panel's record: supernode, q, h, panel offset
+    GLOBAL const u32* r = panels + PANEL_REC * block_x();
+    u32 q = r[PANEL_Q];
+    potf2_block(factor, r[PANEL_OFF], r[PANEL_H], min(q, NB), thread_x(), fail, r[PANEL_S], col);
 }
 
 #if NB * NB % TRSM_ROWS != 0 || TRSM_ROWS < NB
@@ -748,36 +748,35 @@ KERNEL_THREADS_REGS(DIAG_WARPS * NB) void k_potf2(GLOBAL const u32* RESTRICT pan
 // off the columns after it, so a value gets the same multiply-adds in the
 // same order as in a left-looking solve, but the dependent chain is two
 // operations per column instead of one per column before it.
-KERNEL_THREADS(TRSM_ROWS) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 j, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL F* RESTRICT factor) {
+KERNEL_THREADS(TRSM_ROWS) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 j, GLOBAL F* RESTRICT factor) {
     // the diagonal tile's lower part, column-major: column k at lc[k NB]
     SHARED F lc[NB * NB];
     // the diagonal's reciprocals: one division per column, not per row
     SHARED F dinv[NB];
-    // the supernodes' heads: q, h, first column, panel offset, ...
-    u32 o_head = H.w[H_SN_HEAD];
+    // the block's panel: the panels' row chunks counted in turn, every
+    // panel's record read (no early exit), so no load waits on another
     u32 idx = block_x();
-    u32 p = 0;
-    bool found = false;
-    u32 s = 0;
-    u32 q = 0;
-    u32 h = 0;
-    while (p < npanels && !found) {
-        s = panels[p];
-        q = plan[o_head + SN_HEAD * s];
-        h = plan[o_head + SN_HEAD * s + 1];
-        u32 rows = 0;
-        if (j < q) rows = h - j - min(q - j, NB);
+    u32 sel = npanels;
+    u32 base = 0;
+    u32 count = 0;
+    for (u32 p = 0; p < npanels; p++) {
+        u32 pq = panels[PANEL_REC * p + PANEL_Q];
+        u32 ph = panels[PANEL_REC * p + PANEL_H];
+        u32 rows = j < pq ? ph - j - min(pq - j, NB) : 0u;
         u32 chunks = (rows + TRSM_ROWS - 1) / TRSM_ROWS;
-        if (idx < chunks) {
-            found = true;
-        } else {
-            idx -= chunks;
-            p += 1;
+        if (sel == npanels && idx < count + chunks) {
+            sel = p;
+            base = count;
         }
+        count += chunks;
     }
-    if (!found) return;
+    if (sel == npanels) return;
+    idx -= base;
+    GLOBAL const u32* rec = panels + PANEL_REC * sel;
+    u32 q = rec[PANEL_Q];
+    u32 h = rec[PANEL_H];
     u32 nb = min(q - j, NB);
-    u32 panel = plan[o_head + SN_HEAD * s + 3];
+    u32 panel = rec[PANEL_OFF];
     u32 t = thread_x();
     // the thread's row, loaded first: its latency behind the tile's and the
     // barriers'. Unrolled to the constant NB, skipping the columns past nb,
@@ -967,7 +966,7 @@ template <u32 T> DEVICE_INLINE void mma_store(THREAD simdgroup_float8x8 (&c)[MMA
 #else
 #define SYRK_ENTRY KERNEL_THREADS(THREADS)
 #endif
-SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u32 kn, u32 cend, u32 cbeg, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(FactorHeader) H, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u32 kn, u32 cend, u32 cbeg, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
 #if TILE_MMA
     // the slabs, then the tile's products (SYRK_TB^2 <= 2 NB SYRK_TB values)
     SHARED F sm[2 * NB * SYRK_TB];
@@ -977,44 +976,32 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
     SHARED F sa[NB * SYRK_TB];
     SHARED F sb[NB * SYRK_TB];
 #endif
-    // the supernodes' heads: q, h, first column, panel offset, ...
-    u32 o_head = H.w[H_SN_HEAD];
+    // the block's panel: the panels' tiles counted in turn from their
+    // records, up to the block's (a step one load, no head read)
     u32 idx = block_x();
-    u32 p = 0;
-    bool found = false;
-    u32 s = 0;
-    u32 q = 0;
-    u32 h = 0;
-    u32 k1 = 0;
-    u32 c1 = 0;
-    // the first row and column updated
-    u32 cs = 0;
-    u32 nct = 0;
-    while (p < npanels && !found) {
-        s = panels[p];
-        q = plan[o_head + SN_HEAD * s];
-        h = plan[o_head + SN_HEAD * s + 1];
-        u32 rows = 0;
-        u32 cols = 0;
-        if (k0 < q) {
-            k1 = min(k0 + kn, q);
-            c1 = min(cend, q);
-            cs = max(k1, cbeg);
-            if (cs < c1) {
-                rows = h - cs;
-                cols = c1 - cs;
-            }
+    u32 sel = 0;
+    for (; sel < npanels; sel++) {
+        u32 pq = panels[PANEL_REC * sel + PANEL_Q];
+        u32 ph = panels[PANEL_REC * sel + PANEL_H];
+        u32 tiles = 0;
+        if (k0 < pq) {
+            u32 pc1 = min(cend, pq);
+            u32 pcs = max(min(k0 + kn, pq), cbeg);
+            if (pcs < pc1) tiles = ((ph - pcs + SYRK_TB - 1) / SYRK_TB) * ((pc1 - pcs + SYRK_TB - 1) / SYRK_TB);
         }
-        nct = (cols + SYRK_TB - 1) / SYRK_TB;
-        u32 tiles = ((rows + SYRK_TB - 1) / SYRK_TB) * nct;
-        if (idx < tiles) {
-            found = true;
-        } else {
-            idx -= tiles;
-            p += 1;
-        }
+        if (idx < tiles) break;
+        idx -= tiles;
     }
-    if (!found) return;
+    if (sel == npanels) return;
+    GLOBAL const u32* rec = panels + PANEL_REC * sel;
+    u32 s = rec[PANEL_S];
+    u32 q = rec[PANEL_Q];
+    u32 h = rec[PANEL_H];
+    u32 k1 = min(k0 + kn, q);
+    u32 c1 = min(cend, q);
+    // the first row and column updated
+    u32 cs = max(k1, cbeg);
+    u32 nct = (c1 - cs + SYRK_TB - 1) / SYRK_TB;
     u32 ti = idx / nct;
     u32 tj = idx - ti * nct;
     if (ti < tj) return;
@@ -1022,7 +1009,7 @@ SYRK_ENTRY void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u
     u32 col0 = cs + tj * SYRK_TB;
     u32 nrows = min(h - row0, SYRK_TB);
     u32 ncols = min(c1 - col0, SYRK_TB);
-    u32 panel = plan[o_head + SN_HEAD * s + 3];
+    u32 panel = rec[PANEL_OFF];
     u32 t = thread_x();
     const u32 nt = THREADS;
 #if TILE_MMA

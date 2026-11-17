@@ -93,6 +93,19 @@ pub const H_PART: usize = 9;
 /// [`NB`] columns, which has none).
 pub const H_SN_HEAD: usize = 10;
 pub const SN_HEAD: usize = 6;
+
+// The words of a big panel's record in a level's list of them (the panel
+// steps' `k_potf2`, `k_trsm` and `k_syrk`): what the steps need of the
+// supernode, so that finding a block's panel reads no head.
+/// The supernode.
+pub const PANEL_S: usize = 0;
+/// Its columns.
+pub const PANEL_Q: usize = 1;
+/// Its rows.
+pub const PANEL_H: usize = 2;
+/// Its panel's offset in the factor.
+pub const PANEL_OFF: usize = 3;
+pub const PANEL_REC: usize = 4;
 /// The inverted 32 x 32 diagonal tiles of the supernodes wider than
 /// [`NB`], 2 words each: the supernode and the tile's first column.
 pub const H_INV_TILES: usize = 11;
