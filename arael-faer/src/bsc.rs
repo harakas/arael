@@ -945,6 +945,8 @@ pub struct PositionResolver<'a, I: Index> {
     col_start: usize,
     /// The first position of the block column's storage.
     panel: usize,
+    /// The stored block of the last lookup.
+    block: usize,
 }
 
 impl<'a, I: Index> PositionResolver<'a, I> {
@@ -970,7 +972,13 @@ impl<'a, I: Index> PositionResolver<'a, I> {
             row_start: 0,
             col_start: 0,
             panel: 0,
+            block: 0,
         }
+    }
+
+    /// The structure it resolves against.
+    pub fn symbolic(&self) -> &'a SymbolicSparseBlockColMat<I> {
+        self.sym
     }
 
     /// Position of scalar (i, j) in the value buffer. Panics if the
@@ -988,6 +996,7 @@ impl<'a, I: Index> PositionResolver<'a, I> {
                 .binary_search_by_key(&br, |x| x.zx())
                 .expect("coordinate outside the built block structure");
             let b = range.start + k;
+            self.block = b;
             self.base = self.sym.val_range(b).start;
             self.row_w = self.sym.row_span(br).len();
             self.row_start = self.sym.row_span(br).start;
@@ -1006,6 +1015,18 @@ impl<'a, I: Index> PositionResolver<'a, I> {
     pub fn resolve_tile(&mut self, i: usize, j: usize) -> (usize, usize, usize) {
         let pos = self.resolve(i, j);
         (pos, self.row_w, self.panel)
+    }
+
+    /// Position of scalar (i, j), the column stride of its tile and the
+    /// stored block holding it (its index, as [`val_range`] and
+    /// [`block_dims`] take it).
+    ///
+    /// [`val_range`]: SymbolicSparseBlockColMat::val_range
+    /// [`block_dims`]: SymbolicSparseBlockColMat::block_dims
+    #[inline]
+    pub fn resolve_tile_block(&mut self, i: usize, j: usize) -> (usize, usize, usize) {
+        let pos = self.resolve(i, j);
+        (pos, self.row_w, self.block)
     }
 }
 
@@ -1080,6 +1101,36 @@ mod tests {
         let got: Vec<usize> =
             m.col_blocks(3).map(|(_, r, _)| r).collect();
         assert_eq!(got, vec![0, 3]);
+    }
+
+    /// A scalar resolves to its position, its tile's stride and its stored
+    /// block: every cell of every block of the doodle, in an order that
+    /// changes block at every step.
+    #[test]
+    fn a_scalar_resolves_to_its_block() {
+        let m = doodle();
+        let s = m.symbolic();
+        let mut r = PositionResolver::new(s);
+        assert!(core::ptr::eq(r.symbolic(), s));
+        let (rp, cp, _, _, _) = s.parts();
+        let mut cells = Vec::new();
+        for bc in 0..s.nblk_cols() {
+            for b in s.col_range(bc) {
+                let br = s.blk_row(b);
+                for j in cp[bc]..cp[bc + 1] {
+                    for i in rp[br]..rp[br + 1] {
+                        cells.push((i, j, b, br, bc));
+                    }
+                }
+            }
+        }
+        cells.reverse();
+        for &(i, j, b, br, bc) in &cells {
+            let (pos, stride, block) = r.resolve_tile_block(i, j);
+            assert_eq!((stride, block), (rp[br + 1] - rp[br], b), "({i}, {j})");
+            assert!(s.val_range(b).contains(&pos));
+            assert_eq!(m.vals()[pos], m.get_block(br, bc).unwrap()[(i - rp[br], j - cp[bc])], "({i}, {j})");
+        }
     }
 
     #[test]

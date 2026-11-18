@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arael_gpu::{Arg, Device, FIXED, GpuError, Launch, Scope, Section, Values, WIDE, Wide};
+use arael_gpu::{Arg, Device, FIXED, GpuError, Launch, Scope, Section, TILE_STORE, Values, WIDE, Wide};
 
 /// A root's device layout, as its generated code describes it.
 #[derive(Clone, Debug)]
@@ -484,9 +484,10 @@ fn word_names(k: &DeviceConstraint) -> impl Iterator<Item = String> {
 /// order depends on the shape alone. W values are 8 bytes, the model's
 /// `ts`; a reference is in its kind's scalar on a route of `route`.
 /// Words of a tile's record in the image's TILE columns: its base in H's
-/// values, its stride, and an entity's start or a cross block's flip
-/// ([`tiles`]).
+/// values, its stride (with [`TILE_STORE`]), and an entity's start or a
+/// cross block's flip ([`tiles`]).
 const TILE_WORDS: usize = 3;
+
 
 fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: &[usize], ts: usize, route: Values) -> (Vec<Column>, usize, usize) {
     let col = |name: String, elem: usize, len: usize| Column { name, elem, len };
@@ -701,6 +702,11 @@ pub struct DeviceAssembly<T, D: Device> {
     slots: Vec<usize>,
     cross_slots: Vec<usize>,
     counts: Vec<usize>,
+    /// H's values in the pattern laid out against.
+    nh: usize,
+    /// Whether an assembly zeroes H first: not when every block of H is
+    /// one stored tile ([`stores`]).
+    zero_h: bool,
     /// Per referenced field, per slot: the global index of the step's first
     /// live parameter, [`FIXED`] when the step is fixed.
     ref_index: Vec<Vec<u32>>,
@@ -799,29 +805,37 @@ fn tiles(
     cross_slots: &[usize],
     r: &Resolver<'_>,
     (threads, min): (usize, usize),
-) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
+) -> Tiles {
     use crate::store::{device_word, tile_extent};
+    let sym = r.symbolic();
+    // a diagonal block square, a cross tile between whole tiles whole
+    assert!(sym.parts().0 == sym.parts().1, "H's rows and columns are cut alike");
     let extent = |e: usize, s: usize| {
         let n = shape.entities[e];
         tile_extent(&st.idx[e][s * n..(s + 1) * n])
     };
-    let entity: Vec<Vec<u32>> = (0..shape.entities.len())
-        .map(|e| {
-            par_ranges(slots[e], threads, min, r, |range, r| {
-                range
-                    .flat_map(|s| {
-                        let (start, live) = extent(e, s);
-                        if live == 0 {
-                            return [0, 0, 0];
-                        }
-                        let (base, stride, _) = r.resolve_tile(start as usize, start as usize);
-                        [device_word(base), device_word(stride), start]
-                    })
-                    .collect::<Vec<u32>>()
-            })
-            .concat()
-        })
-        .collect();
+    let mut entity: Vec<Vec<u32>> = Vec::with_capacity(slots.len());
+    let mut whole = Vec::with_capacity(slots.len());
+    for (e, &ns) in slots.iter().enumerate() {
+        // per range its records, and whether each of its tiles is its block
+        let parts: Vec<(Vec<u32>, bool)> = par_ranges(ns, threads, min, r, |range, r| {
+            let mut all = true;
+            let recs = range
+                .flat_map(|s| {
+                    let (start, live) = extent(e, s);
+                    if live == 0 {
+                        return [0, 0, 0];
+                    }
+                    let (base, stride, b) = r.resolve_tile_block(start as usize, start as usize);
+                    all &= stride == live && base == sym.val_range(b).start;
+                    [device_word(base), device_word(stride), start]
+                })
+                .collect::<Vec<u32>>();
+            (recs, all)
+        });
+        whole.push(parts.iter().all(|p| p.1));
+        entity.push(parts.into_iter().map(|p| p.0).collect::<Vec<_>>().concat());
+    }
     let mut cross: Vec<Vec<u32>> = cross_slots.iter().map(|&n| vec![0u32; 3 * n]).collect();
     let mut done: Vec<Vec<bool>> = cross_slots.iter().map(|&n| vec![false; n]).collect();
     for (c, k) in shape.constraints.iter().enumerate() {
@@ -856,31 +870,129 @@ fn tiles(
             }
         }
     }
-    (entity, cross)
+    Tiles { entity, cross, whole }
+}
+
+/// The tiles of a structure in H ([`tiles`]): per entity table and per
+/// cross array the slots' records ([`TILE_WORDS`] each), and per entity
+/// table whether each of its tiles is all of its block of H: then a cross
+/// tile between two such tables is all of its block too, H's rows and
+/// columns being cut alike.
+#[derive(Debug, PartialEq, Eq)]
+struct Tiles {
+    entity: Vec<Vec<u32>>,
+    cross: Vec<Vec<u32>>,
+    whole: Vec<bool>,
+}
+
+/// A constraint's instances grouped ([`by_slot`], `(ptr, inst)` each): per
+/// side by its entity slot, per pair by the owner of its cross slot's tile
+/// ([`tile_owners`]), so a tile has one summing thread per entry.
+struct Groups {
+    sides: Vec<(Vec<u32>, Vec<u32>)>,
+    pairs: Vec<(Vec<u32>, Vec<u32>)>,
+}
+
+/// Every constraint's [`Groups`].
+fn groups(shape: &DeviceShape, st: &DeviceStructure, slots: &[usize], cross_slots: &[usize], owners: &[Vec<u32>]) -> Vec<Groups> {
+    shape
+        .constraints
+        .iter()
+        .zip(&st.rows)
+        .map(|(k, rows)| {
+            let w = k.words();
+            Groups {
+                sides: k.sides.iter().enumerate().map(|(i, &e)| by_slot(word(rows, w, i), slots[e])).collect(),
+                pairs: k
+                    .pairs
+                    .iter()
+                    .enumerate()
+                    .map(|(p, &(_, _, x))| by_slot(word(rows, w, k.sides.len() + p).map(|s| owners[x][s as usize]), cross_slots[x]))
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+/// Which tiles of H their kernels store, and whether the assembly zeroes H
+/// first. An entity table one constraint side alone reads has that side as
+/// the only writer of its entities' diagonal tiles; a cross array one
+/// constraint pair alone uses, between two tables no other array joins,
+/// has that pair as the only writer of its tiles. Those kernels store
+/// their sums: [`TILE_STORE`] in the stride word of their tables' records
+/// (a slot without instances writes nothing, so the bit on its record is
+/// never read). H needs no zeroing when such tiles, each all of its block
+/// ([`Tiles::whole`]) and with instances (`groups`), are every one of the
+/// pattern's `nblocks` blocks. Returns whether H is zeroed first.
+///
+/// ```ignore
+/// // bundle adjustment: one side reads the cameras, one the points, one
+/// // pair joins them: every tile stored, H not zeroed;
+/// // a pose graph: both sides of an edge read the poses: their tiles
+/// // added to, H zeroed
+/// ```
+fn stores(shape: &DeviceShape, groups: &[Groups], t: &mut Tiles, nblocks: usize) -> bool {
+    let (ne, nx) = (t.entity.len(), t.cross.len());
+    // per entity table its (constraint, side) readers, per cross array its
+    // (constraint, pair) users and the tables it joins
+    let mut readers: Vec<Vec<(usize, usize)>> = vec![Vec::new(); ne];
+    let mut users: Vec<Vec<(usize, usize)>> = vec![Vec::new(); nx];
+    let mut joins: Vec<Option<(usize, usize)>> = vec![None; nx];
+    for (c, k) in shape.constraints.iter().enumerate() {
+        for (i, &e) in k.sides.iter().enumerate() {
+            readers[e].push((c, i));
+        }
+        for (p, &(i, j, x)) in k.pairs.iter().enumerate() {
+            users[x].push((c, p));
+            let (ea, eb) = (k.sides[i], k.sides[j]);
+            joins[x] = Some((ea.min(eb), ea.max(eb)));
+        }
+    }
+    let has = |ptr: &[u32], s: usize| ptr[s + 1] > ptr[s];
+    let mut covered = 0usize;
+    for e in 0..ne {
+        if let [(c, i)] = readers[e][..] {
+            let ptr = &groups[c].sides[i].0;
+            for (s, rec) in t.entity[e].chunks_exact_mut(TILE_WORDS).enumerate().filter(|(_, rec)| rec[1] != 0) {
+                rec[1] |= TILE_STORE;
+                covered += (t.whole[e] && has(ptr, s)) as usize;
+            }
+        }
+    }
+    for x in 0..nx {
+        let (Some((ea, eb)), [(c, p)]) = (joins[x], &users[x][..]) else { continue };
+        if ea == eb || joins.iter().filter(|&&j| j == joins[x]).count() > 1 {
+            continue;
+        }
+        let (whole, ptr) = (t.whole[ea] && t.whole[eb], &groups[*c].pairs[*p].0);
+        for (s, rec) in t.cross[x].chunks_exact_mut(TILE_WORDS).enumerate().filter(|(_, rec)| rec[1] != 0) {
+            rec[1] |= TILE_STORE;
+            covered += (whole && has(ptr, s)) as usize;
+        }
+    }
+    covered != nblocks
 }
 
 /// The block's structure columns into `image` (the structure range): the
 /// entity tables' indices and tiles, the referenced fields' step offsets,
-/// the cross tiles, the instances' slots and their groupings by entity and
-/// by tile. Returns per referenced field, per slot, the step's first live
-/// global index (the key of its reference).
-#[allow(clippy::too_many_arguments)]
+/// the cross tiles, the instances' slots and their [`Groups`]. Returns per
+/// referenced field, per slot, the step's first live global index (the
+/// key of its reference).
 fn write_structure(
     image: &mut [u8],
     offset: &HashMap<String, usize>,
     shape: &DeviceShape,
     st: &DeviceStructure,
     slots: &[usize],
-    cross_slots: &[usize],
-    entity_tiles: &[Vec<u32>],
-    cross_tiles: &[Vec<u32>],
+    t: &Tiles,
+    groups: &[Groups],
 ) -> Vec<Vec<u32>> {
     use arael_gpu::bytemuck::cast_slice;
     let put = |image: &mut [u8], name: &str, bytes: &[u8]| {
         let o = offset[name];
         image[o..o + bytes.len()].copy_from_slice(bytes);
     };
-    for (e, (idx, tile)) in st.idx.iter().zip(entity_tiles).enumerate() {
+    for (e, (idx, tile)) in st.idx.iter().zip(&t.entity).enumerate() {
         put(image, &format!("E{e}_IDX"), cast_slice(idx));
         put(image, &format!("E{e}_TILE"), cast_slice(tile));
     }
@@ -898,11 +1010,10 @@ fn write_structure(
                 .collect(),
         );
     }
-    let owners: Vec<Vec<u32>> = cross_tiles.iter().map(|t| tile_owners(t)).collect();
-    for (x, t) in cross_tiles.iter().enumerate() {
-        put(image, &format!("X{x}_TILE"), cast_slice(t));
+    for (x, tile) in t.cross.iter().enumerate() {
+        put(image, &format!("X{x}_TILE"), cast_slice(tile));
     }
-    for (c, k) in shape.constraints.iter().enumerate() {
+    for ((c, k), g) in shape.constraints.iter().enumerate().zip(groups) {
         let (w, rows) = (k.words(), &st.rows[c]);
         for (q, name) in word_names(k).enumerate() {
             let o = offset[&format!("C{c}_{name}")];
@@ -910,18 +1021,13 @@ fn write_structure(
                 *b = v.to_le_bytes();
             }
         }
-        for (i, &e) in k.sides.iter().enumerate() {
-            let (ptr, list) = by_slot(word(rows, w, i), slots[e]);
-            put(image, &format!("C{c}_OFF{i}"), cast_slice(&ptr));
-            put(image, &format!("C{c}_INST{i}"), cast_slice(&list));
+        for (i, (ptr, list)) in g.sides.iter().enumerate() {
+            put(image, &format!("C{c}_OFF{i}"), cast_slice(ptr));
+            put(image, &format!("C{c}_INST{i}"), cast_slice(list));
         }
-        for (p, &(_, _, x)) in k.pairs.iter().enumerate() {
-            // every instance in the list of its tile's first slot, so a
-            // tile has one summing thread per entry, the other slots none
-            let owner = &owners[x];
-            let (ptr, list) = by_slot(word(rows, w, k.sides.len() + p).map(|s| owner[s as usize]), cross_slots[x]);
-            put(image, &format!("C{c}_XOFF{p}"), cast_slice(&ptr));
-            put(image, &format!("C{c}_XINST{p}"), cast_slice(&list));
+        for (p, (ptr, list)) in g.pairs.iter().enumerate() {
+            put(image, &format!("C{c}_XOFF{p}"), cast_slice(ptr));
+            put(image, &format!("C{c}_XINST{p}"), cast_slice(list));
         }
     }
     ref_index
@@ -956,7 +1062,10 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
                 }
             }
         }
-        let (entity_tiles, cross_tiles) = tiles(&shape, &st, &slots, &cross_slots, &Resolver::new(pattern), (threads, PAR_MIN));
+        let mut t = tiles(&shape, &st, &slots, &cross_slots, &Resolver::new(pattern), (threads, PAR_MIN));
+        let owners: Vec<Vec<u32>> = t.cross.iter().map(|t| tile_owners(t)).collect();
+        let groups = groups(&shape, &st, &slots, &cross_slots, &owners);
+        let zero_h = stores(&shape, &groups, &mut t, pattern.nblocks());
         let route = Values::of(ts, wide);
         let layout = Layout::new(columns(&shape, &slots, &cross_slots, &counts, ts, route));
         let scalar = if ts == 8 { "double" } else { "float" };
@@ -1007,7 +1116,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         let offset = layout.index();
         // the structure: the structure columns, copied once
         let mut host = HostBuf::new(&**dev, staging, layout.structure_bytes)?;
-        let ref_index = write_structure(host.bytes_mut(&**dev)?, &offset, &shape, &st, &slots, &cross_slots, &entity_tiles, &cross_tiles);
+        let ref_index = write_structure(host.bytes_mut(&**dev)?, &offset, &shape, &st, &slots, &t, &groups);
         host.upload(&**dev, &mut block, 0, layout.structure_bytes)?;
         drop(host);
         let staged = HostBuf::new(&**dev, staging, layout.host_bytes - layout.structure_bytes)?;
@@ -1019,6 +1128,8 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             slots,
             cross_slots,
             counts,
+            nh: pattern.val_count(),
+            zero_h,
             ref_index,
             keep: st.keep,
             layout,
@@ -1097,7 +1208,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             let number = |name: &str| name[1..].split('_').next().and_then(|n| n.parse::<usize>().ok());
             let (ty, role, doc): (&str, &str, &str) = match (c.name.as_bytes()[0], kind) {
                 (b'E', "IDX") => ("u32", "", "per entity parameter: its global index in x, FIXED when not optimized"),
-                (b'E', "TILE") => ("u32", "", "per entity: its diagonal tile in H's values (base, stride, first live index)"),
+                (b'E', "TILE") => ("u32", "", "per entity: its diagonal tile in H's values (base, stride with TILE_STORE when its kernel stores it, first live index)"),
                 (b'E', "FIXED") => (f, "F", "per entity parameter: its value where fixed"),
                 (b'E', "DATA") => (f, "F", "per entity: the record of its data the constraints read (F values)"),
                 (b'E', "EV") => (f, "F", "per entity parameter: its value at the current x, gathered"),
@@ -1106,7 +1217,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
                 (b'R', "VAL") => (f, "F", "per entity: the referenced field's composed values"),
                 (b'R', "VALW") => (w, "W", "per entity: the referenced field's composed values in the wide scalar"),
                 (b'R', "DER") => (f, "F", "per entity: the composed values' derivatives by the step"),
-                (b'X', "TILE") => ("u32", "", "per cross block: its tile in H's values (base, stride, flip: 1 when the second side's span lies on the tile's rows)"),
+                (b'X', "TILE") => ("u32", "", "per cross block: its tile in H's values (base, stride with TILE_STORE when its kernel stores it, flip: 1 when the second side's span lies on the tile's rows)"),
                 (b'C', "S") => ("u32", "", "per instance: this side's entity slot"),
                 (b'C', "OFF") => ("u32", "", "per entity slot of this side: where its instances start in INST"),
                 (b'C', "INST") => ("u32", "", "the instances grouped by this side's entity"),
@@ -1175,6 +1286,13 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         self.run(&self.kernels.zero_values, n.div_ceil(4), &[Arg::Block(t.0, t.1), Arg::U32(n as u32)])
     }
 
+    /// H's values (`nh` of them, the pattern's) zeroed, unless every block
+    /// of H is a tile its kernel stores ([`stores`]).
+    fn zero_h(&self, h: Target<'_, D::Block>, nh: usize) -> Result<(), GpuError> {
+        assert_eq!(nh, self.nh, "an H of {nh} values, the assembly laid out against {}", self.nh);
+        if self.zero_h { self.zero_values(h, nh) } else { Ok(()) }
+    }
+
     /// The entities' parameter values and the referenced fields' values at
     /// the parameters `x`; with `derivatives`, their derivatives too.
     fn gather(&self, x: Target<'_, D::Block>, derivatives: bool) -> Result<(), GpuError> {
@@ -1199,8 +1317,10 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     }
 
     /// The gradient (`ng` values at `g`), the pattern's tile values (`nh`
-    /// at `h`) and the cost (one value at `cost`) at the parameters `x`,
-    /// each zeroed first: the parameters, the gradient and H in
+    /// at `h`, every one written: zeroed first unless every block is a tile
+    /// its kernel stores) and the cost (one value at `cost`) at the
+    /// parameters `x`, the gradient and the cost zeroed first: the
+    /// parameters, the gradient and H in
     /// [`values`](Self::values), the cost in [`wide`](Self::wide); nothing
     /// read back.
     pub fn assemble_at(
@@ -1216,7 +1336,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         {
             let _scope = Scope::new(&*self.dev, "zero");
             self.zero_values(g, ng)?;
-            self.zero_values(h, nh)?;
+            self.zero_h(h, nh)?;
             self.zero(cost, 1)?;
         }
         self.gather(x, true)?;
@@ -1388,7 +1508,11 @@ where
     let (at_cost, at_x) = (0, 8);
     let at_g = at_x + n * values.bytes();
     let at_h = at_g + n * values.bytes();
-    let mut work = dev.alloc(at_h + nv * values.bytes()).expect("allocate the targets");
+    let bytes = at_h + nv * values.bytes();
+    let mut work = dev.alloc(bytes).expect("allocate the targets");
+    // every target NaN first: the assembly writes all of them (H's values
+    // stored or zeroed, the gradient and the cost zeroed)
+    dev.write(&mut work, 0, &vec![0xffu8; bytes]).expect("fill the targets");
     let x64: Vec<f64> = x.iter().map(|v| v.to_f64().unwrap()).collect();
     dev.write(&mut work, at_x, &values.encode(&x64)).expect("upload x");
     asm.assemble_at((&work, at_x), (&work, at_g), n, (&work, at_h), nv, (&work, at_cost)).expect("assemble on the device");
@@ -1668,8 +1792,76 @@ mod tests {
         let one = tiles(&shape, &st, &[s0, s1], &[nrows], &r, (1, usize::MAX));
         let many = tiles(&shape, &st, &[s0, s1], &[nrows], &r, (4, 1));
         assert_eq!(one, many);
-        // the fixed entities have no tile, the others one each
-        assert_eq!(one.0[0][21..24], [0, 0, 0]);
-        assert!(one.0[0][..21].chunks(3).all(|t| t[1] > 0));
+        // the fixed entities have no tile, the others one each, all of its block
+        assert_eq!(one.entity[0][21..24], [0, 0, 0]);
+        assert!(one.entity[0][..21].chunks(3).all(|t| t[1] > 0));
+        assert_eq!(one.whole, [true, true]);
+    }
+
+    /// Which kernels store their tiles, and whether H is zeroed first. A
+    /// camera-point-like scene (two entity tables of three and two
+    /// parameters a slot, one constraint between them, its pairs repeating
+    /// in cross slots of their own) stores every tile and zeroes nothing.
+    /// A prior on the second table's entities takes that table's stores
+    /// back; a second constraint joining the two tables through an array
+    /// of its own takes back both tables' (a second reader each) and the
+    /// first array's (its tiles may be the second's); a partly fixed entity
+    /// (its tile part of its block) or an entity in no instance (its block
+    /// written by none) keep the stores and zero H.
+    #[test]
+    fn kernels_store_the_tiles_they_alone_write() {
+        // per table and the first cross array whether each slot is stored,
+        // and whether H is zeroed
+        let case = |prior: bool, second: bool, partial: bool, unused: bool| {
+            let (s0, s1, n) = (20usize, 30usize, 120usize);
+            let mut idx0: Vec<u32> = (0..3 * s0 as u32).collect();
+            if partial {
+                idx0[30] = FIXED;
+            }
+            let idx1: Vec<u32> = (0..2 * s1 as u32).map(|i| 3 * s0 as u32 + i).collect();
+            let named = if unused { 19 } else { 20 };
+            let pairs: Vec<(u32, u32)> = (0..n as u32).map(|k| (k * 7 % named, k * 11 % s1 as u32)).collect();
+            let rows: Vec<u32> = pairs.iter().enumerate().flat_map(|(k, &(a, b))| [a, b, k as u32]).collect();
+            let mut constraints = vec![DeviceConstraint { data: 0, rows: 1, sides: vec![0, 1], pairs: vec![(0, 1, 0)] }];
+            let mut all_rows = vec![rows];
+            if prior {
+                constraints.push(DeviceConstraint { data: 0, rows: 1, sides: vec![1], pairs: vec![] });
+                all_rows.push((0..10).collect());
+            }
+            if second {
+                constraints.push(DeviceConstraint { data: 0, rows: 1, sides: vec![0, 1], pairs: vec![(0, 1, 1)] });
+                all_rows.push(pairs[..5].iter().enumerate().flat_map(|(k, &(a, b))| [a, b, k as u32]).collect());
+            }
+            let keep = all_rows.iter().zip(&constraints).map(|(r, k)| vec![true; r.len() / k.words()]).collect();
+            let shape = DeviceShape { entities: vec![3, 2], references: Vec::new(), crosses: 2, constraints, entity_data: vec![0, 0], root_data: 0 };
+            let st = DeviceStructure { idx: vec![idx0, idx1], rows: all_rows, keep };
+            let mut part = vec![0usize];
+            for k in 0..s0 + s1 {
+                part.push(part[k] + if k < s0 { 3 } else { 2 });
+            }
+            let mut cells: Vec<(usize, usize)> = (0..s0 + s1).map(|b| (b, b)).collect();
+            cells.extend(pairs.iter().map(|&(a, b)| (a as usize, s0 + b as usize)));
+            cells.sort_unstable();
+            cells.dedup();
+            let p = crate::simple_lm::partition_idx(&part);
+            let pattern = arael_faer::bsc::SymbolicSparseBlockColMat::covering(p.clone(), p, cells.len(), |k| (part[cells[k].0], part[cells[k].1]));
+            let (slots, cross_slots) = ([s0, s1], [n, if second { 5 } else { 0 }]);
+            let mut t = tiles(&shape, &st, &slots, &cross_slots, &Resolver::new(&pattern), (1, usize::MAX));
+            let owners: Vec<Vec<u32>> = t.cross.iter().map(|t| tile_owners(t)).collect();
+            let zero = stores(&shape, &groups(&shape, &st, &slots, &cross_slots, &owners), &mut t, pattern.nblocks());
+            let stored = |recs: &[u32]| recs.chunks(3).map(|r| r[1] & TILE_STORE != 0).collect::<Vec<bool>>();
+            (stored(&t.entity[0]), stored(&t.entity[1]), stored(&t.cross[0]), zero)
+        };
+        let all = |v: &[bool], want: bool| v.iter().all(|&b| b == want);
+        let (e0, e1, x0, zero) = case(false, false, false, false);
+        assert!(all(&e0, true) && all(&e1, true) && all(&x0, true) && !zero, "bundle adjustment");
+        let (e0, e1, x0, zero) = case(true, false, false, false);
+        assert!(all(&e0, true) && all(&e1, false) && all(&x0, true) && zero, "a prior");
+        let (e0, e1, x0, zero) = case(false, true, false, false);
+        assert!(all(&e0, false) && all(&e1, false) && all(&x0, false) && zero, "a second array");
+        let (e0, e1, x0, zero) = case(false, false, true, false);
+        assert!(all(&e0, true) && all(&e1, true) && all(&x0, true) && zero, "a partly fixed entity");
+        let (e0, e1, x0, zero) = case(false, false, false, true);
+        assert!(all(&e0, true) && all(&e1, true) && all(&x0, true) && zero, "an entity in no instance");
     }
 }

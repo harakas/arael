@@ -98,6 +98,11 @@ pub const ASSEMBLY: &str = include_str!("../kernels/assembly.cpp");
 /// its step is zero and it is not gathered from the parameter vector.
 pub const FIXED: u32 = u32::MAX;
 
+/// The bit of an assembly tile record's stride word that marks a tile its
+/// kernel stores instead of adding to: the kernel is the tile's only
+/// writer ([`ASSEMBLY`]'s `TILE_STORE`).
+pub const TILE_STORE: u32 = 1 << 31;
+
 /// The factor's scalar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuPrecision {
@@ -956,6 +961,15 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The assembly source defines the index words the host writes as the
+    /// host's constants.
+    #[test]
+    fn the_assembly_defines_the_hosts_index_words() {
+        for (name, v) in [("FIXED", FIXED), ("TILE_STORE", TILE_STORE)] {
+            assert!(ASSEMBLY.contains(&format!("#define {name} {v:#010x}u\n")), "{name} {v:#010x}");
+        }
+    }
 
     /// [`Values::extend`] writes the bytes [`Values::push`] writes a value
     /// at a time, in each scalar, and they decode back to the values the

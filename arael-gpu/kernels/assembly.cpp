@@ -30,6 +30,10 @@ typedef SCALAR F;
 // A fixed parameter's global index.
 #define FIXED 0xffffffffu
 
+// The bit of a tile record's stride word whose kernel stores its sums
+// instead of adding them (its tile's only writer).
+#define TILE_STORE 0x80000000u
+
 // The helpers of arael's external functions (arael-sym's EXTERN_CPP), as
 // arael::utils computes them, for float and double.
 
@@ -701,6 +705,16 @@ KERNEL_THREADS(256) void k_zero_values(GLOBAL V* RESTRICT x, u32 n) {
         if (i + k * m < n) x[i + k * m] = 0.0f;
 }
 
+// A tile's sum into H: stored when the tile's kernel is its only writer
+// (TILE_STORE in its record's stride word), else added.
+DEVICE void tile_put(GLOBAL V* RESTRICT h, u32 at, V acc, bool store) {
+    if (store) {
+        h[at] = acc;
+    } else {
+        h[at] += acc;
+    }
+}
+
 // The steps of x zeroed, one thread per entity: the len global indices at
 // idx[at[e]..], a fixed one left alone; what re-centring does to the
 // parameters after an accepted step.
@@ -750,7 +764,9 @@ template <typename C> DEVICE void cost_sum(GLOBAL const C* part, u32 m, GLOBAL W
 // 2 d_i d_j, entry i of the gradient 2 r d_i, over the rows of the slot's
 // instances inst[off[s]..off[s + 1]], its derivatives at OFF in each
 // row of STRIDE values of a record of R rows. idx and tile are the entity
-// array's global indices and tiles; t is the thread's global index.
+// array's global indices and tiles; t is the thread's global index. A slot
+// without instances here writes nothing (its tile may be another side's to
+// store). A stored tile (TILE_STORE) gets zeros below its diagonal too.
 template <u32 N, u32 R, u32 STRIDE, u32 OFF>
 DEVICE void reduce_entity(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRICT off, GLOBAL const u32* RESTRICT inst,
                           GLOBAL const u32* RESTRICT idx, GLOBAL const u32* RESTRICT tile, GLOBAL V* RESTRICT h,
@@ -773,12 +789,14 @@ DEVICE void reduce_entity(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRI
         }
         j = i + left;
     }
+    u32 q0 = off[s], q1 = off[s + 1];
+    if (q0 == q1) return;
     u32 gi = idx[s * N + i];
     if (gi == FIXED) return;
     u32 gj = grad ? 0u : idx[s * N + j];
     if (!grad && gj == FIXED) return;
     V acc = 0.0f;
-    for (u32 q = off[s]; q < off[s + 1]; q++) {
+    for (u32 q = q0; q < q1; q++) {
         GLOBAL const F* r = rec + inst[q] * (R * STRIDE);
 #pragma unroll
         for (u32 row = 0; row < R; row++) {
@@ -790,8 +808,11 @@ DEVICE void reduce_entity(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRI
     if (grad) {
         g[gi] += acc;
     } else {
-        u32 start = tile[s * 3 + 2];
-        h[tile[s * 3] + (gj - start) * tile[s * 3 + 1] + (gi - start)] += acc;
+        u32 base = tile[s * 3], sw = tile[s * 3 + 1], start = tile[s * 3 + 2];
+        u32 stride = sw & ~TILE_STORE;
+        bool store = (sw & TILE_STORE) != 0;
+        tile_put(h, base + (gj - start) * stride + (gi - start), acc, store);
+        if (store && gi != gj) h[base + (gi - start) * stride + (gj - start)] = 0.0f;
     }
 }
 
@@ -805,8 +826,10 @@ DEVICE void reduce_entity(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRI
 // two entities of one array, NA = NB) adds dA_j dB_i. A slot whose two
 // sides are one entity (aliased refs) sums into that entity's own tile,
 // the upper triangle: (i, j) and (j, i) land in one cell, which the thread
-// of i <= j sums, dA_i dB_j + dA_j dB_i (2 dA_i dB_i on the diagonal). t
-// is the thread's global index.
+// of i <= j sums, dA_i dB_j + dA_j dB_i (2 dA_i dB_i on the diagonal); that
+// tile has the entity's sides as writers too, so it is added to. A cross
+// tile with this kernel its only writer (TILE_STORE) is stored. t is the
+// thread's global index.
 template <u32 NA, u32 NB, u32 R, u32 STRIDE, u32 OFFA, u32 OFFB>
 DEVICE void reduce_cross(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRICT off, GLOBAL const u32* RESTRICT inst,
                          GLOBAL const u32* RESTRICT slot_a, GLOBAL const u32* RESTRICT slot_b,
@@ -828,7 +851,8 @@ DEVICE void reduce_cross(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRIC
     const bool alias = NA == NB && start_a == start_b;
     if (alias && i > j) return;
     V acc = 0.0f;
-    u32 base = tile_x[x * 3], stride = tile_x[x * 3 + 1], flip = tile_x[x * 3 + 2];
+    u32 base = tile_x[x * 3], sw = tile_x[x * 3 + 1], flip = tile_x[x * 3 + 2];
+    u32 stride = sw & ~TILE_STORE;
     if (alias) {
         for (u32 q = q0; q < q1; q++) {
             GLOBAL const F* r = rec + inst[q] * (R * STRIDE);
@@ -858,7 +882,7 @@ DEVICE void reduce_cross(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRIC
     acc += acc;
     u32 ra = gi - start_a;
     u32 cb = gj - start_b;
-    h[flip == 0 ? base + cb * stride + ra : base + ra * stride + cb] += acc;
+    tile_put(h, flip == 0 ? base + cb * stride + ra : base + ra * stride + cb, acc, (sw & TILE_STORE) != 0);
 }
 
 // The layout table: the byte offset of each of a root's ARAEL_COLS columns
