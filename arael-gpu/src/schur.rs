@@ -438,12 +438,15 @@ impl SchurPlan {
             dfac_len += we * we;
             z_len += we;
         }
-        // a record per observer, in the order of their eliminated blocks
+        // a record per observer, in the order of their eliminated blocks; and
+        // per observer its eliminated block's first observer
         let mut w_len = 0u32;
         let mut kw_max = 1usize;
+        let mut obs_first = vec![0u32; no];
         for slot in 0..ne {
             let we = sym.elim_w[slot];
             for o in e_obs_ptr[slot] as usize..e_obs_ptr[slot + 1] as usize {
+                obs_first[o] = e_obs_ptr[slot];
                 let wo = sym.obs_w[o];
                 let r = &mut so[SO_REC * o..][..SO_REC];
                 (r[SO_W_OFF], r[SO_DIMS], r[SO_CA_OFF], r[SO_E], r[SO_ORIG_OFF]) = (w_len, so_dims(wo, we, sym.obs_trans[o]), sym.obs_ca_off[o], slot as u32, sym.obs_orig_off[o]);
@@ -477,42 +480,8 @@ impl SchurPlan {
                 t_copy.push(copy_of[t]);
             }
         }
-        // The pairs: every (oa, ob) of one eliminated block with kept(oa) <=
-        // kept(ob), grouped by their tile of S in a counting sort. The tile
-        // (a, b) is found by row in column b, whose rows are ascending.
-        let kept_of_obs = sym.obs_kept;
-        let tile_of = |a: usize, b: usize| -> u32 {
-            let r = ssym.col_range(b);
-            let (mut lo, mut hi) = (r.start, r.end);
-            while lo < hi {
-                let mid = (lo + hi) / 2;
-                if ssym.blk_row(mid) < a {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
-            }
-            assert!(lo < r.end && ssym.blk_row(lo) == a, "every observer pair has a tile in S");
-            lo as u32
-        };
-        let np = sym.pairs;
-        let mut pair_tile: Vec<u32> = Vec::with_capacity(np);
-        let mut t_pair_ptr = vec![0u32; nt + 1];
-        for slot in 0..ne {
-            let (q0, q1) = (e_obs_ptr[slot] as usize, e_obs_ptr[slot + 1] as usize);
-            for i in q0..q1 {
-                for j in i..q1 {
-                    let t = tile_of(kept_of_obs[i] as usize, kept_of_obs[j] as usize);
-                    pair_tile.push(t);
-                    t_pair_ptr[t as usize + 1] += 1;
-                }
-            }
-        }
-        assert_eq!(pair_tile.len(), np, "the reduction counted its pairs");
-        for t in 0..nt {
-            t_pair_ptr[t + 1] += t_pair_ptr[t];
-        }
         // the kept blocks' observer lists
+        let kept_of_obs = sym.obs_kept;
         let mut k_obs_ptr = vec![0u32; nk + 1];
         for &k in kept_of_obs {
             k_obs_ptr[k as usize + 1] += 1;
@@ -529,6 +498,38 @@ impl SchurPlan {
         let k_s_off: Vec<u32> = (0..nk).map(|k| spart[k]).collect();
         let k_orig: Vec<u32> = sym.kept.iter().map(|&orig| hpart[orig as usize]).collect();
         let k_w: Vec<u32> = (0..nk).map(|k| spart[k + 1] - spart[k]).collect();
+        // The pairs: every (oa, ob) of one eliminated block with kept(oa) <=
+        // kept(ob), grouped by their tile of S, in storage order, by column b:
+        // kept block b's observers ob, each with its eliminated block's
+        // observers up to it (oa <= ob: kept(oa) <= b, the observers being in
+        // kept order), the tile (kept(oa), b) found in the column's row
+        // table. A tile's pairs come in their eliminated blocks' order (one
+        // pair a block). Counted first, then written.
+        let np = sym.pairs;
+        let mut row_tile = vec![NONE; nk];
+        let mut t_pair_ptr = vec![0u32; nt + 1];
+        let column = |b: usize, row_tile: &mut [u32], each: &mut dyn FnMut(usize, u32, u32)| {
+            for t in ssym.col_range(b) {
+                row_tile[ssym.blk_row(t)] = t as u32;
+            }
+            for &ob in &k_obs[k_obs_ptr[b] as usize..k_obs_ptr[b + 1] as usize] {
+                for oa in obs_first[ob as usize]..=ob {
+                    let t = row_tile[kept_of_obs[oa as usize] as usize];
+                    assert!(t != NONE, "every observer pair has a tile in S");
+                    each(t as usize, oa, ob);
+                }
+            }
+            for t in ssym.col_range(b) {
+                row_tile[ssym.blk_row(t)] = NONE;
+            }
+        };
+        for b in 0..nk {
+            column(b, &mut row_tile, &mut |t, _, _| t_pair_ptr[t + 1] += 1);
+        }
+        for t in 0..nt {
+            t_pair_ptr[t + 1] += t_pair_ptr[t];
+        }
+        assert_eq!(t_pair_ptr[nt] as usize, np, "the reduction counted its pairs");
         // pack the rest, the pairs' records written in place by their tile
         let arrays: [(usize, &[u32]); 7] = [
             (ST_VAL_OFF, &t_val),
@@ -546,23 +547,20 @@ impl SchurPlan {
         }
         let at_pairs = buf.len();
         buf[SP] = at_pairs as u32;
-        buf.resize(at_pairs + SP_REC * np, 0);
+        // a column's pairs are one stretch: the buffer grows by it, so its
+        // writes stay in cache
         let mut next = t_pair_ptr.clone();
-        let mut k = 0usize;
-        for slot in 0..ne {
-            let (q0, q1) = (e_obs_ptr[slot] as usize, e_obs_ptr[slot + 1] as usize);
-            for i in q0..q1 {
-                for j in i..q1 {
-                    let t = pair_tile[k] as usize;
-                    k += 1;
-                    let at = next[t] as usize;
-                    next[t] += 1;
-                    let r = &mut buf[at_pairs + SP_REC * at..][..SP_REC];
-                    (r[SP_OA], r[SP_OB]) = (i as u32, j as u32);
-                }
-            }
+        for b in 0..nk {
+            let tiles = ssym.col_range(b);
+            let (p0, p1) = (t_pair_ptr[tiles.start] as usize, t_pair_ptr[tiles.end] as usize);
+            buf.resize(at_pairs + SP_REC * p1, 0);
+            let sp = &mut buf[at_pairs + SP_REC * p0..];
+            column(b, &mut row_tile, &mut |t, oa, ob| {
+                let r = &mut sp[SP_REC * (next[t] as usize - p0)..][..SP_REC];
+                (r[SP_OA], r[SP_OB]) = (oa, ob);
+                next[t] += 1;
+            });
         }
-        drop(pair_tile);
         for (slot, v) in tail {
             buf[slot] = buf.len() as u32;
             buf.extend_from_slice(v);
@@ -1936,6 +1934,40 @@ mod tests {
                     assert!(es < 1e-12, "{wide:?}, tiles over {split_pairs} pairs split, {groups} groups: S err/max {es}");
                 }
             }
+        }
+    }
+
+    /// The pairs grouped by tile of S, in storage order: a tile (a, b) holds
+    /// every pair (oa, ob) of one eliminated block's observers with
+    /// kept(oa) = a and kept(ob) = b, in the eliminated blocks' order.
+    #[test]
+    fn the_pairs_are_grouped_by_tile_in_their_blocks_order() {
+        for (nc, np_, obs) in [(10, 30, 2), (12, 60, 4), (6, 40, 5)] {
+            let (h, _, _, elim) = ba_like(nc, np_, obs);
+            let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
+            let p = SchurPlan::reduction(&sym, h.symbolic());
+            let w = &p.words;
+            let (ssym, kept, eptr) = (&sym.s, sym.obs_kept(), sym.elim_obs_ptr());
+            let mut want: std::collections::HashMap<(usize, usize), Vec<(u32, u32)>> = std::collections::HashMap::new();
+            for slot in 0..eptr.len() - 1 {
+                for i in eptr[slot]..eptr[slot + 1] {
+                    for j in i..eptr[slot + 1] {
+                        want.entry((kept[i as usize] as usize, kept[j as usize] as usize)).or_default().push((i, j));
+                    }
+                }
+            }
+            let ptr = &w[w[ST_PAIR_PTR] as usize..][..p.nt as usize + 1];
+            let sp = &w[w[SP] as usize..][..SP_REC * p.np];
+            let mut seen = 0;
+            for b in 0..ssym.nblk_cols() {
+                for t in ssym.col_range(b) {
+                    let got: Vec<(u32, u32)> = (ptr[t]..ptr[t + 1]).map(|q| (sp[SP_REC * q as usize + SP_OA], sp[SP_REC * q as usize + SP_OB])).collect();
+                    let expect = want.get(&(ssym.blk_row(t), b)).cloned().unwrap_or_default();
+                    assert_eq!(got, expect, "tile {t} ({}, {b})", ssym.blk_row(t));
+                    seen += got.len();
+                }
+            }
+            assert_eq!((seen, ptr[p.nt as usize] as usize), (p.np, p.np));
         }
     }
 
