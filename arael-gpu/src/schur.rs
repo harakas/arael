@@ -58,11 +58,12 @@ pub(crate) const ST_WC: usize = 4;
 pub(crate) const ST_A: usize = 5;
 pub(crate) const ST_B: usize = 6;
 pub(crate) const ST_COPY_OFF: usize = 7;
+/// Per tile of S: its first pair (two observers of one eliminated block:
+/// a term of the tile), the next tile's the end; the pairs themselves are
+/// written on the device (`k_schur_pairs`).
 pub(crate) const ST_PAIR_PTR: usize = 8;
-/// The pairs (two observers of one eliminated block: a term of a tile of
-/// S), grouped by tile: a record of [`SP_REC`] words each (the `SP_*`
-/// fields).
-pub(crate) const SP: usize = 9;
+/// Per observer: its kept block.
+pub(crate) const OBS_KEPT: usize = 9;
 pub(crate) const SK_OBS_PTR: usize = 10;
 pub(crate) const SK_OBS: usize = 11;
 pub(crate) const SK_S_OFF: usize = 12;
@@ -71,25 +72,20 @@ pub(crate) const SK_W: usize = 14;
 /// The blocks of `k_schur_tiles` ([`tile_blocks`]), added by
 /// [`GpuSchur`]'s build.
 pub(crate) const SB_ITEMS: usize = 15;
+/// Per kept block: its first tile of S, the next block's the end.
+pub(crate) const SK_T_PTR: usize = 16;
+/// Per eliminated block: its first pair in `k_schur_pairs`' threads, the
+/// next block's the end (m observers make m (m + 1) / 2 pairs).
+pub(crate) const SE_PAIR_PTR: usize = 17;
 pub(crate) const SHEADER: usize = 32;
 
-// The words of a pair's record ([`SP`]).
-/// Its observer of the tile's row block.
-pub(crate) const SP_OA: usize = 0;
-/// Its observer of the tile's column block.
-pub(crate) const SP_OB: usize = 1;
-pub(crate) const SP_REC: usize = 2;
-
 // The words of a pair's expanded record, what `k_schur_tiles` needs of the
-// pair's observers (oa of the tile's row block, ob of its column block):
-// written on the device once per structure (`k_schur_pairs`) into a block
-// of their own, so the host builds and uploads the compact record and the
-// tile kernel reads a pair in one step, not through its observers'
-// records. A dependent load less a pair: `k_schur_tiles` 18% faster in f32
-// on an RTX 4090 (Ladybug-372), 1% in f64; whole bundle adjustment solves
-// 3 to 7% faster on an AMD integrated GPU, within 1% on the RTX 4090. Built
-// on the host the expanded records cost more than they save (5 ms more a
-// structure at Ladybug-372, 1.1 M pairs).
+// pair's observers (oa of the tile's row block, ob of its column block),
+// grouped by tile (ST_PAIR_PTR), a tile's pairs in no fixed order: written
+// on the device once per structure (`k_schur_pairs`, from the observers'
+// records) into a block of their own, so the tile kernel reads a pair in
+// one step and the host neither builds nor uploads the pairs (at slam-900,
+// 4.25 M pairs, 20 ms of host writes and 34 MB of upload).
 /// The value offset of W_oa in w.
 pub(crate) const PX_W_OFF: usize = 0;
 /// The value offset of ob's coupling tile in h.
@@ -412,9 +408,9 @@ impl SchurPlan {
         let hpart = hsym.col_part();
         // The plan's words: the header, then the eliminated blocks' and the
         // observers' tables, their records written in place; room for the
-        // tiles', the pairs' and the kept blocks' words that follow.
+        // tiles', the observers' and the kept blocks' words that follow.
         let (at_se, at_so) = (SHEADER, SHEADER + SE_REC * (ne + 1));
-        let mut buf: Vec<u32> = Vec::with_capacity(at_so + SO_REC * no + 7 * sym.s.nblocks() + SP_REC * sym.pairs + no + 4 * nk + 64);
+        let mut buf: Vec<u32> = Vec::with_capacity(at_so + SO_REC * no + 7 * sym.s.nblocks() + 2 * no + 5 * nk + 64);
         buf.resize(at_so + SO_REC * no, 0);
         (buf[SE], buf[SO]) = (at_se as u32, at_so as u32);
         let (se, so) = buf[at_se..].split_at_mut(SE_REC * (ne + 1));
@@ -498,17 +494,16 @@ impl SchurPlan {
         let k_s_off: Vec<u32> = (0..nk).map(|k| spart[k]).collect();
         let k_orig: Vec<u32> = sym.kept.iter().map(|&orig| hpart[orig as usize]).collect();
         let k_w: Vec<u32> = (0..nk).map(|k| spart[k + 1] - spart[k]).collect();
-        // The pairs: every (oa, ob) of one eliminated block with kept(oa) <=
-        // kept(ob), grouped by their tile of S, in storage order, by column b:
-        // kept block b's observers ob, each with its eliminated block's
-        // observers up to it (oa <= ob: kept(oa) <= b, the observers being in
-        // kept order), the tile (kept(oa), b) found in the column's row
-        // table. A tile's pairs come in their eliminated blocks' order (one
-        // pair a block). Counted first, then written.
+        // The pairs counted by tile of S: every (oa, ob) of one eliminated
+        // block with kept(oa) <= kept(ob), by column b: kept block b's
+        // observers ob, each with its eliminated block's observers up to it
+        // (oa <= ob: kept(oa) <= b, the observers being in kept order), the
+        // tile (kept(oa), b) found in the column's row table. The device
+        // writes the pairs (`k_schur_pairs`).
         let np = sym.pairs;
         let mut row_tile = vec![NONE; nk];
         let mut t_pair_ptr = vec![0u32; nt + 1];
-        let column = |b: usize, row_tile: &mut [u32], each: &mut dyn FnMut(usize, u32, u32)| {
+        for b in 0..nk {
             for t in ssym.col_range(b) {
                 row_tile[ssym.blk_row(t)] = t as u32;
             }
@@ -516,22 +511,26 @@ impl SchurPlan {
                 for oa in obs_first[ob as usize]..=ob {
                     let t = row_tile[kept_of_obs[oa as usize] as usize];
                     assert!(t != NONE, "every observer pair has a tile in S");
-                    each(t as usize, oa, ob);
+                    t_pair_ptr[t as usize + 1] += 1;
                 }
             }
             for t in ssym.col_range(b) {
                 row_tile[ssym.blk_row(t)] = NONE;
             }
-        };
-        for b in 0..nk {
-            column(b, &mut row_tile, &mut |t, _, _| t_pair_ptr[t + 1] += 1);
         }
         for t in 0..nt {
             t_pair_ptr[t + 1] += t_pair_ptr[t];
         }
         assert_eq!(t_pair_ptr[nt] as usize, np, "the reduction counted its pairs");
-        // pack the rest, the pairs' records written in place by their tile
-        let arrays: [(usize, &[u32]); 7] = [
+        let k_t_ptr: Vec<u32> = (0..nk).map(|b| ssym.col_range(b).start as u32).chain([nt as u32]).collect();
+        let obs_kept: Vec<u32> = kept_of_obs.iter().map(|&k| k as u32).collect();
+        let mut e_pair_ptr = vec![0u32; ne + 1];
+        for e in 0..ne {
+            let m = e_obs_ptr[e + 1] - e_obs_ptr[e];
+            e_pair_ptr[e + 1] = e_pair_ptr[e] + m * (m + 1) / 2;
+        }
+        // pack the rest
+        let arrays: [(usize, &[u32]); 15] = [
             (ST_VAL_OFF, &t_val),
             (ST_WR, &t_wr),
             (ST_WC, &t_wc),
@@ -539,29 +538,16 @@ impl SchurPlan {
             (ST_B, &t_b),
             (ST_COPY_OFF, &t_copy),
             (ST_PAIR_PTR, &t_pair_ptr),
+            (OBS_KEPT, &obs_kept),
+            (SK_OBS_PTR, &k_obs_ptr),
+            (SK_OBS, &k_obs),
+            (SK_S_OFF, &k_s_off),
+            (SK_ORIG_OFF, &k_orig),
+            (SK_W, &k_w),
+            (SK_T_PTR, &k_t_ptr),
+            (SE_PAIR_PTR, &e_pair_ptr),
         ];
-        let tail: [(usize, &[u32]); 5] = [(SK_OBS_PTR, &k_obs_ptr), (SK_OBS, &k_obs), (SK_S_OFF, &k_s_off), (SK_ORIG_OFF, &k_orig), (SK_W, &k_w)];
         for (slot, v) in arrays {
-            buf[slot] = buf.len() as u32;
-            buf.extend_from_slice(v);
-        }
-        let at_pairs = buf.len();
-        buf[SP] = at_pairs as u32;
-        // a column's pairs are one stretch: the buffer grows by it, so its
-        // writes stay in cache
-        let mut next = t_pair_ptr.clone();
-        for b in 0..nk {
-            let tiles = ssym.col_range(b);
-            let (p0, p1) = (t_pair_ptr[tiles.start] as usize, t_pair_ptr[tiles.end] as usize);
-            buf.resize(at_pairs + SP_REC * p1, 0);
-            let sp = &mut buf[at_pairs + SP_REC * p0..];
-            column(b, &mut row_tile, &mut |t, oa, ob| {
-                let r = &mut sp[SP_REC * (next[t] as usize - p0)..][..SP_REC];
-                (r[SP_OA], r[SP_OB]) = (oa, ob);
-                next[t] += 1;
-            });
-        }
-        for (slot, v) in tail {
             buf[slot] = buf.len() as u32;
             buf.extend_from_slice(v);
         }
@@ -827,14 +813,17 @@ impl<D: Device> GpuSchur<D> {
         let k = Kernels { zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert, pairs, kobs, kt };
         let header: [u32; SHEADER] = pk.words[..SHEADER].try_into().expect("the plan's header");
         // the expanded records of the pairs, the kept blocks' observers and
-        // the kept blocks' tile entries, written on the device from the plan
-        let (no, nkt) = (p.no as usize, kt_words.len());
+        // the kept blocks' tile entries, written on the device from the
+        // plan, and the tiles' pair counters the pairs' writing takes
+        let (no, nkt, nt) = (p.no as usize, kt_words.len(), p.nt as usize);
         let kobs_at = 4 * PX_REC * p.np;
         let kt_at = kobs_at + 4 * KO_REC * no;
-        let expanded = dev.alloc((PX_REC * p.np + KO_REC * no + KT_REC * nkt).max(1) * 4)?;
+        let cur_at = kt_at + 4 * KT_REC * nkt;
+        let expanded = dev.alloc((PX_REC * p.np + KO_REC * no + KT_REC * nkt + nt).max(1) * 4)?;
         let hd = Arg::Bytes(bytemuck::cast_slice(&header));
         if p.np > 0 {
-            let args = [Arg::Block(&ints, 0), hd, Arg::Block(&expanded, 0), Arg::U32(p.np as u32)];
+            dev.launch(&k.zero_u32, Launch::linear(nt as u32, PLANE), &[Arg::Block(&expanded, cur_at), Arg::U32(nt as u32)])?;
+            let args = [Arg::Block(&ints, 0), hd, Arg::Block(&expanded, cur_at), Arg::Block(&expanded, 0), Arg::U32(p.np as u32), Arg::U32(p.ne)];
             dev.launch(&k.pairs, Launch::linear(p.np as u32, THREADS), &args)?;
         }
         if no > 0 {
@@ -848,8 +837,8 @@ impl<D: Device> GpuSchur<D> {
         dev.describe(&expanded, "schur.expanded", &|| {
             vec![
                 Section::u32s("pairs", 0, PX_REC * p.np).record(PX_REC).doc(
-                    "per pair, in the plan's order (by tile): W's value offset in w of its observer of the tile's row block, the coupling tile's \
-                     value offset in h and the sizes of its observer of the column block",
+                    "per pair, by tile (ST_PAIR_PTR), a tile's in no fixed order: W's value offset in w of its observer of the tile's row \
+                     block, the coupling tile's value offset in h and the sizes of its observer of the column block",
                 ),
                 Section::u32s("kept_obs", kobs_at, KO_REC * no).record(KO_REC).doc(
                     "per entry of SK_OBS (the observers by kept block): the observer's sizes, its coupling tile's value offset in h, its \
@@ -859,6 +848,7 @@ impl<D: Device> GpuSchur<D> {
                     "per entry of kt (the tiles of S by kept block): the tile's value offset in s, its sizes (transposed when the block is the \
                      tile's column), the other block's offset in the reduced vector",
                 ),
+                Section::u32s("pair_counts", cur_at, nt).doc("per tile of S: its pairs written, the counter k_schur_pairs takes a pair's place from"),
             ]
         });
         dev.describe(&ints, "schur.plan", &|| {
@@ -1307,19 +1297,20 @@ fn plan_sections(words: &[u32]) -> Vec<Section> {
         (ST_B, "ST_B", "per tile of S: its column kept block"),
         (ST_COPY_OFF, "ST_COPY_OFF", "per tile of S: the value offset in h of the kept-kept tile behind it, or NONE"),
         (ST_PAIR_PTR, "ST_PAIR_PTR", "per tile of S: its first pair"),
-        (SP, "SP", "per pair, a record, the pairs grouped by tile: its observer of the tile's row block, its observer of the column block"),
+        (OBS_KEPT, "OBS_KEPT", "per observer: its kept block"),
         (SK_OBS_PTR, "SK_OBS_PTR", "per kept block: its first entry in SK_OBS"),
         (SK_OBS, "SK_OBS", "the observers grouped by kept block"),
         (SK_S_OFF, "SK_S_OFF", "per kept block: its scalar offset in the reduced vector"),
         (SK_ORIG_OFF, "SK_ORIG_OFF", "per kept block: its scalar offset in the step"),
         (SK_W, "SK_W", "per kept block: its width"),
+        (SK_T_PTR, "SK_T_PTR", "per kept block: its first tile of S, its column's"),
+        (SE_PAIR_PTR, "SE_PAIR_PTR", "per eliminated block: its first pair in k_schur_pairs' threads"),
     ];
     let mut sections = crate::plan_sections(words, SHEADER, &slots);
     for s in &mut sections {
         match s.name.as_str() {
             "SE" => s.record = SE_REC,
             "SO" => s.record = SO_REC,
-            "SP" => s.record = SP_REC,
             _ => {}
         }
     }
@@ -1527,10 +1518,9 @@ fn defines(p: &SchurPlan, lanes: u32, tile_warps: u32, tile_groups: u32) -> Stri
             ("ST_B", ST_B),
             ("ST_COPY_OFF", ST_COPY_OFF),
             ("ST_PAIR_PTR", ST_PAIR_PTR),
-            ("SP", SP),
-            ("SP_REC", SP_REC),
-            ("SP_OA", SP_OA),
-            ("SP_OB", SP_OB),
+            ("OBS_KEPT", OBS_KEPT),
+            ("SK_T_PTR", SK_T_PTR),
+            ("SE_PAIR_PTR", SE_PAIR_PTR),
             ("PX_REC", PX_REC),
             ("PX_W_OFF", PX_W_OFF),
             ("PX_C_OFF", PX_C_OFF),
@@ -1937,62 +1927,72 @@ mod tests {
         }
     }
 
-    /// The pairs grouped by tile of S, in storage order: a tile (a, b) holds
-    /// every pair (oa, ob) of one eliminated block's observers with
-    /// kept(oa) = a and kept(ob) = b, in the eliminated blocks' order.
+    /// The device writes every pair's expanded record once per structure,
+    /// grouped by tile of S in storage order: a tile (a, b) holds every
+    /// pair (oa, ob) of one eliminated block's observers with kept(oa) = a
+    /// and kept(ob) = b, in no fixed order, as W's offset of oa, the
+    /// coupling tile's offset of ob and ob's sizes. The plan counts the
+    /// pairs by tile (ST_PAIR_PTR) and names each observer's kept block
+    /// (OBS_KEPT), each column's first tile (SK_T_PTR) and each eliminated
+    /// block's first pair (SE_PAIR_PTR).
     #[test]
-    fn the_pairs_are_grouped_by_tile_in_their_blocks_order() {
-        for (nc, np_, obs) in [(10, 30, 2), (12, 60, 4), (6, 40, 5)] {
-            let (h, _, _, elim) = ba_like(nc, np_, obs);
+    fn the_device_writes_each_tiles_pairs() {
+        for (poses, landmarks, seed) in [(10, 30, 2), (12, 60, 4), (6, 40, 5)] {
+            let (h, _, _, elim) = ba_like(poses, landmarks, seed);
             let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
             let p = SchurPlan::reduction(&sym, h.symbolic());
             let w = &p.words;
-            let (ssym, kept, eptr) = (&sym.s, sym.obs_kept(), sym.elim_obs_ptr());
-            let mut want: std::collections::HashMap<(usize, usize), Vec<(u32, u32)>> = std::collections::HashMap::new();
+            let (ssym, kept, eptr, so) = (&sym.s, sym.obs_kept(), sym.elim_obs_ptr(), w[SO] as usize);
+            let rec = |oa: usize, ob: usize| [w[so + SO_REC * oa + SO_W_OFF], w[so + SO_REC * ob + SO_CA_OFF], w[so + SO_REC * ob + SO_DIMS]];
+            let mut want: std::collections::HashMap<(usize, usize), Vec<[u32; PX_REC]>> = std::collections::HashMap::new();
             for slot in 0..eptr.len() - 1 {
-                for i in eptr[slot]..eptr[slot + 1] {
-                    for j in i..eptr[slot + 1] {
-                        want.entry((kept[i as usize] as usize, kept[j as usize] as usize)).or_default().push((i, j));
+                for i in eptr[slot] as usize..eptr[slot + 1] as usize {
+                    for j in i..eptr[slot + 1] as usize {
+                        want.entry((kept[i] as usize, kept[j] as usize)).or_default().push(rec(i, j));
                     }
                 }
             }
-            let ptr = &w[w[ST_PAIR_PTR] as usize..][..p.nt as usize + 1];
-            let sp = &w[w[SP] as usize..][..SP_REC * p.np];
-            let mut seen = 0;
+            let at = |slot: usize, n: usize| &w[w[slot] as usize..][..n];
+            assert!(at(OBS_KEPT, p.no as usize).iter().zip(kept).all(|(&a, &b)| a == b as u32));
+            let t_ptr: Vec<u32> = (0..ssym.nblk_cols()).map(|b| ssym.col_range(b).start as u32).chain([p.nt]).collect();
+            assert_eq!(at(SK_T_PTR, p.nk as usize + 1), &t_ptr[..]);
+            let e_ptr: Vec<u32> = std::iter::once(0)
+                .chain((0..p.ne as usize).scan(0u32, |s, e| {
+                    let m = eptr[e + 1] - eptr[e];
+                    *s += m * (m + 1) / 2;
+                    Some(*s)
+                }))
+                .collect();
+            assert_eq!(at(SE_PAIR_PTR, p.ne as usize + 1), &e_ptr[..]);
+            let ptr = at(ST_PAIR_PTR, p.nt as usize + 1);
+            assert!(p.np > 100 && ptr[p.nt as usize] as usize == p.np, "pairs: {}", p.np);
+            let dev = device();
+            let g = GpuSchur::new(&dev, &sym, h.symbolic(), wide(&*dev)).unwrap();
+            let mut px = vec![0u32; PX_REC * p.np];
+            dev.read(&g.expanded, 0, bytemuck::cast_slice_mut(&mut px)).unwrap();
             for b in 0..ssym.nblk_cols() {
                 for t in ssym.col_range(b) {
-                    let got: Vec<(u32, u32)> = (ptr[t]..ptr[t + 1]).map(|q| (sp[SP_REC * q as usize + SP_OA], sp[SP_REC * q as usize + SP_OB])).collect();
-                    let expect = want.get(&(ssym.blk_row(t), b)).cloned().unwrap_or_default();
+                    let mut got: Vec<[u32; PX_REC]> = px[PX_REC * ptr[t] as usize..PX_REC * ptr[t + 1] as usize].chunks(PX_REC).map(|r| [r[0], r[1], r[2]]).collect();
+                    let mut expect = want.remove(&(ssym.blk_row(t), b)).unwrap_or_default();
+                    got.sort_unstable();
+                    expect.sort_unstable();
                     assert_eq!(got, expect, "tile {t} ({}, {b})", ssym.blk_row(t));
-                    seen += got.len();
                 }
             }
-            assert_eq!((seen, ptr[p.nt as usize] as usize), (p.np, p.np));
+            assert!(want.is_empty(), "every pair's tile is a tile of S");
         }
     }
 
-    /// The plan's tables: a record per eliminated block and one more for
-    /// the end of the last one's observers; a record per observer, its
-    /// sizes in one word; a record per pair, its observers of one
-    /// eliminated block and of its tile's row and column blocks.
-    /// The device expands every pair's record once per structure (W's
-    /// offset of its row block's observer, the coupling tile's offset and
-    /// the sizes of its column block's observer, in the plan's pair order),
-    /// and every entry of the kept blocks' observer lists (the observer's
-    /// sizes, its coupling tile's offset, its eliminated block's z offset).
+    /// The device expands every entry of the kept blocks' observer lists
+    /// once per structure: the observer's sizes, its coupling tile's offset,
+    /// its eliminated block's z offset.
     #[test]
-    fn the_device_expands_each_pair_and_kept_observer_into_its_words() {
+    fn the_device_expands_each_kept_observer_into_its_words() {
         let (h, _, _, elim) = ba_like(10, 30, 2);
         let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
         let p = SchurPlan::reduction(&sym, h.symbolic());
         let w = &p.words;
-        let (sp, so) = (w[SP] as usize, w[SO] as usize);
-        let want: Vec<u32> = (0..p.np)
-            .flat_map(|q| {
-                let (oa, ob) = (w[sp + SP_REC * q + SP_OA] as usize, w[sp + SP_REC * q + SP_OB] as usize);
-                [w[so + SO_REC * oa + SO_W_OFF], w[so + SO_REC * ob + SO_CA_OFF], w[so + SO_REC * ob + SO_DIMS]]
-            })
-            .collect();
+        let so = w[SO] as usize;
         let se = w[SE] as usize;
         let kobs = &w[w[SK_OBS] as usize..][..p.no as usize];
         let want_kobs: Vec<u32> = kobs
@@ -2002,12 +2002,8 @@ mod tests {
                 [w[r + SO_DIMS], w[r + SO_CA_OFF], w[se + SE_REC * w[r + SO_E] as usize + SE_Z_OFF]]
             })
             .collect();
-        assert!(p.np > 100, "pairs: {}", p.np);
         let dev = device();
         let g = GpuSchur::new(&dev, &sym, h.symbolic(), wide(&*dev)).unwrap();
-        let mut got = vec![0u32; PX_REC * p.np];
-        dev.read(&g.expanded, 0, bytemuck::cast_slice_mut(&mut got)).unwrap();
-        assert_eq!(got, want);
         let mut got = vec![0u32; KO_REC * p.no as usize];
         dev.read(&g.expanded, g.kobs_at, bytemuck::cast_slice_mut(&mut got)).unwrap();
         assert_eq!(got, want_kobs);
@@ -2049,8 +2045,12 @@ mod tests {
         }
     }
 
+    /// The plan's tables: a record per eliminated block and one more for
+    /// the end of the last one's observers; a record per observer, its
+    /// sizes in one word; per tile of S the count of its pairs (two
+    /// observers of one eliminated block, of its row and column blocks).
     #[test]
-    fn the_plan_holds_a_record_per_block_observer_and_pair() {
+    fn the_plan_holds_a_record_per_block_and_observer_and_counts_the_pairs() {
         assert_eq!(so_dims(9, 3, true), 0x10309);
         assert_eq!(so_dims(6, 3, false), 0x306);
         let (h, _, _, elim) = ba_like(10, 30, 2);
@@ -2060,7 +2060,6 @@ mod tests {
         let w = &p.words;
         let se = &w[w[SE] as usize..][..SE_REC * (ne + 1)];
         let so = &w[w[SO] as usize..][..SO_REC * no];
-        let sp = &w[w[SP] as usize..][..SP_REC * np];
         for (e, r) in se.chunks_exact(SE_REC).enumerate() {
             assert_eq!(r[SE_OBS_PTR], sym.elim_obs_ptr()[e]);
             if e < ne {
@@ -2079,12 +2078,17 @@ mod tests {
         let at = |slot: usize| &w[w[slot] as usize..];
         let (ptr, a, b) = (at(ST_PAIR_PTR), at(ST_A), at(ST_B));
         assert_eq!((ptr[0], ptr[nt] as usize), (0, np));
-        for t in 0..nt {
-            for r in sp[SP_REC * ptr[t] as usize..SP_REC * ptr[t + 1] as usize].chunks_exact(SP_REC) {
-                let (oa, ob) = (r[SP_OA] as usize, r[SP_OB] as usize);
-                assert_eq!(so[SO_REC * oa + SO_E], so[SO_REC * ob + SO_E], "a pair's observers observe one eliminated block");
-                assert_eq!((sym.obs_kept()[oa], sym.obs_kept()[ob]), (a[t], b[t]), "tile {t}'s pair: its row block's observer, its column block's");
+        let (kept, eptr) = (sym.obs_kept(), sym.elim_obs_ptr());
+        let mut count: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+        for e in 0..ne {
+            for i in eptr[e] as usize..eptr[e + 1] as usize {
+                for j in i..eptr[e + 1] as usize {
+                    *count.entry((kept[i] as u32, kept[j] as u32)).or_default() += 1;
+                }
             }
+        }
+        for t in 0..nt {
+            assert_eq!(ptr[t + 1] - ptr[t], count.get(&(a[t], b[t])).copied().unwrap_or(0), "tile {t}'s pairs");
         }
     }
 
@@ -2176,8 +2180,8 @@ mod tests {
     }
 
     /// A tile of S on 64 lanes, as on a 64-lane wavefront, is the tile on
-    /// 32, with one lane group a unit and with several (a group's pairs and
-    /// the order of the groups' sums do not depend on the lanes).
+    /// 32, with one lane group a unit and with several, to rounding: each
+    /// build orders a tile's pairs its own way.
     #[test]
     fn a_tile_on_64_lanes_is_the_tile_on_32() {
         let (h, _, rhs, elim) = ba_like(40, 300, 5);
@@ -2192,7 +2196,9 @@ mod tests {
                     g.reduce(h.vals(), &rhs).unwrap();
                     g.download().unwrap()
                 };
-                assert_eq!(reduce(64), reduce(32), "{wide:?}, {groups} groups");
+                let ((s64, r64), (s32, r32)) = (reduce(64), reduce(32));
+                let (es, er) = (err_max(&s64, &s32), err_max(&r64, &r32));
+                assert!(es < 1e-12 && er < 1e-12, "{wide:?}, {groups} groups: S {es}, rhs {er}");
             }
         }
     }

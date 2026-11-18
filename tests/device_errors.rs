@@ -288,18 +288,26 @@ where
     session.solve(&mut make(), &config()).unwrap();
     session.solve(&mut make(), &config()).unwrap();
     let operations = fault::disarm();
+    // sessions whose two solves ended before their operation k: an f32
+    // solve takes one iteration more or less from run to run (atomic sums
+    // in the factor and in the reduction's pairs), and its operations with it
+    let mut short = 0;
     for k in 1..=operations {
         let mut session = LmSession::new(SparseFaer::<T>::from_options(&options));
         fault::arm(k);
         // the first solve, or the warm second
         let failed = session.solve(&mut make(), &config()).is_err() || session.solve(&mut make(), &config()).is_err();
-        fault::disarm();
-        assert!(failed, "{world}: operation {k} of {operations}: no solve failed");
+        let ran = fault::disarm();
+        if !failed && ran < k {
+            short += 1;
+            continue;
+        }
+        assert!(failed, "{world}: operation {k} of {ran}: no solve failed");
         let next = session.solve(&mut make(), &config()).unwrap_or_else(|f| panic!("{world}: after operation {k}: {f}"));
         let next = next.end_cost.to_f64().unwrap();
         assert!(near.holds(next, end, start), "{world}: after operation {k}: {next} against {end}");
     }
-    eprintln!("{world} session: {operations} device operations over two solves, each failure recovered from");
+    eprintln!("{world} session: {operations} device operations over two solves, each failure recovered from, {short} sessions ended before theirs");
 }
 
 /// A session keeps its device state between solves: a solve that fails at

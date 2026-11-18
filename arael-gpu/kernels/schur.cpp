@@ -11,11 +11,11 @@
 // per block), TILE_GROUPS (a unit's lane groups) and ACC (the widest kept
 // block's square over a group's lanes, rounded up: the entries of a tile of
 // S per lane);
-// the plan header's slots (SE, SO, SP, ST_*, SK_*, SB_*; SHEADER of them),
-// the words of
+// the plan header's slots (SE, SO, ST_*, OBS_KEPT, SK_*, SB_*; SHEADER of
+// them), the words of
 // an eliminated block's record (SE_*, SE_REC of them, in the table at SE),
-// of an observer's (SO_*, SO_REC, at SO), of a pair's (SP_*, SP_REC, at
-// SP) and of the expanded records of a pair, of a kept block's observer
+// of an observer's (SO_*, SO_REC, at SO) and of the expanded records of a
+// pair, of a kept block's observer
 // and of a kept block's tile entry (PX_*, PX_REC, KO_*, KO_REC, KT_*,
 // KT_REC, in a block of their own), the refinement
 // state's words (R_*) and flags (F_*) come from schur.rs as
@@ -286,20 +286,65 @@ DEVICE_INLINE void tile_products(THREAD R* acc, THREAD const u32* ij, u32 n, u32
     }
 }
 
-// Each pair's expanded record (PX_REC words, in the plan's order) for
-// k_schur_tiles: of its observer of the tile's row block (oa) the value
-// offset of W in w, of its observer of the column block (ob) the value offset
-// of its coupling tile in h and its sizes. Once per structure, a thread a
-// pair, so the tile kernel reads a pair in one step.
-KERNEL_THREADS(THREADS) void k_schur_pairs(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL u32* RESTRICT px, u32 np) {
+// Each pair's expanded record (PX_REC words) for k_schur_tiles, grouped by
+// tile of S from the tile's first pair (ST_PAIR_PTR): of its observer of
+// the tile's row block (oa) the value offset of W in w, of its observer of
+// the column block (ob) the value offset of its coupling tile in h and its
+// sizes. Once per structure, a thread a pair: its eliminated block found
+// among the blocks' first pairs (SE_PAIR_PTR), within the block its k-th
+// pair, by ob then oa: (oa, ob) = (first + i, first + j) with k = j (j + 1)
+// / 2 + i, i <= j (so kept(oa) <= kept(ob)); the tile of row kept(oa)
+// found in column kept(ob)'s tiles (SK_T_PTR, their rows ascending in
+// ST_A), the pair's place in the tile taken from the tile's counter (cnt,
+// zeroed): a tile's pairs in no fixed order.
+KERNEL_THREADS(THREADS) void k_schur_pairs(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL u32* RESTRICT cnt, GLOBAL u32* RESTRICT px, u32 np, u32 ne) {
+    SHARED u32 first_e[1];
+    GLOBAL const u32* pp = plan + H.w[SE_PAIR_PTR];
+    // the block's first pair's eliminated block: the last whose first pair
+    // is at or before it, by one thread; the threads walk on from it
+    if (thread_x() == 0) {
+        u32 p0 = block_x() * THREADS;
+        u32 lo = 0, hi = ne;
+        while (hi - lo > 1) {
+            u32 mid = (lo + hi) / 2;
+            if (pp[mid] <= p0) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        first_e[0] = lo;
+    }
+    BARRIER();
     u32 p = global_x();
     if (p >= np) return;
-    u32 pr = H.w[SP] + SP_REC * p;
-    u32 ra = H.w[SO] + SO_REC * plan[pr + SP_OA];
-    u32 rb = H.w[SO] + SO_REC * plan[pr + SP_OB];
-    px[PX_REC * p + PX_W_OFF] = plan[ra + SO_W_OFF];
-    px[PX_REC * p + PX_C_OFF] = plan[rb + SO_CA_OFF];
-    px[PX_REC * p + PX_DIMS] = plan[rb + SO_DIMS];
+    u32 e = first_e[0];
+    while (pp[e + 1] <= p) e++;
+    u32 k = p - pp[e];
+    u32 j = u32((sqrt(8.0f * float(k) + 1.0f) - 1.0f) * 0.5f);
+    while ((j + 1) * (j + 2) / 2 <= k) j++;
+    while (j * (j + 1) / 2 > k) j--;
+    u32 first = plan[H.w[SE] + SE_REC * e + SE_OBS_PTR];
+    u32 oa = first + k - j * (j + 1) / 2;
+    u32 ob = first + j;
+    u32 a = plan[H.w[OBS_KEPT] + oa];
+    u32 b = plan[H.w[OBS_KEPT] + ob];
+    // the column's first tile of a row not above a: row a's
+    GLOBAL const u32* rows = plan + H.w[ST_A];
+    u32 lo = plan[H.w[SK_T_PTR] + b], end = plan[H.w[SK_T_PTR] + b + 1];
+    while (lo < end) {
+        u32 mid = (lo + end) / 2;
+        if (rows[mid] < a) {
+            lo = mid + 1;
+        } else {
+            end = mid;
+        }
+    }
+    GLOBAL const u32* rb = plan + H.w[SO] + SO_REC * ob;
+    u32 at = plan[H.w[ST_PAIR_PTR] + lo] + atomic_add(cnt + lo, 1u);
+    px[PX_REC * at + PX_W_OFF] = plan[H.w[SO] + SO_REC * oa + SO_W_OFF];
+    px[PX_REC * at + PX_C_OFF] = rb[SO_CA_OFF];
+    px[PX_REC * at + PX_DIMS] = rb[SO_DIMS];
 }
 
 // df32: registers uncapped, as capped to fit more blocks the accumulators of
