@@ -98,6 +98,20 @@ pub(crate) const PX_C_OFF: usize = 1;
 pub(crate) const PX_DIMS: usize = 2;
 pub(crate) const PX_REC: usize = 3;
 
+// The words of a kept block's observer's expanded record, what
+// `k_schur_rhs` needs of the observer and its eliminated block, one per
+// entry of [`SK_OBS`] in its order: written on the device once per
+// structure (`k_schur_kobs`) after the pairs' records, so the kernel reads
+// an observer in one step, not through its record and its eliminated
+// block's.
+/// The observer's sizes ([`so_dims`]).
+pub(crate) const KO_DIMS: usize = 0;
+/// The value offset of its coupling tile in h.
+pub(crate) const KO_C_OFF: usize = 1;
+/// The value offset of its eliminated block's z.
+pub(crate) const KO_Z_OFF: usize = 2;
+pub(crate) const KO_REC: usize = 3;
+
 // The words of an eliminated block's record ([`SE`]). A kernel that walks
 // the blocks reads one table, not an array per field.
 /// The value offset of its diagonal tile in h.
@@ -610,6 +624,7 @@ struct Kernels<K> {
     refine_judge: K,
     refine_revert: K,
     pairs: K,
+    kobs: K,
 }
 
 /// Byte offsets of the work block's sections.
@@ -657,8 +672,10 @@ pub struct GpuSchur<D: Device> {
     /// The plan's header, as the kernels take it: a launch parameter.
     header: [u32; SHEADER],
     /// The pairs' expanded records ([`PX_REC`] words each), for
-    /// `k_schur_tiles`.
-    pairs: D::Block,
+    /// `k_schur_tiles`, then from byte `kobs_at` on the kept blocks'
+    /// observers' ([`KO_REC`] words each), for `k_schur_rhs`.
+    expanded: D::Block,
+    kobs_at: usize,
     on: usize,
     kt_ptr: usize,
     kt: usize,
@@ -773,22 +790,36 @@ impl<D: Device> GpuSchur<D> {
         };
         let work = dev.alloc(sec.bytes)?;
         let source = format!("{WIDE}\n{SOURCE}");
-        let entries = ["k_zero_u32", "k_schur_elim", "k_schur_w", "k_schur_tiles", "k_schur_rhs", "k_scatter_kept", "k_schur_backsub", "k_symv_sub", "k_copy_r", "k_refine_start", "k_refine_apply", "k_refine_judge", "k_refine_revert", "k_schur_pairs"];
-        let [zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert, pairs]: [D::Kernel; 14] =
+        let entries = ["k_zero_u32", "k_schur_elim", "k_schur_w", "k_schur_tiles", "k_schur_rhs", "k_scatter_kept", "k_schur_backsub", "k_symv_sub", "k_copy_r", "k_refine_start", "k_refine_apply", "k_refine_judge", "k_refine_revert", "k_schur_pairs", "k_schur_kobs"];
+        let [zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert, pairs, kobs]: [D::Kernel; 15] =
             dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
-        let k = Kernels { zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert, pairs };
+        let k = Kernels { zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert, pairs, kobs };
         let header: [u32; SHEADER] = pk.words[..SHEADER].try_into().expect("the plan's header");
-        // the pairs' expanded records, written on the device from the plan
-        let pairs = dev.alloc((PX_REC * p.np).max(1) * 4)?;
+        // the pairs' and the kept blocks' observers' expanded records,
+        // written on the device from the plan
+        let no = p.no as usize;
+        let kobs_at = 4 * PX_REC * p.np;
+        let expanded = dev.alloc((PX_REC * p.np + KO_REC * no).max(1) * 4)?;
+        let hd = Arg::Bytes(bytemuck::cast_slice(&header));
         if p.np > 0 {
-            let args = [Arg::Block(&ints, 0), Arg::Bytes(bytemuck::cast_slice(&header)), Arg::Block(&pairs, 0), Arg::U32(p.np as u32)];
+            let args = [Arg::Block(&ints, 0), hd, Arg::Block(&expanded, 0), Arg::U32(p.np as u32)];
             dev.launch(&k.pairs, Launch::linear(p.np as u32, THREADS), &args)?;
         }
-        dev.describe(&pairs, "schur.pairs", &|| {
-            vec![Section::u32s("pairs", 0, PX_REC * p.np).record(PX_REC).doc(
-                "per pair, in the plan's order (by tile): W's value offset in w of its observer of the tile's row block, the coupling tile's \
-                 value offset in h and the sizes of its observer of the column block",
-            )]
+        if no > 0 {
+            let args = [Arg::Block(&ints, 0), hd, Arg::Block(&expanded, kobs_at), Arg::U32(no as u32)];
+            dev.launch(&k.kobs, Launch::linear(no as u32, THREADS), &args)?;
+        }
+        dev.describe(&expanded, "schur.expanded", &|| {
+            vec![
+                Section::u32s("pairs", 0, PX_REC * p.np).record(PX_REC).doc(
+                    "per pair, in the plan's order (by tile): W's value offset in w of its observer of the tile's row block, the coupling tile's \
+                     value offset in h and the sizes of its observer of the column block",
+                ),
+                Section::u32s("kept_obs", kobs_at, KO_REC * no).record(KO_REC).doc(
+                    "per entry of SK_OBS (the observers by kept block): the observer's sizes, its coupling tile's value offset in h, its \
+                     eliminated block's value offset in z",
+                ),
+            ]
         });
         dev.describe(&ints, "schur.plan", &|| {
             let mut v = plan_sections(&pk.words[..at_blocks]);
@@ -830,7 +861,8 @@ impl<D: Device> GpuSchur<D> {
             k,
             ints,
             header,
-            pairs,
+            expanded,
+            kobs_at,
             on,
             kt_ptr,
             kt,
@@ -1019,9 +1051,9 @@ impl<D: Device> GpuSchur<D> {
         let elim = [plan, hd, w(s.h), w(s.rhs), w(s.dfac), w(s.z), w(self.flag_at(F_ELIM)), Arg::U32(self.ne)];
         self.run(&self.k.elim, self.ne.div_ceil(THREADS), THREADS, &elim)?;
         self.run(&self.k.w, (self.no * self.w_rows).div_ceil(THREADS), THREADS, &[plan, hd, w(s.h), w(s.dfac), w(s.w), Arg::U32(self.no)])?;
-        let pairs = Arg::Block(&self.pairs, 0);
+        let (pairs, kobs) = (Arg::Block(&self.expanded, 0), Arg::Block(&self.expanded, self.kobs_at));
         self.run_shared(&self.k.tiles, self.tile_blocks, self.lanes * self.tile_warps, self.tile_shared, &[plan, hd, pairs, w(s.h), w(s.w), w(s.s)])?;
-        self.run(&self.k.rhs, self.nk, PLANE, &[plan, hd, w(s.h), w(s.rhs), w(s.z), w(s.rhs_kept)])
+        self.run(&self.k.rhs, self.nk, PLANE, &[plan, hd, kobs, w(s.h), w(s.rhs), w(s.z), w(s.rhs_kept)])
     }
 
     /// Form S and the reduced right-hand side from the damped Hessian's tile
@@ -1462,6 +1494,10 @@ fn defines(p: &SchurPlan, lanes: u32, tile_warps: u32, tile_groups: u32) -> Stri
             ("PX_W_OFF", PX_W_OFF),
             ("PX_C_OFF", PX_C_OFF),
             ("PX_DIMS", PX_DIMS),
+            ("KO_REC", KO_REC),
+            ("KO_DIMS", KO_DIMS),
+            ("KO_C_OFF", KO_C_OFF),
+            ("KO_Z_OFF", KO_Z_OFF),
             ("SK_OBS_PTR", SK_OBS_PTR),
             ("SK_OBS", SK_OBS),
             ("SK_S_OFF", SK_S_OFF),
@@ -1860,11 +1896,13 @@ mod tests {
     /// the end of the last one's observers; a record per observer, its
     /// sizes in one word; a record per pair, its observers of one
     /// eliminated block and of its tile's row and column blocks.
-    /// The device expands every pair's record once per structure: W's
+    /// The device expands every pair's record once per structure (W's
     /// offset of its row block's observer, the coupling tile's offset and
-    /// the sizes of its column block's observer, in the plan's pair order.
+    /// the sizes of its column block's observer, in the plan's pair order),
+    /// and every entry of the kept blocks' observer lists (the observer's
+    /// sizes, its coupling tile's offset, its eliminated block's z offset).
     #[test]
-    fn the_device_expands_each_pair_into_its_observers_words() {
+    fn the_device_expands_each_pair_and_kept_observer_into_its_words() {
         let (h, _, _, elim) = ba_like(10, 30, 2);
         let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
         let p = SchurPlan::reduction(&sym, h.symbolic());
@@ -1876,12 +1914,24 @@ mod tests {
                 [w[so + SO_REC * oa + SO_W_OFF], w[so + SO_REC * ob + SO_CA_OFF], w[so + SO_REC * ob + SO_DIMS]]
             })
             .collect();
+        let se = w[SE] as usize;
+        let kobs = &w[w[SK_OBS] as usize..][..p.no as usize];
+        let want_kobs: Vec<u32> = kobs
+            .iter()
+            .flat_map(|&o| {
+                let r = so + SO_REC * o as usize;
+                [w[r + SO_DIMS], w[r + SO_CA_OFF], w[se + SE_REC * w[r + SO_E] as usize + SE_Z_OFF]]
+            })
+            .collect();
         assert!(p.np > 100, "pairs: {}", p.np);
         let dev = device();
         let g = GpuSchur::new(&dev, &sym, h.symbolic(), wide(&*dev)).unwrap();
         let mut got = vec![0u32; PX_REC * p.np];
-        dev.read(&g.pairs, 0, bytemuck::cast_slice_mut(&mut got)).unwrap();
+        dev.read(&g.expanded, 0, bytemuck::cast_slice_mut(&mut got)).unwrap();
         assert_eq!(got, want);
+        let mut got = vec![0u32; KO_REC * p.no as usize];
+        dev.read(&g.expanded, g.kobs_at, bytemuck::cast_slice_mut(&mut got)).unwrap();
+        assert_eq!(got, want_kobs);
     }
 
     #[test]
@@ -2306,7 +2356,7 @@ mod tests {
             let before = dev.allocations();
             let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
             let fresh = dev.allocations() - before;
-            // the plan block, the pairs' expanded records and the work block
+            // the plan block, the expanded records and the work block
             if before == 0 {
                 assert_eq!(fresh, 3);
             } else {
@@ -2383,7 +2433,7 @@ mod tests {
             let params = GpuSchurParams { tile_groups: Some(groups), ..Default::default() };
             let g = GpuSchur::with_params(&device(), &sym, h.symbolic(), wide, &params).unwrap();
             let k = &g.k;
-            for (name, kernel) in [("elim", &k.elim), ("tiles", &k.tiles), ("rhs", &k.rhs), ("backsub", &k.backsub), ("pairs", &k.pairs)] {
+            for (name, kernel) in [("elim", &k.elim), ("tiles", &k.tiles), ("rhs", &k.rhs), ("backsub", &k.backsub), ("pairs", &k.pairs), ("kobs", &k.kobs)] {
                 assert_eq!(kernel.local_bytes().unwrap(), 0, "{wide:?} k_schur_{name}, {groups} tile groups: {} registers", kernel.registers().unwrap());
             }
         }

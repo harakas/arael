@@ -15,8 +15,9 @@
 // the words of
 // an eliminated block's record (SE_*, SE_REC of them, in the table at SE),
 // of an observer's (SO_*, SO_REC, at SO), of a pair's (SP_*, SP_REC, at
-// SP) and of a pair's expanded record (PX_*, PX_REC, in a block of their
-// own), the refinement state's words (R_*) and flags (F_*) come from schur.rs as
+// SP) and of the expanded records of a pair and of a kept block's observer
+// (PX_*, PX_REC, KO_*, KO_REC, in a block of their own), the refinement
+// state's words (R_*) and flags (F_*) come from schur.rs as
 // #defines. Kernels launched with THREADS threads per block, or PLANE where
 // said.
 //
@@ -438,13 +439,23 @@ TILES_ENTRY void k_schur_tiles(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(Schu
     }
 }
 
+// Each entry of the kept blocks' observer lists (SK_OBS) expanded for
+// k_schur_rhs (KO_REC words, in the list's order): the observer's sizes, its
+// coupling tile's value offset in h, its eliminated block's value offset in
+// z. Once per structure, a thread an entry.
+KERNEL_THREADS(THREADS) void k_schur_kobs(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL u32* RESTRICT ko, u32 n) {
+    u32 q = global_x();
+    if (q >= n) return;
+    u32 ro = H.w[SO] + SO_REC * plan[H.w[SK_OBS] + q];
+    ko[KO_REC * q + KO_DIMS] = plan[ro + SO_DIMS];
+    ko[KO_REC * q + KO_C_OFF] = plan[ro + SO_CA_OFF];
+    ko[KO_REC * q + KO_Z_OFF] = plan[H.w[SE] + SE_REC * plan[ro + SO_E] + SE_Z_OFF];
+}
+
 // Stage 4, one block of PLANE threads per kept block: rhs_kept = b_k - sum
-// over the block's observers of C_o z_e, the lanes over the observers, a
-// warp sum per row.
-KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL const R* RESTRICT z, GLOBAL R* RESTRICT out) {
-    u32 o_se = H.w[SE];
-    u32 o_so = H.w[SO];
-    u32 o_kobs = H.w[SK_OBS];
+// over the block's observers of C_o z_e (each observer's expanded record),
+// the lanes over the observers, a warp sum per row.
+KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const u32* RESTRICT kobs, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL const R* RESTRICT z, GLOBAL R* RESTRICT out) {
     u32 k = block_x();
     u32 lane = thread_x();
     u32 s_off = plan[H.w[SK_S_OFF] + k];
@@ -456,13 +467,14 @@ KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, TABLE_PA
 #pragma unroll
     for (u32 i = 0; i < KW; i++) acc[i] = 0.0f;
     for (u32 q = q0 + lane; q < q1; q += PLANE) {
-        // the observer's record, and z's offset from its eliminated block's
-        u32 ro = o_so + SO_REC * plan[o_kobs + q];
-        u32 dims = plan[ro + SO_DIMS];
+        // the observer's expanded record (k_schur_kobs): its sizes, its
+        // coupling tile's offset, its eliminated block's z offset
+        u32 ro = KO_REC * q;
+        u32 dims = kobs[ro + KO_DIMS];
         u32 we = DIMS_WE(dims);
-        u32 ca = plan[ro + SO_CA_OFF];
+        u32 ca = kobs[ro + KO_C_OFF];
         u32 trans = DIMS_TRANS(dims);
-        u32 zoff = plan[o_se + SE_REC * plan[ro + SO_E] + SE_Z_OFF];
+        u32 zoff = kobs[ro + KO_Z_OFF];
 #pragma unroll
         for (u32 i = 0; i < KW; i++) {
             if (i < wk) {
