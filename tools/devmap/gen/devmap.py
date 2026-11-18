@@ -165,6 +165,11 @@ def parse_kernel(source, name, types):
     params = []
     for p in split_params(params_text):
         p = " ".join(p.replace("GLOBAL", "").replace("RESTRICT", "").split())
+        # a struct passed with the launch (Arg::Bytes): read from the launch's parameters, not from device memory
+        tm = re.match(r"TABLE_PARAM\(\s*(\w+)\s*\)\s+(\w+)$", p)
+        if tm:
+            params.append({"name": tm.group(2), "ctype": "TABLE_PARAM(%s)" % tm.group(1), "type": tm.group(1), "ptr": False, "const": True, "table": True})
+            continue
         pm = re.match(r"(.*?)(\w+)$", p)
         if not pm:
             continue

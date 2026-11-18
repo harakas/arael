@@ -491,7 +491,7 @@
         if (b.vals.length) cell.push(h("code", null, b.vals.slice(0, 4).join(", ") + (b.vals.length > 4 ? ", .. (" + b.vals.length + " values)" : "")));
         tp.appendChild(h("tr", { cls: b.mm === "type" ? "mm" : b.mm === "role" ? "mm-soft" : null },
           h("td", { cls: "mono" }, name),
-          h("td", { cls: "mono" }, Q ? Q.ctype + (Q.ptr ? "" : "  (scalar)") : h("span", { cls: "dim" }, "?")),
+          h("td", { cls: "mono" }, Q ? Q.ctype + (Q.ptr ? "" : Q.table ? "  (launch parameter)" : "  (scalar)") : h("span", { cls: "dim" }, "?")),
           h("td", null, Q ? DM.tyEl(Q.type, Q.role) : null),
           h("td", null, cell)));
       });

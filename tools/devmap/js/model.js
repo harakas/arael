@@ -10,7 +10,7 @@
 //   U  unit     id, name, file, defines, types, kernels[K]
 //   K  kernel   name, unit, file, line, doc, params[Q], paramByName, source, defined,
 //               steps[T], phases[{P, launches, steps, r, w}], tot, patR, patW, flags
-//   Q  param    name, ctype, type, ptr, isConst, role
+//   Q  param    name, ctype, type, ptr, isConst, table (passed with the launch), role
 //   B  block    id, name, owner, bytes, doc, sections[S], order[S] (by offset), used
 //   S  section  block, i, key ("block:i"), name, qname, label, at, bytes, elem, count,
 //               ty, role, group, doc, touches[A], uses[{T, G}], edges[E], tot, flags
@@ -273,7 +273,7 @@
       if (given(k.unit) && M.unitById[k.unit]) K.unit = M.unitById[k.unit];
       arr(k.params).forEach(function (p) {
         if (!isObj(p)) return;
-        var Q = { name: str(p.name, "?"), ctype: str(p.ctype, ""), type: str(p.type, ""), ptr: !!p.ptr, isConst: !!p["const"], role: "" };
+        var Q = { name: str(p.name, "?"), ctype: str(p.ctype, ""), type: str(p.type, ""), ptr: !!p.ptr, isConst: !!p["const"], table: !!p.table, role: "" };
         K.params.push(Q);
         K.paramByName[Q.name] = Q;
       });

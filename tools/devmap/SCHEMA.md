@@ -44,8 +44,9 @@ from `file://` with no server. `gen/devmap.py` writes both; without
       doc: "the comment block above the kernel",
       params: [
         { name: "plan", ctype: "const u32*", type: "u32", ptr: true, const: true },
+        { name: "H", ctype: "TABLE_PARAM(SchurHeader)", type: "SchurHeader", ptr: false, const: true, table: true },
         { name: "no", ctype: "u32", type: "u32", ptr: false, const: true }
-      ],
+      ],                                     // table: a struct passed with the launch (Arg::Bytes), not in device memory
       source: "the kernel's text"            // optional
     }
   },
