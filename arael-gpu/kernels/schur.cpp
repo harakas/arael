@@ -15,8 +15,9 @@
 // the words of
 // an eliminated block's record (SE_*, SE_REC of them, in the table at SE),
 // of an observer's (SO_*, SO_REC, at SO), of a pair's (SP_*, SP_REC, at
-// SP) and of the expanded records of a pair and of a kept block's observer
-// (PX_*, PX_REC, KO_*, KO_REC, in a block of their own), the refinement
+// SP) and of the expanded records of a pair, of a kept block's observer
+// and of a kept block's tile entry (PX_*, PX_REC, KO_*, KO_REC, KT_*,
+// KT_REC, in a block of their own), the refinement
 // state's words (R_*) and flags (F_*) come from schur.rs as
 // #defines. Kernels launched with THREADS threads per block, or PLANE where
 // said.
@@ -76,6 +77,15 @@ KERNEL_THREADS(PLANE) void k_zero_u32(GLOBAL u32* RESTRICT buf, u32 n) {
 #define DIMS_WO(d) ((d) & 0xffu)
 #define DIMS_WE(d) (((d) >> 8) & 0xffu)
 #define DIMS_TRANS(d) ((d) >> 16)
+
+// A kept block's tile entry's sizes word (KT_DIMS; schur.rs, kt_dims): the
+// tile's rows and columns (at most 64), whether the block is its column
+// block, whether it is a diagonal tile.
+#define KT_PACK(wr, wc, trans, diag) ((wr) | (wc) << 8 | (trans) << 16 | (diag) << 17)
+#define KT_WR(d) ((d) & 0xffu)
+#define KT_WC(d) (((d) >> 8) & 0xffu)
+#define KT_TRANS(d) (((d) >> 16) & 1u)
+#define KT_DIAG(d) ((d) >> 17)
 
 // C[i][k] of an observer's coupling tile at `ca`, wo x we, in either storage
 // orientation.
@@ -545,49 +555,63 @@ KERNEL_THREADS(THREADS) void k_schur_backsub(GLOBAL const u32* RESTRICT plan, TA
         if (i < w) x[orig + i] = (V)t[i];
 }
 
+// Each entry of the kept blocks' tile lists (kt: a tile index times 2, plus
+// 1 when the block is the tile's column block) expanded for k_symv_sub
+// (KT_REC words, in the list's order): the tile's value offset in s, its
+// sizes word, the other block's offset in the reduced vector. Once per
+// structure, a thread an entry.
+KERNEL_THREADS(THREADS) void k_schur_kt(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const u32* RESTRICT kt, GLOBAL u32* RESTRICT out, u32 n) {
+    u32 q = global_x();
+    if (q >= n) return;
+    u32 t = kt[q] >> 1;
+    u32 trans = kt[q] & 1u;
+    u32 a = plan[H.w[ST_A] + t];
+    u32 b = plan[H.w[ST_B] + t];
+    out[KT_REC * q + KT_VAL_OFF] = plan[H.w[ST_VAL_OFF] + t];
+    out[KT_REC * q + KT_DIMS] = KT_PACK(plan[H.w[ST_WR] + t], plan[H.w[ST_WC] + t], trans, a == b ? 1u : 0u);
+    out[KT_REC * q + KT_X_OFF] = plan[H.w[SK_S_OFF] + (trans ? a : b)];
+}
+
 // r -= S x over the tiles of S (upper block storage, diagonal tiles
 // upper-only), one block of PLANE threads per kept block k owning rows k of
-// r: the lanes over the tiles touching k (kt[kt_ptr[k]..kt_ptr[k + 1]], each
-// a tile index times 2 plus 1 when k is its column block, whose transpose
-// then gives the rows), a warp sum per row; nothing unless gate[0] is
-// nonzero. No two blocks write the same entry.
+// r: the lanes over k's tile entries (kt_ptr[k]..kt_ptr[k + 1], KT_REC
+// words each: the tile's value offset, its sizes word, the other block's
+// offset in x; a tile whose column block is k transposed gives the rows),
+// a warp sum per row; nothing unless gate[0] is nonzero. No two blocks
+// write the same entry.
 KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const u32* RESTRICT kt_ptr, GLOBAL const u32* RESTRICT kt, GLOBAL const R* RESTRICT s, GLOBAL const R* RESTRICT x, GLOBAL R* RESTRICT r) {
     if (gate[0] == 0) return;
     u32 k = block_x();
     u32 lane = thread_x();
-    u32 o_soff = H.w[SK_S_OFF];
-    u32 k_off = plan[o_soff + k];
+    u32 k_off = plan[H.w[SK_S_OFF] + k];
     u32 wk = plan[H.w[SK_W] + k];
     W acc[KW];
 #pragma unroll
     for (u32 i = 0; i < KW; i++) acc[i] = 0.0f;
     for (u32 q = kt_ptr[k] + lane; q < kt_ptr[k + 1]; q += PLANE) {
-        u32 t = kt[q] >> 1;
-        u32 transposed = kt[q] & 1u;
-        u32 val = plan[H.w[ST_VAL_OFF] + t];
-        u32 wr = plan[H.w[ST_WR] + t];
-        u32 wc = plan[H.w[ST_WC] + t];
-        u32 a = plan[H.w[ST_A] + t];
-        u32 b = plan[H.w[ST_B] + t];
-        if (transposed == 0) {
+        u32 val = kt[KT_REC * q + KT_VAL_OFF];
+        u32 dims = kt[KT_REC * q + KT_DIMS];
+        u32 xo = kt[KT_REC * q + KT_X_OFF];
+        u32 wr = KT_WR(dims);
+        if (KT_TRANS(dims) == 0) {
             // rows of (k, b): S_kb x_b, a diagonal tile read from its upper triangle
-            u32 b_off = plan[o_soff + b];
+            u32 wc = KT_WC(dims);
+            u32 diag = KT_DIAG(dims);
 #pragma unroll
             for (u32 i = 0; i < KW; i++) {
                 if (i < wk) {
                     W v = 0.0f;
-                    for (u32 j = 0; j < wc; j++) v = wide_fma(v, W(a == b && i > j ? s[val + j + i * wr] : s[val + i + j * wr]), W(x[b_off + j]));
+                    for (u32 j = 0; j < wc; j++) v = wide_fma(v, W(diag && i > j ? s[val + j + i * wr] : s[val + i + j * wr]), W(x[xo + j]));
                     acc[i] += v;
                 }
             }
         } else {
             // rows of (a, k)^T: S_ak^T x_a
-            u32 a_off = plan[o_soff + a];
 #pragma unroll
             for (u32 j = 0; j < KW; j++) {
                 if (j < wk) {
                     W v = 0.0f;
-                    for (u32 i2 = 0; i2 < wr; i2++) v = wide_fma(v, W(s[val + i2 + j * wr]), W(x[a_off + i2]));
+                    for (u32 i2 = 0; i2 < wr; i2++) v = wide_fma(v, W(s[val + i2 + j * wr]), W(x[xo + i2]));
                     acc[j] += v;
                 }
             }

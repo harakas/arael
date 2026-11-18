@@ -112,6 +112,21 @@ pub(crate) const KO_C_OFF: usize = 1;
 pub(crate) const KO_Z_OFF: usize = 2;
 pub(crate) const KO_REC: usize = 3;
 
+// The words of a kept block's tile entry's expanded record, what
+// `k_symv_sub` needs of a tile of S touching the block, one per entry of
+// `kt` in its order: written on the device once per structure
+// (`k_schur_kt`) after the kept blocks' observers' records, so the kernel
+// reads a tile in one step, not through the tile arrays (`ST_*`) and the
+// other block's offset (`SK_S_OFF`).
+/// The tile's value offset in s.
+pub(crate) const KT_VAL_OFF: usize = 0;
+/// The tile's sizes and how the block uses it ([`kt_dims`]).
+pub(crate) const KT_DIMS: usize = 1;
+/// The other block's offset in the reduced vector: the tile's column
+/// block's, or its row block's when transposed.
+pub(crate) const KT_X_OFF: usize = 2;
+pub(crate) const KT_REC: usize = 3;
+
 // The words of an eliminated block's record ([`SE`]). A kernel that walks
 // the blocks reads one table, not an array per field.
 /// The value offset of its diagonal tile in h.
@@ -152,6 +167,21 @@ pub(crate) const SO_REC: usize = 5;
 fn so_dims(wo: u32, we: u32, trans: bool) -> u32 {
     assert!(wo < 256 && we < 256, "a block of {} columns does not fit an observer's sizes word", wo.max(we));
     wo | we << 8 | (trans as u32) << 16
+}
+
+/// A kept block's tile entry's sizes word ([`KT_DIMS`]), as `k_schur_kt`
+/// packs it: the tile's rows and columns (at most 64, [`round_cap`]),
+/// whether the block is its column block (the tile then transposed gives
+/// the block's rows), and whether it is a diagonal tile (stored
+/// upper-only). The kernel's `KT_WR`, `KT_WC`, `KT_TRANS` and `KT_DIAG`
+/// take it apart.
+///
+/// ```ignore
+/// assert_eq!(kt_dims(9, 3, true, false), 0x10309);
+/// ```
+#[cfg(test)]
+fn kt_dims(wr: u32, wc: u32, trans: bool, diag: bool) -> u32 {
+    wr | wc << 8 | (trans as u32) << 16 | (diag as u32) << 17
 }
 
 /// How [`GpuSchur`] cuts the forming of S (`k_schur_tiles`), whose
@@ -625,6 +655,7 @@ struct Kernels<K> {
     refine_revert: K,
     pairs: K,
     kobs: K,
+    kt: K,
 }
 
 /// Byte offsets of the work block's sections.
@@ -666,19 +697,21 @@ pub struct GpuSchur<D: Device> {
     k: Kernels<D::Kernel>,
     /// The plan words (at 0, as the plan's header offsets require), then a
     /// word holding 1, at `on`: the gate of kernels that always run; then
-    /// per kept block the tiles of S touching it, `kt_ptr` and `kt` (byte
-    /// offsets), for the residual.
+    /// per kept block the tiles of S touching it, `kt_ptr` (byte offset)
+    /// and their list, for the residual.
     ints: D::Block,
     /// The plan's header, as the kernels take it: a launch parameter.
     header: [u32; SHEADER],
     /// The pairs' expanded records ([`PX_REC`] words each), for
-    /// `k_schur_tiles`, then from byte `kobs_at` on the kept blocks'
-    /// observers' ([`KO_REC`] words each), for `k_schur_rhs`.
+    /// `k_schur_tiles`; from byte `kobs_at` on the kept blocks'
+    /// observers' ([`KO_REC`] words each), for `k_schur_rhs`; from byte
+    /// `kt_at` on the kept blocks' tile entries' ([`KT_REC`] words each),
+    /// for `k_symv_sub`.
     expanded: D::Block,
     kobs_at: usize,
+    kt_at: usize,
     on: usize,
     kt_ptr: usize,
-    kt: usize,
     work: D::Block,
     sec: Sections,
     status_at: usize,
@@ -769,7 +802,7 @@ impl<D: Device> GpuSchur<D> {
         pk.words[SB_ITEMS] = at_blocks as u32;
         let on = 4 * pk.push(&[1]);
         let kt_ptr = 4 * pk.push(&kt_ptr_words);
-        let kt = 4 * pk.push(&kt_words);
+        let kt_list = 4 * pk.push(&kt_words);
         let mut ints = dev.alloc(pk.words.len() * 4)?;
         dev.write(&mut ints, 0, bytemuck::cast_slice(&pk.words))?;
         let status_at = status_at(p.n, values.bytes());
@@ -790,16 +823,17 @@ impl<D: Device> GpuSchur<D> {
         };
         let work = dev.alloc(sec.bytes)?;
         let source = format!("{WIDE}\n{SOURCE}");
-        let entries = ["k_zero_u32", "k_schur_elim", "k_schur_w", "k_schur_tiles", "k_schur_rhs", "k_scatter_kept", "k_schur_backsub", "k_symv_sub", "k_copy_r", "k_refine_start", "k_refine_apply", "k_refine_judge", "k_refine_revert", "k_schur_pairs", "k_schur_kobs"];
-        let [zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert, pairs, kobs]: [D::Kernel; 15] =
+        let entries = ["k_zero_u32", "k_schur_elim", "k_schur_w", "k_schur_tiles", "k_schur_rhs", "k_scatter_kept", "k_schur_backsub", "k_symv_sub", "k_copy_r", "k_refine_start", "k_refine_apply", "k_refine_judge", "k_refine_revert", "k_schur_pairs", "k_schur_kobs", "k_schur_kt"];
+        let [zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert, pairs, kobs, kt]: [D::Kernel; 16] =
             dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
-        let k = Kernels { zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert, pairs, kobs };
+        let k = Kernels { zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert, pairs, kobs, kt };
         let header: [u32; SHEADER] = pk.words[..SHEADER].try_into().expect("the plan's header");
-        // the pairs' and the kept blocks' observers' expanded records,
-        // written on the device from the plan
-        let no = p.no as usize;
+        // the expanded records of the pairs, the kept blocks' observers and
+        // the kept blocks' tile entries, written on the device from the plan
+        let (no, nkt) = (p.no as usize, kt_words.len());
         let kobs_at = 4 * PX_REC * p.np;
-        let expanded = dev.alloc((PX_REC * p.np + KO_REC * no).max(1) * 4)?;
+        let kt_at = kobs_at + 4 * KO_REC * no;
+        let expanded = dev.alloc((PX_REC * p.np + KO_REC * no + KT_REC * nkt).max(1) * 4)?;
         let hd = Arg::Bytes(bytemuck::cast_slice(&header));
         if p.np > 0 {
             let args = [Arg::Block(&ints, 0), hd, Arg::Block(&expanded, 0), Arg::U32(p.np as u32)];
@@ -808,6 +842,10 @@ impl<D: Device> GpuSchur<D> {
         if no > 0 {
             let args = [Arg::Block(&ints, 0), hd, Arg::Block(&expanded, kobs_at), Arg::U32(no as u32)];
             dev.launch(&k.kobs, Launch::linear(no as u32, THREADS), &args)?;
+        }
+        if nkt > 0 {
+            let args = [Arg::Block(&ints, 0), hd, Arg::Block(&ints, kt_list), Arg::Block(&expanded, kt_at), Arg::U32(nkt as u32)];
+            dev.launch(&k.kt, Launch::linear(nkt as u32, THREADS), &args)?;
         }
         dev.describe(&expanded, "schur.expanded", &|| {
             vec![
@@ -819,6 +857,10 @@ impl<D: Device> GpuSchur<D> {
                     "per entry of SK_OBS (the observers by kept block): the observer's sizes, its coupling tile's value offset in h, its \
                      eliminated block's value offset in z",
                 ),
+                Section::u32s("kept_tiles", kt_at, KT_REC * nkt).record(KT_REC).doc(
+                    "per entry of kt (the tiles of S by kept block): the tile's value offset in s, its sizes (transposed when the block is the \
+                     tile's column), the other block's offset in the reduced vector",
+                ),
             ]
         });
         dev.describe(&ints, "schur.plan", &|| {
@@ -827,7 +869,7 @@ impl<D: Device> GpuSchur<D> {
                 Section::u32s("tile_blocks", 4 * at_blocks, blocks.len()).doc("k_schur_tiles' blocks: per block its units' tiles (and split parts)"),
                 Section::u32s("on", on, 1).doc("a word holding 1: the gate of kernels that always run"),
                 Section::u32s("kt_ptr", kt_ptr, kt_ptr_words.len()).doc("per kept block: where its tiles of S start in kt"),
-                Section::u32s("kt", kt, kt_words.len()).doc("the tiles of S touching each kept block (tile index * 2, +1 when the block is the tile's column)"),
+                Section::u32s("kt", kt_list, kt_words.len()).doc("the tiles of S touching each kept block (tile index * 2, +1 when the block is the tile's column)"),
             ]);
             v
         });
@@ -863,9 +905,9 @@ impl<D: Device> GpuSchur<D> {
             header,
             expanded,
             kobs_at,
+            kt_at,
             on,
             kt_ptr,
-            kt,
             work,
             sec,
             status_at,
@@ -1120,7 +1162,7 @@ impl<D: Device> GpuSchur<D> {
         // r = b - S x
         let residual = |gate| {
             copy(gate, s.r, s.rhs_kept)?;
-            let (kt_ptr, kt) = (Arg::Block(&self.ints, self.kt_ptr), Arg::Block(&self.ints, self.kt));
+            let (kt_ptr, kt) = (Arg::Block(&self.ints, self.kt_ptr), Arg::Block(&self.expanded, self.kt_at));
             self.run(&self.k.symv_sub, self.nk, PLANE, &[gate, plan, self.header_arg(), kt_ptr, kt, w(s.s), w(s.x_kept), w(s.r)])
         };
         {
@@ -1286,9 +1328,10 @@ fn plan_sections(words: &[u32]) -> Vec<Section> {
     sections
 }
 
-/// Per kept block, the tiles of S touching it, for `k_symv_sub`: `(ptr, tiles)`
-/// with block k's at `tiles[ptr[k]..ptr[k + 1]]`, each a tile index times 2,
-/// plus 1 when k is the tile's column block and not its row block.
+/// Per kept block, the tiles of S touching it: `(ptr, tiles)` with block
+/// k's at `tiles[ptr[k]..ptr[k + 1]]`, each a tile index times 2, plus 1
+/// when k is the tile's column block and not its row block. The device
+/// expands each into its record for `k_symv_sub` (`k_schur_kt`, [`KT_REC`]).
 fn tiles_by_kept_block(p: &SchurPlan) -> (Vec<u32>, Vec<u32>) {
     let (nt, nk) = (p.nt as usize, p.nk as usize);
     let array = |slot: usize| &p.words[p.words[slot] as usize..][..nt];
@@ -1498,6 +1541,10 @@ fn defines(p: &SchurPlan, lanes: u32, tile_warps: u32, tile_groups: u32) -> Stri
             ("KO_DIMS", KO_DIMS),
             ("KO_C_OFF", KO_C_OFF),
             ("KO_Z_OFF", KO_Z_OFF),
+            ("KT_REC", KT_REC),
+            ("KT_VAL_OFF", KT_VAL_OFF),
+            ("KT_DIMS", KT_DIMS),
+            ("KT_X_OFF", KT_X_OFF),
             ("SK_OBS_PTR", SK_OBS_PTR),
             ("SK_OBS", SK_OBS),
             ("SK_S_OFF", SK_S_OFF),
@@ -1932,6 +1979,42 @@ mod tests {
         let mut got = vec![0u32; KO_REC * p.no as usize];
         dev.read(&g.expanded, g.kobs_at, bytemuck::cast_slice_mut(&mut got)).unwrap();
         assert_eq!(got, want_kobs);
+    }
+
+    /// The device expands a kept block's tile entries once per structure:
+    /// each tile of S touching the block, once, its value offset, sizes and
+    /// the other block's offset in the reduced vector, transposed when the
+    /// block is the tile's column block, a diagonal tile marked.
+    #[test]
+    fn the_device_expands_a_kept_blocks_tile_entries_into_records() {
+        let (h, _, _, elim) = ba_like(10, 30, 2);
+        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
+        let p = SchurPlan::reduction(&sym, h.symbolic());
+        let (nt, nk) = (p.nt as usize, p.nk as usize);
+        let at = |slot: usize, i: usize| p.words[p.words[slot] as usize + i];
+        let (ptr, _) = tiles_by_kept_block(&p);
+        let dev = device();
+        let g = GpuSchur::new(&dev, &sym, h.symbolic(), wide(&*dev)).unwrap();
+        let mut kt = vec![0u32; KT_REC * ptr[nk] as usize];
+        dev.read(&g.expanded, g.kt_at, bytemuck::cast_slice_mut(&mut kt)).unwrap();
+        let mut seen = vec![0u32; nt];
+        for k in 0..nk {
+            for q in ptr[k] as usize..ptr[k + 1] as usize {
+                let r = &kt[KT_REC * q..][..KT_REC];
+                let t = (0..nt).find(|&t| at(ST_VAL_OFF, t) == r[KT_VAL_OFF]).expect("a tile's value offset");
+                let (a, b) = (at(ST_A, t) as usize, at(ST_B, t) as usize);
+                let trans = k != a;
+                assert_eq!(k, if trans { b } else { a });
+                assert_eq!(r[KT_DIMS], kt_dims(at(ST_WR, t), at(ST_WC, t), trans, a == b));
+                assert_eq!(r[KT_X_OFF], at(SK_S_OFF, if trans { a } else { b }));
+                seen[t] += 1;
+            }
+        }
+        let diag = (0..nt).filter(|&t| at(ST_A, t) == at(ST_B, t)).count();
+        assert!(diag == nk && nt > 2 * nk, "tiles {nt}, diagonal {diag}");
+        for t in 0..nt {
+            assert_eq!(seen[t], if at(ST_A, t) == at(ST_B, t) { 1 } else { 2 }, "tile {t}");
+        }
     }
 
     #[test]
@@ -2433,7 +2516,7 @@ mod tests {
             let params = GpuSchurParams { tile_groups: Some(groups), ..Default::default() };
             let g = GpuSchur::with_params(&device(), &sym, h.symbolic(), wide, &params).unwrap();
             let k = &g.k;
-            for (name, kernel) in [("elim", &k.elim), ("tiles", &k.tiles), ("rhs", &k.rhs), ("backsub", &k.backsub), ("pairs", &k.pairs), ("kobs", &k.kobs)] {
+            for (name, kernel) in [("elim", &k.elim), ("tiles", &k.tiles), ("rhs", &k.rhs), ("backsub", &k.backsub), ("pairs", &k.pairs), ("kobs", &k.kobs), ("kt", &k.kt)] {
                 assert_eq!(kernel.local_bytes().unwrap(), 0, "{wide:?} k_schur_{name}, {groups} tile groups: {} registers", kernel.registers().unwrap());
             }
         }
