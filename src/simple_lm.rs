@@ -7828,7 +7828,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
         }
 
-        let schur = arael_faer::schur::schur_symbolic(&hsym, &eliminated).map_err(|e| match e {
+        let schur = arael_faer::schur::schur_symbolic_threaded(&hsym, &eliminated, self.ctx.threads()).map_err(|e| match e {
             arael_faer::schur::SchurError::CoupledEliminated { row, col } => {
                 SetupError::CoupledMarginalization { row, col }
             }

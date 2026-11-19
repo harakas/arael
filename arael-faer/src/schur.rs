@@ -633,6 +633,52 @@ pub fn schur_symbolic<I: Index>(
     h: &SymbolicSparseBlockColMat<I>,
     eliminated: &[usize],
 ) -> Result<SchurSymbolic<I>, SchurError> {
+    schur_symbolic_threaded(h, eliminated, 1)
+}
+
+/// Observer pairs and copies a thread takes at least before S's pattern
+/// is split over more.
+const PATTERN_MIN_WORK: usize = 1 << 16;
+
+/// [`schur_symbolic`] with S's pattern built on up to `threads` threads
+/// of arael's worker pool ([`crate::pool`]).
+///
+/// ```ignore
+/// let sym = schur_symbolic_threaded(&h, &eliminated, 8)?;
+/// ```
+pub fn schur_symbolic_threaded<I: Index>(
+    h: &SymbolicSparseBlockColMat<I>,
+    eliminated: &[usize],
+    threads: usize,
+) -> Result<SchurSymbolic<I>, SchurError> {
+    symbolic(h, eliminated, threads, PATTERN_MIN_WORK)
+}
+
+/// S's tiles over a range of kept columns: per column the range's tiles
+/// up to its end, per tile its kept row, the range's values up to its
+/// end and its observer pairs, per Hkk copy its tile in the range.
+struct PatternPart<I> {
+    col_tiles: Vec<usize>,
+    rows: Vec<I>,
+    vals: Vec<usize>,
+    pairs: Vec<u32>,
+    copy_dst: Vec<u32>,
+}
+
+impl<I> Default for PatternPart<I> {
+    fn default() -> Self {
+        PatternPart { col_tiles: Vec::new(), rows: Vec::new(), vals: Vec::new(), pairs: Vec::new(), copy_dst: Vec::new() }
+    }
+}
+
+/// [`schur_symbolic_threaded`], a thread taking at least `min_work` of
+/// S's pattern.
+fn symbolic<I: Index>(
+    h: &SymbolicSparseBlockColMat<I>,
+    eliminated: &[usize],
+    threads: usize,
+    min_work: usize,
+) -> Result<SchurSymbolic<I>, SchurError> {
     let nblk = h.nblk_cols();
     assert_eq!(h.nblk_rows(), nblk, "square block partition required");
 
@@ -835,73 +881,112 @@ pub fn schur_symbolic<I: Index>(
         }
     }
 
-    // per kept row: the column that touched it last, and its pairs there
-    let mut mark = vec![(0u32, 0u32); nk];
-    let mut blk_at = vec![0u32; nk];
+    // per kept column, where its Hkk copies (in column order) and its pairs
+    // start
+    debug_assert!(copy_kk.windows(2).all(|c| c[0].2 <= c[1].2), "the copies in column order");
+    let mut copy_at = vec![0usize; nk + 1];
+    for &(_, _, kc) in &copy_kk {
+        copy_at[kc + 1] += 1;
+    }
+    let mut col_pairs = vec![0usize; nk + 1];
+    for kc in 0..nk {
+        copy_at[kc + 1] += copy_at[kc];
+        let pairs: usize = land_ent[land_ptr[kc]..land_ptr[kc + 1]].iter().map(|&(_, bi)| bi as usize + 1).sum();
+        col_pairs[kc + 1] = col_pairs[kc] + pairs;
+    }
+    debug_assert_eq!(col_pairs[nk], total_pairs);
+
+    // S's tiles over a range of kept columns, the range's own tiles and
+    // values counted from zero.
+    let pattern = |cols: core::ops::Range<usize>| {
+        let mut part = PatternPart::<I> {
+            col_tiles: Vec::with_capacity(cols.len()),
+            copy_dst: Vec::with_capacity(copy_at[cols.end] - copy_at[cols.start]),
+            ..Default::default()
+        };
+        // per kept row: the column that touched it last, and its pairs there
+        let mut mark = vec![(0u32, 0u32); nk];
+        let mut blk_at = vec![0u32; nk];
+        let mut vals_end = 0usize;
+        // Rows touched in the current column, gathered rather than searched
+        // for. Reading the marks back with a `for kr in 0..=kc` scan would be
+        // O(kept^2) overall -- invisible when the kept system is a handful of
+        // cameras, ruinous when it is most of the model (six seconds at
+        // 158k kept blocks). Gathering and sorting is O(nnz log w) instead.
+        let mut touched: Vec<usize> = Vec::new();
+        for kc in cols {
+            let stamp = kc as u32 + 1;
+            touched.clear();
+            let touch = |kr: usize, mark: &mut Vec<(u32, u32)>, touched: &mut Vec<usize>| {
+                if mark[kr].0 != stamp {
+                    mark[kr] = (stamp, 0);
+                    touched.push(kr);
+                }
+            };
+            for &(_, kr, _) in &copy_kk[copy_at[kc]..copy_at[kc + 1]] {
+                touch(kr, &mut mark, &mut touched);
+            }
+            for &(slot, bi) in &land_ent[land_ptr[kc]..land_ptr[kc + 1]] {
+                let start = elim_obs_ptr[slot as usize].zx();
+                for o in start..=start + bi as usize {
+                    let kr = obs_kept[o].zx();
+                    touch(kr, &mut mark, &mut touched);
+                    mark[kr].1 += 1;
+                }
+            }
+            touched.sort_unstable();
+            let colw = kept_part[kc + 1] - kept_part[kc];
+            for &kr in &touched {
+                blk_at[kr] = part.rows.len() as u32;
+                part.rows.push(I::truncate(kr));
+                vals_end += (kept_part[kr + 1] - kept_part[kr]) * colw;
+                part.vals.push(vals_end);
+                part.pairs.push(mark[kr].1);
+            }
+            part.col_tiles.push(part.rows.len());
+            part.copy_dst.extend(copy_kk[copy_at[kc]..copy_at[kc + 1]].iter().map(|&(_, kr, _)| blk_at[kr]));
+        }
+        part
+    };
+    // the columns cut into ranges of about equal work (a column's pairs and
+    // copies), one per thread
+    let work: Vec<usize> = (0..=nk).map(|kc| col_pairs[kc] + copy_at[kc] + kc).collect();
+    let parts = threads.min(work[nk] / min_work.max(1)).max(1);
+    let mut cuts = vec![0usize];
+    for t in 1..parts {
+        cuts.push(work.partition_point(|&w| w < work[nk] * t / parts).max(cuts[t - 1]));
+    }
+    cuts.push(nk);
+    let mut tasks: Vec<(core::ops::Range<usize>, PatternPart<I>)> = cuts.windows(2).map(|c| (c[0]..c[1], PatternPart::default())).collect();
+    if let [(cols, part)] = &mut tasks[..] {
+        *part = pattern(cols.clone());
+    } else {
+        crate::pool::run_over(&mut tasks, |_, (cols, part)| *part = pattern(cols.clone()));
+    }
+    // the ranges in column order, each one's tiles and values after those
+    // before it
+    let ntiles: usize = tasks.iter().map(|(_, p)| p.rows.len()).sum();
     let mut blk_col_ptr: Vec<I> = Vec::with_capacity(nk + 1);
-    let mut blk_row_idx: Vec<I> = Vec::new();
-    let mut val_ptr: Vec<I> = Vec::new();
-    let mut copy_dst = vec![I::truncate(0); copy_kk.len()];
-    let mut copy_ptr = Vec::with_capacity(nk + 1);
-    let mut col_pairs = Vec::with_capacity(nk + 1);
-    col_pairs.push(0usize);
-    blk_col_ptr.push(I::truncate(0));
-    val_ptr.push(I::truncate(0));
-    let mut vals_end = 0usize;
-    let mut copy_cursor = 0usize;
-    // Rows touched in the current column, gathered rather than searched
-    // for. Reading the marks back with a `for kr in 0..=kc` scan would be
-    // O(kept^2) overall -- invisible when the kept system is a handful of
-    // cameras, ruinous when it is most of the model (six seconds at
-    // 158k kept blocks). Gathering and sorting is O(nnz log w) instead.
-    let mut touched: Vec<usize> = Vec::new();
+    let mut blk_row_idx: Vec<I> = Vec::with_capacity(ntiles);
+    let mut val_ptr: Vec<I> = Vec::with_capacity(ntiles + 1);
     // per tile, in storage order, its pairs (counted per row of the current
     // column next to the row's stamp: one cache line a pair)
-    let mut tile_pairs: Vec<u32> = Vec::new();
-    for kc in 0..nk {
-        let stamp = kc as u32 + 1;
-        let copy_begin = copy_cursor;
-        copy_ptr.push(I::truncate(copy_begin));
-        touched.clear();
-        let touch = |kr: usize, mark: &mut Vec<(u32, u32)>, touched: &mut Vec<usize>| {
-            if mark[kr].0 != stamp {
-                mark[kr] = (stamp, 0);
-                touched.push(kr);
-            }
-        };
-        while copy_cursor < copy_kk.len() && copy_kk[copy_cursor].2 == kc {
-            touch(copy_kk[copy_cursor].1, &mut mark, &mut touched);
-            copy_cursor += 1;
-        }
-        for &(slot, bi) in &land_ent[land_ptr[kc]..land_ptr[kc + 1]] {
-            let start = elim_obs_ptr[slot as usize].zx();
-            for o in start..=start + bi as usize {
-                let kr = obs_kept[o].zx();
-                touch(kr, &mut mark, &mut touched);
-                mark[kr].1 += 1;
-            }
-        }
-        touched.sort_unstable();
-        let colw = kept_part[kc + 1] - kept_part[kc];
-        for &kr in &touched {
-            blk_at[kr] = blk_row_idx.len() as u32;
-            blk_row_idx.push(I::truncate(kr));
-            vals_end += (kept_part[kr + 1] - kept_part[kr]) * colw;
-            val_ptr.push(I::truncate(vals_end));
-            tile_pairs.push(mark[kr].1);
-        }
-        blk_col_ptr.push(I::truncate(blk_row_idx.len()));
-        for ci in copy_begin..copy_cursor {
-            copy_dst[ci] = I::truncate(blk_at[copy_kk[ci].1] as usize);
-        }
-        let mut pairs = col_pairs[kc];
-        for &(_, bi) in &land_ent[land_ptr[kc]..land_ptr[kc + 1]] {
-            pairs += bi as usize + 1;
-        }
-        col_pairs.push(pairs);
+    let mut tile_pairs: Vec<u32> = Vec::with_capacity(ntiles);
+    let mut copy_dst: Vec<I> = Vec::with_capacity(copy_kk.len());
+    blk_col_ptr.push(I::truncate(0));
+    val_ptr.push(I::truncate(0));
+    let (mut tile_off, mut val_off) = (0usize, 0usize);
+    for (_, part) in &tasks {
+        blk_col_ptr.extend(part.col_tiles.iter().map(|&n| I::truncate(tile_off + n)));
+        val_ptr.extend(part.vals.iter().map(|&v| I::truncate(val_off + v)));
+        copy_dst.extend(part.copy_dst.iter().map(|&t| I::truncate(tile_off + t as usize)));
+        blk_row_idx.extend_from_slice(&part.rows);
+        tile_pairs.extend_from_slice(&part.pairs);
+        tile_off += part.rows.len();
+        val_off += part.vals.last().copied().unwrap_or(0);
     }
-    debug_assert_eq!(*col_pairs.last().unwrap(), total_pairs);
-    copy_ptr.push(I::truncate(copy_cursor));
+    drop(tasks);
+    let copy_ptr: Vec<I> = copy_at.iter().map(|&c| I::truncate(c)).collect();
     let kp: Vec<I> = kept_part.iter().map(|&x| I::truncate(x)).collect();
     let s = SymbolicSparseBlockColMat::new_checked(
         kp.clone(),
@@ -2912,6 +2997,46 @@ mod tests {
         }
         assert!(empty > 0, "a kept-kept tile of no pair");
         assert_eq!(sym.tile_pairs().iter().map(|&n| n as usize).sum::<usize>(), sym.pair_count());
+    }
+
+    /// S's pattern built over ranges of columns on several threads is the
+    /// pattern one thread builds: more threads than columns (empty
+    /// ranges), uneven ranges, and a kept block no eliminated block sees.
+    #[test]
+    fn the_pattern_on_threads_is_the_pattern_on_one() {
+        let (nk, ne) = (24usize, 300usize);
+        let mut x = 12345u64;
+        let mut next = |n: usize| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 33) as usize % n
+        };
+        let mut part = vec![0usize];
+        for b in 0..nk + ne {
+            let w = if b < nk { [6, 9, 3][b % 3] } else { [3, 1][b % 2] };
+            part.push(part[b] + w);
+        }
+        let mut cells: Vec<(usize, usize)> = (0..nk + ne).map(|b| (b, b)).collect();
+        cells.extend((0..nk - 1).map(|k| (k, k + 1)));
+        for _ in 0..20 {
+            let (a, b) = (next(nk), next(nk));
+            cells.push((a.min(b), a.max(b)));
+        }
+        // the last kept block is seen by no eliminated block
+        for e in nk..nk + ne {
+            for _ in 0..1 + next(7) {
+                cells.push((next(nk - 1), e));
+            }
+        }
+        let anchors: Vec<(usize, usize)> = cells.iter().map(|&(r, c)| (part[r], part[c])).collect();
+        let (h, _) = SymbolicSparseBlockColMat::<usize>::from_scalar_coords(part.clone(), part, anchors.len(), |k| anchors[k]);
+        let elim: Vec<usize> = (nk..nk + ne).collect();
+        let one = symbolic(&h, &elim, 1, PATTERN_MIN_WORK);
+        assert!(one.as_ref().unwrap().pair_count() > 1000, "pairs: {}", one.as_ref().unwrap().pair_count());
+        let want = format!("{one:?}");
+        for (threads, min_work) in [(2, 1), (3, 500), (8, 1), (64, 1)] {
+            let got = symbolic(&h, &elim, threads, min_work);
+            assert!(format!("{got:?}") == want, "{threads} threads, {min_work} at least");
+        }
     }
 
     #[test]
