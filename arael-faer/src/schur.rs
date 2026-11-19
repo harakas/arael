@@ -988,7 +988,9 @@ fn symbolic<I: Index>(
     drop(tasks);
     let copy_ptr: Vec<I> = copy_at.iter().map(|&c| I::truncate(c)).collect();
     let kp: Vec<I> = kept_part.iter().map(|&x| I::truncate(x)).collect();
-    let s = SymbolicSparseBlockColMat::new_checked(
+    // the kept partition is H's widths in order, the rows sorted and
+    // unique by the stamps, the values counted from the widths
+    let s = SymbolicSparseBlockColMat::new_built(
         kp.clone(),
         kp,
         blk_col_ptr,

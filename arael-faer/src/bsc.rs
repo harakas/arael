@@ -47,6 +47,16 @@ pub struct SparseBlockColMat<I, T> {
     vals: Vec<T>,
 }
 
+/// Panics unless `p` starts at 0 and never decreases.
+#[track_caller]
+pub(crate) fn monotone_from_zero<I: Index>(p: &[I]) {
+    assert!(!p.is_empty());
+    assert!(p[0].zx() == 0);
+    for w in p.windows(2) {
+        assert!(w[0].zx() <= w[1].zx());
+    }
+}
+
 impl<I: Index> SymbolicSparseBlockColMat<I> {
     /// creates the symbolic structure after checking every invariant:
     /// partitions monotone starting at 0; `blk_col_ptr` monotone
@@ -65,13 +75,6 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         blk_row_idx: Vec<I>,
         val_ptr: Vec<I>,
     ) -> Self {
-        let monotone_from_zero = |p: &[I]| {
-            assert!(!p.is_empty());
-            assert!(p[0].zx() == 0);
-            for w in p.windows(2) {
-                assert!(w[0].zx() <= w[1].zx());
-            }
-        };
         monotone_from_zero(&row_part);
         monotone_from_zero(&col_part);
         monotone_from_zero(&blk_col_ptr);
@@ -103,6 +106,30 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
             }
         }
 
+        Self {
+            row_part,
+            col_part,
+            blk_col_ptr,
+            blk_row_idx,
+            val_ptr,
+        }
+    }
+
+    /// The structure from parts a constructor here built to hold every
+    /// invariant of [`new_checked`](Self::new_checked): checked in debug
+    /// builds only. The caller checks the partitions it was handed with
+    /// [`monotone_from_zero`].
+    #[track_caller]
+    pub(crate) fn new_built(
+        row_part: Vec<I>,
+        col_part: Vec<I>,
+        blk_col_ptr: Vec<I>,
+        blk_row_idx: Vec<I>,
+        val_ptr: Vec<I>,
+    ) -> Self {
+        if cfg!(debug_assertions) {
+            return Self::new_checked(row_part, col_part, blk_col_ptr, blk_row_idx, val_ptr);
+        }
         Self {
             row_part,
             col_part,
@@ -254,6 +281,10 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         n_coords: usize,
         coord: &impl Fn(usize) -> (usize, usize),
     ) -> (Self, Vec<u64>, Vec<u32>, Vec<u32>) {
+        // the partitions are the caller's; the rest is built to hold
+        // new_checked's rules
+        monotone_from_zero(&row_part);
+        monotone_from_zero(&col_part);
         // scalar index -> block index lookup tables, O(n) once
         let of = |part: &[I]| {
             let nblk = part.len() - 1;
@@ -327,7 +358,7 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
             col += 1;
         }
 
-        let this = Self::new_checked(
+        let this = Self::new_built(
             row_part, col_part, blk_col_ptr, blk_row_idx, val_ptr,
         );
         (this, cells, blk_row_of, blk_col_of)
@@ -1033,6 +1064,32 @@ impl<'a, I: Index> PositionResolver<'a, I> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `covering` builds a structure `new_checked` accepts, from coordinates
+    /// in no order with repeats, in a build that skips the checks.
+    #[test]
+    fn covering_builds_what_new_checked_accepts() {
+        let part: Vec<usize> = (0..=60).map(|b| 2 * b + b / 4).collect();
+        let n = part[60];
+        let mut x = 99u64;
+        let mut next = || {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 33) as usize % n
+        };
+        let coords: Vec<(usize, usize)> = (0..2000).map(|_| (next(), next())).collect();
+        let s = SymbolicSparseBlockColMat::covering(part.clone(), part, coords.len(), |k| coords[k]);
+        assert!(s.nblocks() > 500, "blocks: {}", s.nblocks());
+        let checked = SymbolicSparseBlockColMat::new_checked(s.row_part.clone(), s.col_part.clone(), s.blk_col_ptr.clone(), s.blk_row_idx.clone(), s.val_ptr.clone());
+        assert_eq!(checked.nblocks(), s.nblocks());
+    }
+
+    /// `covering` refuses a partition that decreases.
+    #[test]
+    #[should_panic]
+    fn covering_refuses_a_decreasing_partition() {
+        let part = vec![0usize, 3, 2, 6];
+        SymbolicSparseBlockColMat::covering(part.clone(), part, 1, |_| (0, 0));
+    }
 
     // the SCHUR.md doodle: poses P1, P2 (width 2), landmarks L1, L2,
     // L3 (width 1); upper block triangle of
