@@ -287,6 +287,8 @@ struct Elimination<'a> {
     copy_src: std::borrow::Cow<'a, [SparseIndex]>,
     copy_dst: std::borrow::Cow<'a, [SparseIndex]>,
     pairs: usize,
+    /// Per tile of S, its pairs ([`SchurSymbolic::tile_pairs`]).
+    tile_pairs: std::borrow::Cow<'a, [u32]>,
 }
 
 /// Where the status starts in a solve's output, after the step's `n`
@@ -371,6 +373,7 @@ impl SchurPlan {
                 copy_src: std::borrow::Cow::Borrowed(src),
                 copy_dst: std::borrow::Cow::Borrowed(dst),
                 pairs: sym.pair_count(),
+                tile_pairs: std::borrow::Cow::Borrowed(sym.tile_pairs()),
             },
             hsym,
         )
@@ -394,6 +397,7 @@ impl SchurPlan {
                 copy_src: std::borrow::Cow::Borrowed(&tiles),
                 copy_dst: std::borrow::Cow::Borrowed(&tiles),
                 pairs: 0,
+                tile_pairs: std::borrow::Cow::Owned(vec![0; hsym.nblocks()]),
             },
             hsym,
         )
@@ -434,15 +438,12 @@ impl SchurPlan {
             dfac_len += we * we;
             z_len += we;
         }
-        // a record per observer, in the order of their eliminated blocks; and
-        // per observer its eliminated block's first observer
+        // a record per observer, in the order of their eliminated blocks
         let mut w_len = 0u32;
         let mut kw_max = 1usize;
-        let mut obs_first = vec![0u32; no];
         for slot in 0..ne {
             let we = sym.elim_w[slot];
             for o in e_obs_ptr[slot] as usize..e_obs_ptr[slot + 1] as usize {
-                obs_first[o] = e_obs_ptr[slot];
                 let wo = sym.obs_w[o];
                 let r = &mut so[SO_REC * o..][..SO_REC];
                 (r[SO_W_OFF], r[SO_DIMS], r[SO_CA_OFF], r[SO_E], r[SO_ORIG_OFF]) = (w_len, so_dims(wo, we, sym.obs_trans[o]), sym.obs_ca_off[o], slot as u32, sym.obs_orig_off[o]);
@@ -494,32 +495,14 @@ impl SchurPlan {
         let k_s_off: Vec<u32> = (0..nk).map(|k| spart[k]).collect();
         let k_orig: Vec<u32> = sym.kept.iter().map(|&orig| hpart[orig as usize]).collect();
         let k_w: Vec<u32> = (0..nk).map(|k| spart[k + 1] - spart[k]).collect();
-        // The pairs counted by tile of S: every (oa, ob) of one eliminated
-        // block with kept(oa) <= kept(ob), by column b: kept block b's
-        // observers ob, each with its eliminated block's observers up to it
-        // (oa <= ob: kept(oa) <= b, the observers being in kept order), the
-        // tile (kept(oa), b) found in the column's row table. The device
-        // writes the pairs (`k_schur_pairs`).
+        // each tile's first pair, from the symbolic's count of each tile's
+        // pairs (every (oa, ob) of one eliminated block with kept(oa) <=
+        // kept(ob)); the device writes the pairs (`k_schur_pairs`)
         let np = sym.pairs;
-        let mut row_tile = vec![NONE; nk];
+        assert_eq!(sym.tile_pairs.len(), nt, "a pair count per tile of S");
         let mut t_pair_ptr = vec![0u32; nt + 1];
-        for b in 0..nk {
-            for t in ssym.col_range(b) {
-                row_tile[ssym.blk_row(t)] = t as u32;
-            }
-            for &ob in &k_obs[k_obs_ptr[b] as usize..k_obs_ptr[b + 1] as usize] {
-                for oa in obs_first[ob as usize]..=ob {
-                    let t = row_tile[kept_of_obs[oa as usize] as usize];
-                    assert!(t != NONE, "every observer pair has a tile in S");
-                    t_pair_ptr[t as usize + 1] += 1;
-                }
-            }
-            for t in ssym.col_range(b) {
-                row_tile[ssym.blk_row(t)] = NONE;
-            }
-        }
         for t in 0..nt {
-            t_pair_ptr[t + 1] += t_pair_ptr[t];
+            t_pair_ptr[t + 1] = t_pair_ptr[t] + sym.tile_pairs[t];
         }
         assert_eq!(t_pair_ptr[nt] as usize, np, "the reduction counted its pairs");
         let k_t_ptr: Vec<u32> = (0..nk).map(|b| ssym.col_range(b).start as u32).chain([nt as u32]).collect();

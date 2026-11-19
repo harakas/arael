@@ -338,6 +338,10 @@ pub struct SchurSymbolic<I: Index> {
     /// pair products before each kept column, `nk + 1` entries: what a
     /// column costs, for cutting the columns between threads
     col_pairs: Vec<usize>,
+    /// per tile of S, in storage order: its pairs (see [`tile_pairs`])
+    ///
+    /// [`tile_pairs`]: SchurSymbolic::tile_pairs
+    tile_pairs: Vec<u32>,
     /// where each kept column's entries of `copy_src` / `copy_dst`
     /// start, `nk + 1` entries
     copy_ptr: Vec<I>,
@@ -362,6 +366,12 @@ impl<I: Index> SchurSymbolic<I> {
     /// driver: quadratic in observers-per-eliminated-block)
     pub fn pair_count(&self) -> usize {
         self.pairs
+    }
+    /// Per tile of S, in storage order: its pairs, the observer pairs
+    /// (a, b) of one eliminated block, a <= b, whose kept blocks are the
+    /// tile's row and column. They sum to [`pair_count`](Self::pair_count).
+    pub fn tile_pairs(&self) -> &[u32] {
+        &self.tile_pairs
     }
     /// The GEMM tile shapes this reduction needs, `((wa, we, wb), calls)`, in
     /// no particular order. A shape not in [`FIXED_SHAPES`] goes to the
@@ -657,7 +667,9 @@ pub fn schur_symbolic<I: Index>(
     // block order (rows of its own column first, then transposed tiles
     // from later columns), so the per-block lists come out sorted.
     let mut diag: Vec<Option<I>> = vec![None; ne];
-    let mut obs: Vec<Vec<(I, bool, I)>> = vec![Vec::new(); ne];
+    // the observers in one list, by eliminated block: counted by the
+    // classifying scan, then placed by a second scan in the same order
+    let mut obs_ptr = vec![0usize; ne + 1];
     let mut copy_kk: Vec<(I, usize, usize)> = Vec::new(); // (hblk, kr, kc)
     for c in 0..nblk {
         for b in h.col_range(c) {
@@ -671,12 +683,29 @@ pub fn schur_symbolic<I: Index>(
                         return Err(SchurError::CoupledEliminated { row: r, col: c });
                     }
                 }
-                (false, true) => obs[ce].push((I::truncate(b), false, I::truncate(r))),
-                (true, false) => obs[re].push((I::truncate(b), true, I::truncate(c))),
+                (false, true) => obs_ptr[ce + 1] += 1,
+                (true, false) => obs_ptr[re + 1] += 1,
                 (false, false) => {
                     copy_kk.push((I::truncate(b), kept_of[r].zx(), kept_of[c].zx()));
                 }
             }
+        }
+    }
+    for slot in 0..ne {
+        obs_ptr[slot + 1] += obs_ptr[slot];
+    }
+    let mut obs = vec![(I::truncate(0), false, I::truncate(0)); obs_ptr[ne]];
+    let mut fill = obs_ptr.clone();
+    for c in 0..nblk {
+        for b in h.col_range(c) {
+            let r = h.blk_row(b);
+            let (slot, entry) = match (elim_slot[r] != usize::MAX, elim_slot[c] != usize::MAX) {
+                (false, true) => (elim_slot[c], (I::truncate(b), false, I::truncate(r))),
+                (true, false) => (elim_slot[r], (I::truncate(b), true, I::truncate(c))),
+                _ => continue,
+            };
+            obs[fill[slot]] = entry;
+            fill[slot] += 1;
         }
     }
 
@@ -689,7 +718,7 @@ pub fn schur_symbolic<I: Index>(
     let mut elim_utrans = Vec::with_capacity(ne);
     // one entry per observation, and the count is already known: reserving
     // keeps eight arrays from growing by doubling through it
-    let n_obs: usize = obs.iter().map(|l| l.len()).sum();
+    let n_obs = obs.len();
     let mut obs_trans = Vec::with_capacity(n_obs);
     let mut obs_block = Vec::with_capacity(n_obs);
     let mut obs_ca_off = Vec::with_capacity(n_obs);
@@ -703,36 +732,14 @@ pub fn schur_symbolic<I: Index>(
     let mut total_pairs = 0usize;
     let mut reduce_flops = 0.0f64;
     let mut shapes: Vec<((usize, usize, usize), usize)> = Vec::new();
+    // per eliminated block: its observers' widths so far, with their counts
+    let mut seen_widths: Vec<(usize, usize)> = Vec::new();
     elim_obs_ptr.push(I::truncate(0));
     for slot in 0..ne {
         let e = eliminated[slot];
         let d = diag[slot].ok_or(SchurError::MissingDiagonal { block: e })?;
         elim_diag.push(d);
-        let list = &obs[slot];
-        let mut panel_cols = 0usize;
-        for &(hb, tr, oblk) in list {
-            let span = h.col_span(oblk.zx());
-            obs_trans.push(tr);
-            obs_block.push(oblk);
-            obs_ca_off.push(I::truncate(h.val_range(hb.zx()).start));
-            obs_w.push(I::truncate(span.len()));
-            obs_panel_col.push(I::truncate(panel_cols));
-            obs_orig_off.push(I::truncate(span.start));
-            obs_kept_off.push(I::truncate(kept_part[kept_of[oblk.zx()].zx()]));
-            obs_kept.push(kept_of[oblk.zx()]);
-            panel_cols += span.len();
-        }
-        elim_ncols.push(I::truncate(panel_cols));
-        panel_cols += 1; // + the rhs column
-        let uniform = list
-            .first()
-            .map(|&(_, tr, ob)| (h.col_span(ob.zx()).len(), tr))
-            .filter(|&(w, tr)| {
-                list.iter().all(|&(_, t, o)| t == tr && h.col_span(o.zx()).len() == w)
-            });
-        elim_uw.push(I::truncate(uniform.map_or(0, |(w, _)| w)));
-        elim_utrans.push(uniform.is_some_and(|(_, tr)| tr));
-        total_pairs += list.len() * (list.len() + 1) / 2;
+        let list = &obs[obs_ptr[slot]..obs_ptr[slot + 1]];
         let ew = h.col_span(e).len();
         // Which GEMM shapes this problem actually needs, and how many
         // contributions each carries. The widths are in hand here, so the
@@ -741,34 +748,56 @@ pub fn schur_symbolic<I: Index>(
         // stage counts: the pair GEMMs, the reduction's one-column rhs
         // update, and back-substitution's one-column update with the widths
         // the other way round.
-        let mut count_shape = |wa: usize, we: usize, wb: usize| {
+        let mut count_shape = |wa: usize, we: usize, wb: usize, n: usize| {
             match shapes.iter_mut().find(|(k, _)| *k == (wa, we, wb)) {
-                Some((_, n)) => *n += 1,
-                None => shapes.push(((wa, we, wb), 1)),
+                Some((_, c)) => *c += n,
+                None => shapes.push(((wa, we, wb), n)),
             }
         };
-        for (bi, &(_, _, ob)) in list.iter().enumerate() {
-            let wb = h.col_span(ob.zx()).len();
-            for &(_, _, oa) in list.iter().take(bi + 1) {
-                count_shape(h.col_span(oa.zx()).len(), ew, wb);
+        // one pass over the observers, each width read once: the observer
+        // arrays, whether all observers share a width and orientation, the
+        // census, and the sums of the flops' closed form
+        let mut panel_cols = 0usize;
+        let mut uniform = list.first().map(|&(_, tr, ob)| (h.col_span(ob.zx()).len(), tr));
+        let (mut sum_w, mut sum_w2) = (0.0f64, 0.0f64);
+        seen_widths.clear();
+        for &(hb, tr, oblk) in list {
+            let span = h.col_span(oblk.zx());
+            let (w, k) = (span.len(), kept_of[oblk.zx()]);
+            obs_trans.push(tr);
+            obs_block.push(oblk);
+            obs_ca_off.push(I::truncate(h.val_range(hb.zx()).start));
+            obs_w.push(I::truncate(w));
+            obs_panel_col.push(I::truncate(panel_cols));
+            obs_orig_off.push(I::truncate(span.start));
+            obs_kept_off.push(I::truncate(kept_part[k.zx()]));
+            obs_kept.push(k);
+            panel_cols += w;
+            if uniform.is_some_and(|(uw, ut)| uw != w || ut != tr) {
+                uniform = None;
             }
-        }
-        for &(_, _, oa) in list.iter() {
-            let wa = h.col_span(oa.zx()).len();
-            count_shape(wa, ew, 1);
-            count_shape(ew, wa, 1);
-        }
-        {
-            // sum over pairs a <= b of 2 * w_a * ew * w_b, in closed form
-            let mut sum_w = 0.0f64;
-            let mut sum_w2 = 0.0f64;
-            for &(_, _, oblk) in list {
-                let w = h.col_span(oblk.zx()).len() as f64;
-                sum_w += w;
-                sum_w2 += w * w;
+            // the pairs (a, b), a <= b, counted at b against the widths of
+            // the observers up to it (b's own included): a few widths, not
+            // every a
+            match seen_widths.iter_mut().find(|(sw, _)| *sw == w) {
+                Some((_, c)) => *c += 1,
+                None => seen_widths.push((w, 1)),
             }
-            reduce_flops += ew as f64 * (sum_w * sum_w + sum_w2);
+            for &(wa, c) in &seen_widths {
+                count_shape(wa, ew, w, c);
+            }
+            count_shape(w, ew, 1, 1);
+            count_shape(ew, w, 1, 1);
+            sum_w += w as f64;
+            sum_w2 += (w * w) as f64;
         }
+        elim_ncols.push(I::truncate(panel_cols));
+        panel_cols += 1; // + the rhs column
+        elim_uw.push(I::truncate(uniform.map_or(0, |(w, _)| w)));
+        elim_utrans.push(uniform.is_some_and(|(_, tr)| tr));
+        total_pairs += list.len() * (list.len() + 1) / 2;
+        // sum over pairs a <= b of 2 * w_a * ew * w_b, in closed form
+        reduce_flops += ew as f64 * (sum_w * sum_w + sum_w2);
         max_ew = max_ew.max(ew);
         max_panel = max_panel.max(ew * panel_cols);
         elim_w.push(I::truncate(ew));
@@ -806,7 +835,8 @@ pub fn schur_symbolic<I: Index>(
         }
     }
 
-    let mut mark = vec![0u32; nk];
+    // per kept row: the column that touched it last, and its pairs there
+    let mut mark = vec![(0u32, 0u32); nk];
     let mut blk_at = vec![0u32; nk];
     let mut blk_col_ptr: Vec<I> = Vec::with_capacity(nk + 1);
     let mut blk_row_idx: Vec<I> = Vec::new();
@@ -825,14 +855,17 @@ pub fn schur_symbolic<I: Index>(
     // cameras, ruinous when it is most of the model (six seconds at
     // 158k kept blocks). Gathering and sorting is O(nnz log w) instead.
     let mut touched: Vec<usize> = Vec::new();
+    // per tile, in storage order, its pairs (counted per row of the current
+    // column next to the row's stamp: one cache line a pair)
+    let mut tile_pairs: Vec<u32> = Vec::new();
     for kc in 0..nk {
         let stamp = kc as u32 + 1;
         let copy_begin = copy_cursor;
         copy_ptr.push(I::truncate(copy_begin));
         touched.clear();
-        let touch = |kr: usize, mark: &mut Vec<u32>, touched: &mut Vec<usize>| {
-            if mark[kr] != stamp {
-                mark[kr] = stamp;
+        let touch = |kr: usize, mark: &mut Vec<(u32, u32)>, touched: &mut Vec<usize>| {
+            if mark[kr].0 != stamp {
+                mark[kr] = (stamp, 0);
                 touched.push(kr);
             }
         };
@@ -843,7 +876,9 @@ pub fn schur_symbolic<I: Index>(
         for &(slot, bi) in &land_ent[land_ptr[kc]..land_ptr[kc + 1]] {
             let start = elim_obs_ptr[slot as usize].zx();
             for o in start..=start + bi as usize {
-                touch(kept_of[obs_block[o].zx()].zx(), &mut mark, &mut touched);
+                let kr = obs_kept[o].zx();
+                touch(kr, &mut mark, &mut touched);
+                mark[kr].1 += 1;
             }
         }
         touched.sort_unstable();
@@ -853,6 +888,7 @@ pub fn schur_symbolic<I: Index>(
             blk_row_idx.push(I::truncate(kr));
             vals_end += (kept_part[kr + 1] - kept_part[kr]) * colw;
             val_ptr.push(I::truncate(vals_end));
+            tile_pairs.push(mark[kr].1);
         }
         blk_col_ptr.push(I::truncate(blk_row_idx.len()));
         for ci in copy_begin..copy_cursor {
@@ -917,6 +953,7 @@ pub fn schur_symbolic<I: Index>(
         col_top,
         col_at,
         col_pairs,
+        tile_pairs,
         copy_ptr,
         shapes,
         max_panel,
@@ -2833,6 +2870,48 @@ mod tests {
         for i in 0..a.efactors.len() {
             assert!((a.efactors[i] - b.efactors[i]).abs() < 1e-12, "factor {}", i);
         }
+    }
+
+    /// The shape census and the pairs of each tile of S, counted from each
+    /// eliminated block's observers, equal a count over every pair:
+    /// observers of mixed widths in an order whose pairs (a, b), a <= b,
+    /// have both (6, 3, 9) and (9, 3, 6), and a kept-kept tile of no pair.
+    #[test]
+    fn the_shape_census_and_the_tiles_pairs_count_every_pair() {
+        // block 8 kept and seen by no eliminated block: (0, 8) and (8, 8)
+        // hold no pair
+        let part = [0usize, 6, 9, 18, 24, 27, 30, 36, 45, 48];
+        let mut cells: Vec<(usize, usize)> = (0..9).map(|b| (b, b)).collect();
+        cells.extend([(0, 1), (1, 2), (1, 3), (1, 7), (0, 4), (2, 4), (4, 6), (2, 5), (3, 5), (5, 6), (5, 7), (0, 6), (6, 7), (0, 8)]);
+        let (h, _) = build_upper(&part, &cells, 3);
+        let sym = schur_symbolic(h.symbolic(), &[1, 4, 5]).unwrap();
+        let (eptr, kept, ow, ew) = (sym.elim_obs_ptr(), sym.obs_kept(), sym.obs_w(), sym.elim_w());
+        let mut shapes: std::collections::HashMap<(usize, usize, usize), usize> = std::collections::HashMap::new();
+        let mut pairs: std::collections::HashMap<(usize, usize), u32> = std::collections::HashMap::new();
+        for e in 0..ew.len() {
+            for j in eptr[e]..eptr[e + 1] {
+                for i in eptr[e]..=j {
+                    *shapes.entry((ow[i], ew[e], ow[j])).or_default() += 1;
+                    *pairs.entry((kept[i], kept[j])).or_default() += 1;
+                }
+                *shapes.entry((ow[j], ew[e], 1)).or_default() += 1;
+                *shapes.entry((ew[e], ow[j], 1)).or_default() += 1;
+            }
+        }
+        assert!(shapes.contains_key(&(6, 3, 9)) && shapes.contains_key(&(9, 3, 6)));
+        let got: std::collections::HashMap<(usize, usize, usize), usize> = sym.gemm_shapes().iter().copied().collect();
+        assert_eq!(got, shapes);
+        let s = &sym.s;
+        let mut empty = 0;
+        for b in 0..s.nblk_cols() {
+            for t in s.col_range(b) {
+                let want = pairs.get(&(s.blk_row(t), b)).copied().unwrap_or(0);
+                assert_eq!(sym.tile_pairs()[t], want, "tile ({}, {b})", s.blk_row(t));
+                empty += (want == 0) as usize;
+            }
+        }
+        assert!(empty > 0, "a kept-kept tile of no pair");
+        assert_eq!(sym.tile_pairs().iter().map(|&n| n as usize).sum::<usize>(), sym.pair_count());
     }
 
     #[test]
