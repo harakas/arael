@@ -419,6 +419,9 @@ pub struct DeviceCheck {
     /// The fewest significand bits of the model's leaves
     /// ([`DeviceAssembly::leaf_bits`]).
     pub leaf_bits: u32,
+    /// The most instances of one constraint: the longest chain of adds in
+    /// the CPU's cost sum ([`check_cost_tolerance`]).
+    pub chain: usize,
 }
 
 /// Threads per block of every assembly kernel (`kernels/assembly.cpp`).
@@ -1545,7 +1548,8 @@ where
         let diff = dev.iter().zip(cpu).fold(0.0f64, |m, (d, c)| m.max((d - c.to_f64().unwrap()).abs()));
         if max > 0.0 { diff / max } else { diff }
     };
-    Ok(DeviceCheck { cpu_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv, leaf_bits: asm.leaf_bits() })
+    let chain = asm.counts.iter().copied().max().unwrap_or(0);
+    Ok(DeviceCheck { cpu_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv, leaf_bits: asm.leaf_bits(), chain })
 }
 
 /// The environment variable that turns on the device check of solves:
@@ -1580,6 +1584,21 @@ pub fn check_tolerance(bits: u32) -> f64 {
         48.. => 1e-8,
         _ => 1e-4,
     }
+}
+
+/// The device check's tolerance for the cost, relative to the CPU's:
+/// [`check_tolerance`] of the narrowest scalar's `bits`, plus the rounding
+/// of the CPU's cost sum, a chain of up to `chain` adds in the root's
+/// scalar of `root_bits` significand bits (`chain * 2^-root_bits`, the
+/// bound for positive terms; the device sums in trees). An f32 root's sum
+/// of 204k terms, as Ladybug-372's, is good to about 1.2%:
+///
+/// ```ignore
+/// check_cost_tolerance(24, 24, 204_472) // 1e-4 + 1.2e-2
+/// check_cost_tolerance(53, 53, 204_472) // 1e-10 + 2.3e-11
+/// ```
+pub fn check_cost_tolerance(bits: u32, root_bits: u32, chain: usize) -> f64 {
+    check_tolerance(bits) + chain as f64 * (-(root_bits as f64)).exp2()
 }
 
 /// The device the check runs on: CUDA when it is compiled in, else HIP,
@@ -1695,6 +1714,7 @@ where
     let root_bits = if core::mem::size_of::<T>() == 8 { 53 } else { 24 };
     let mut worst = [0.0f64; 3];
     let mut bits = root_bits;
+    let mut cost_tol = 0.0f64;
     // both wide scalars, df32 alone on a device without f64
     let wides: &[Wide] = if dev.arch().has_f64 { &[Wide::F64, Wide::Df32] } else { &[Wide::Df32] };
     for &wide in wides {
@@ -1703,11 +1723,12 @@ where
         })?;
         bits = root_bits.min(chk.leaf_bits);
         let tol = check_tolerance(bits);
+        cost_tol = check_cost_tolerance(bits, root_bits, chk.chain);
         let cost = (chk.device_cost - chk.cpu_cost).abs() / chk.cpu_cost.abs().max(f64::MIN_POSITIVE);
-        if !(cost <= tol && chk.grad_err <= tol && chk.hess_err <= tol) {
+        if !(cost <= cost_tol && chk.grad_err <= tol && chk.hess_err <= tol) {
             panic!(
                 "{DEVICE_CHECK_VAR}: `{name}` assembles on the device ({wide:?} sums) other than on the CPU: \
-                 cost {} against {} ({cost:.1e}), gradient {:.1e}, Hessian {:.1e}, tolerance {tol:.0e}",
+                 cost {} against {} ({cost:.1e}, tolerance {cost_tol:.1e}), gradient {:.1e}, Hessian {:.1e}, tolerance {tol:.0e}",
                 chk.device_cost, chk.cpu_cost, chk.grad_err, chk.hess_err
             );
         }
@@ -1716,7 +1737,7 @@ where
         }
     }
     let narrow = if bits < root_bits { format!(" (leaves of {bits} significand bits, tolerance {:.0e})", check_tolerance(bits)) } else { String::new() };
-    Ok(format!("cost {:.1e}, gradient {:.1e}, Hessian {:.1e}{narrow}", worst[0], worst[1], worst[2]))
+    Ok(format!("cost {:.1e} (tolerance {cost_tol:.1e}), gradient {:.1e}, Hessian {:.1e}{narrow}", worst[0], worst[1], worst[2]))
 }
 
 #[cfg(not(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal)))]

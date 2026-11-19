@@ -1017,7 +1017,10 @@ absolutely below 1), in both wide scalars, and panics where the cost, the
 gradient or the Hessian's values differ from the CPU's beyond rounding:
 1e-10 relative for an f64 model, 1e-4 where the root or a leaf is f32 (an
 f32 entity in an f64 root has its rows computed in f32 on the CPU, in f64
-on the device).
+on the device). The cost is allowed the rounding of the CPU's sum on top:
+a chain of up to n adds in the root's scalar, n the most instances of one
+constraint, is good to n times the scalar's rounding unit (1.2% for an
+f32 root summing 204k instances; the device sums in trees).
 `ARAEL_DEVICE_CHECK_LOG` names a file it appends a line to per root type:
 checked, with the largest differences, or why the root has no device
 assembly. A root whose CPU assembly panics on the model's data (an index

@@ -6031,3 +6031,51 @@ fn a_loss_not_zero_at_zero_costs_the_same_behind_a_dead_branch_on_the_device() {
         assert_eq!(diterations, iterations, "{}", label(&d));
     }
 }
+
+/// A point pulled toward its anchor with a weight.
+#[arael::model]
+#[arael(constraint(hb, { [(pull.p.x - pull.a.x) * pull.w, (pull.p.y - pull.a.y) * pull.w] }))]
+#[derive(Clone)]
+pub struct Pull {
+    pub p: Param<vect2<f32>>,
+    pub a: vect2<f32>,
+    pub w: f32,
+    pub hb: SelfBlock<Pull, f32>,
+}
+
+#[arael::model]
+#[arael(root, f32)]
+#[derive(Clone)]
+pub struct PullsF {
+    pub pulls: refs::Vec<Pull>,
+}
+
+/// The CPU sums an f32 root's cost in a chain per constraint, each small
+/// term rounded against the partial so far; the device sums in trees. 100k
+/// pulls, ten of them a thousand times the rest: the two costs part beyond
+/// the f32 tolerance, and stay within the cost's own
+/// (`check_cost_tolerance`), which allows for the chain.
+#[test]
+fn the_cost_check_allows_for_the_cpus_chain_of_adds() {
+    let n = 100_000;
+    let mut pulls = refs::Vec::new();
+    for k in 0..n {
+        let a = vect2::new(0.01 + (k % 97) as f32 * 0.01, 0.5 - (k % 89) as f32 * 0.01);
+        let w = if k % 10_000 == 0 { 1000.0 } else { 1.0 };
+        pulls.push(Pull { p: Param::new(vect2::new(0.0, 0.0)), a, w, hb: SelfBlock::new() });
+    }
+    let mut s = PullsF { pulls };
+    assert_eq!(LmProblemInternals::<f32>::device_unsupported(&s), None);
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x1 = perturbed(&x);
+    let tol = arael::__gpu::check_tolerance(24);
+    for wide in check_wides() {
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert_eq!(chk.chain, n, "{wide:?}");
+        let rel = (chk.device_cost - chk.cpu_cost).abs() / chk.cpu_cost;
+        assert!(rel > tol, "{wide:?}: the chain rounds less than this test needs: {chk:?}");
+        assert!(rel <= arael::__gpu::check_cost_tolerance(24, 24, chk.chain), "{wide:?}: {chk:?}");
+        assert!(chk.grad_err <= tol && chk.hess_err <= tol, "{wide:?}: {chk:?}");
+    }
+}
