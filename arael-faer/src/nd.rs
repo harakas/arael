@@ -123,20 +123,46 @@ impl Graph {
     }
 
     /// The graph of a symmetric block matrix: one node per block column, an
-    /// edge wherever an off-diagonal tile couples two of them.
+    /// edge wherever an off-diagonal tile couples two of them. An upper
+    /// triangle (each tile's row at most its column) is read straight into
+    /// sorted neighbour lists: a node's rows above it at its own column,
+    /// then the columns after it, in order; any other pattern goes through
+    /// [`from_edges`](Self::from_edges).
     pub fn of_blocks<I: Index>(sym: &SymbolicSparseBlockColMat<I>) -> Self {
         let n = sym.nblk_cols();
-        let mut edges = Vec::new();
+        let widths = (0..n).map(|j| sym.col_span(j).len()).collect();
+        let upper = (0..n).all(|j| sym.col_range(j).all(|b| sym.blk_row(b) <= j));
+        if !upper {
+            let edges = (0..n).flat_map(|j| sym.col_range(j).map(move |b| (sym.blk_row(b), j)));
+            return Graph::from_edges(n, edges).with_weights(widths);
+        }
+        let mut xadj = vec![0usize; n + 1];
         for j in 0..n {
             for b in sym.col_range(j) {
                 let i = sym.blk_row(b);
                 if i != j {
-                    edges.push((i, j));
+                    xadj[i + 1] += 1;
+                    xadj[j + 1] += 1;
                 }
             }
         }
-        let widths = (0..n).map(|j| sym.col_span(j).len()).collect();
-        Graph::from_edges(n, edges).with_weights(widths)
+        for u in 0..n {
+            xadj[u + 1] += xadj[u];
+        }
+        let mut adj = vec![0usize; xadj[n]];
+        let mut cur = xadj.clone();
+        for j in 0..n {
+            for b in sym.col_range(j) {
+                let i = sym.blk_row(b);
+                if i != j {
+                    adj[cur[j]] = i;
+                    cur[j] += 1;
+                    adj[cur[i]] = j;
+                    cur[i] += 1;
+                }
+            }
+        }
+        Graph { xadj, adj, vwgt: widths }
     }
 
     pub fn nodes(&self) -> usize {
@@ -163,6 +189,11 @@ struct Scratch {
     /// already been moved in this pass
     part: Vec<u8>,
     locked: Vec<bool>,
+    /// FM refinement: per node of the subgraph, the weight of its
+    /// neighbours on A and on B (what moving it to B, or to A, drags into
+    /// the separator)
+    on_a: Vec<usize>,
+    on_b: Vec<usize>,
 }
 
 impl Scratch {
@@ -176,6 +207,8 @@ impl Scratch {
             in_sep: vec![false; n],
             part: vec![0; n],
             locked: vec![false; n],
+            on_a: vec![0; n],
+            on_b: vec![0; n],
         }
     }
 }
@@ -237,18 +270,57 @@ fn refine(
     let mut wb: usize = b.iter().map(|&u| g.w(u)).sum();
     let mut wsep: usize = sep.iter().map(|&u| g.w(u)).sum();
 
+    // The neighbours' weights on each side, per node: counted at a pass's
+    // start (a rollback leaves them stale) and kept as nodes move, so a
+    // move's gain is read, not summed over the node's neighbours -- on a
+    // dense reduced system the separator is a third of the nodes and each
+    // has a hundred neighbours or more. The neighbours outside the subgraph
+    // sit in an enclosing separator and never move.
+    let reweigh = |s: &mut Scratch| {
+        for &u in nodes {
+            let (mut on_a, mut on_b) = (0, 0);
+            for &v in g.neighbours(u) {
+                match s.part[v] {
+                    A => on_a += g.w(v),
+                    B => on_b += g.w(v),
+                    _ => {}
+                }
+            }
+            (s.on_a[u], s.on_b[u]) = (on_a, on_b);
+        }
+    };
+    let shift = |s: &mut Scratch, x: usize, from: u8, to: u8| {
+        let w = g.w(x);
+        for &y in g.neighbours(x) {
+            if !s.inset[y] {
+                continue;
+            }
+            match from {
+                A => s.on_a[y] -= w,
+                B => s.on_b[y] -= w,
+                _ => {}
+            }
+            match to {
+                A => s.on_a[y] += w,
+                B => s.on_b[y] += w,
+                _ => {}
+            }
+        }
+    };
+
     for _pass in 0..p.fm_passes {
         for &u in nodes {
             s.locked[u] = false;
         }
+        reweigh(s);
         let mut moves: Vec<Move> = Vec::new();
         let mut best_sep = wsep;
         let mut best_step = 0usize;
         let (start_wa, start_wb, start_wsep) = (wa, wb, wsep);
 
         loop {
-            // Best move over the whole separator. The separator is small (it
-            // is the point), so scanning it beats maintaining gain buckets.
+            // Best move over the whole separator, each candidate's gain read
+            // from its neighbours' weights.
             let mut best: Option<(isize, usize, u8)> = None;
             for k in 0..sep.len() {
                 let v = sep[k];
@@ -256,13 +328,7 @@ fn refine(
                     continue;
                 }
                 for to in [A, B] {
-                    let far = if to == A { B } else { A };
-                    let drag: usize = g
-                        .neighbours(v)
-                        .iter()
-                        .filter(|&&u| s.part[u] == far)
-                        .map(|&u| g.w(u))
-                        .sum();
+                    let drag = if to == A { s.on_b[v] } else { s.on_a[v] };
                     // v joins `to`; the dragged neighbours leave `far` for SEP
                     let new_to = if to == A { wa } else { wb } + g.w(v);
                     if new_to > max_side {
@@ -286,9 +352,17 @@ fn refine(
             let dragw: usize = dragged.iter().map(|&u| g.w(u)).sum();
 
             s.part[v] = to;
+            shift(s, v, SEP, to);
             for &u in &dragged {
                 s.part[u] = SEP;
+                shift(s, u, far, SEP);
                 sep.push(u);
+            }
+            // the kept weights are the counted ones, after every move
+            #[cfg(test)]
+            for &u in nodes {
+                let count = |side: u8| g.neighbours(u).iter().filter(|&&y| s.part[y] == side).map(|&y| g.w(y)).sum::<usize>();
+                assert_eq!((s.on_a[u], s.on_b[u]), (count(A), count(B)), "node {u}'s neighbours after moving {v}");
             }
             s.locked[v] = true;
             if to == A {
@@ -989,6 +1063,30 @@ mod tests {
                 seen[u] = true;
             }
         }
+    }
+
+    /// A block matrix's graph read straight from its upper triangle is the
+    /// graph its edges give, weights the blocks' widths; a pattern with a
+    /// tile below the diagonal takes the edge list and gives the same.
+    #[test]
+    fn the_block_graph_is_the_graph_of_its_tiles() {
+        let n = 40;
+        let part: Vec<usize> = (0..=n).map(|b| 2 * b + b / 3).collect();
+        let tiles: Vec<(usize, usize)> = (0..n).flat_map(|j| (0..=j).filter(move |&i| i == j || (i * 7 + j * 3) % 5 == 0).map(move |i| (i, j))).collect();
+        let build = |cells: &[(usize, usize)]| {
+            let mut cells = cells.to_vec();
+            cells.sort_unstable_by_key(|&(i, j)| (j, i));
+            SymbolicSparseBlockColMat::<usize>::from_scalar_coords(part.clone(), part.clone(), cells.len(), |k| (part[cells[k].0], part[cells[k].1])).0
+        };
+        let want = Graph::from_edges(n, tiles.iter().copied()).with_weights((0..n).map(|b| part[b + 1] - part[b]).collect());
+        assert!(want.adj.len() > 2 * n, "edges: {}", want.adj.len());
+        let upper = Graph::of_blocks(&build(&tiles));
+        assert_eq!((&upper.xadj, &upper.adj, &upper.vwgt), (&want.xadj, &want.adj, &want.vwgt));
+        // the same tiles, some mirrored below the diagonal
+        let mirrored: Vec<(usize, usize)> = tiles.iter().enumerate().map(|(k, &(i, j))| if k % 3 == 0 { (j, i) } else { (i, j) }).collect();
+        assert!(mirrored.iter().any(|&(i, j)| i > j));
+        let general = Graph::of_blocks(&build(&mirrored));
+        assert_eq!((&general.xadj, &general.adj, &general.vwgt), (&want.xadj, &want.adj, &want.vwgt));
     }
 
     /// The block entry point: the permutation must be a valid scalar
