@@ -775,7 +775,7 @@ fn by_slot(of: impl Iterator<Item = u32> + Clone, slots: usize) -> (Vec<u32>, Ve
 type Resolver<'a> = arael_faer::bsc::PositionResolver<'a, arael_faer::SparseIndex>;
 
 /// Lookups a thread takes at least before the work is split over more.
-const PAR_MIN: usize = 32 * 1024;
+const PAR_MIN: usize = 8 * 1024;
 
 /// `f` over `0..n` cut into at most `threads` ranges of at least `min`,
 /// on arael's worker pool (`arael_faer::pool`, the sweeps' threads), each
@@ -888,29 +888,45 @@ struct Tiles {
 /// A constraint's instances grouped ([`by_slot`], `(ptr, inst)` each): per
 /// side by its entity slot, per pair by the owner of its cross slot's tile
 /// ([`tile_owners`]), so a tile has one summing thread per entry.
+#[derive(Debug, PartialEq)]
 struct Groups {
     sides: Vec<(Vec<u32>, Vec<u32>)>,
     pairs: Vec<(Vec<u32>, Vec<u32>)>,
 }
 
-/// Every constraint's [`Groups`].
-fn groups(shape: &DeviceShape, st: &DeviceStructure, slots: &[usize], cross_slots: &[usize], owners: &[Vec<u32>]) -> Vec<Groups> {
+/// Every constraint's [`Groups`], its [`by_slot`] passes on up to
+/// `threads` threads of arael's worker pool, each thread taking at least
+/// `min` instances.
+fn groups(shape: &DeviceShape, st: &DeviceStructure, slots: &[usize], cross_slots: &[usize], owners: &[Vec<u32>], (threads, min): (usize, usize)) -> Vec<Groups> {
+    // a pass per (constraint, side), then per (constraint, pair): word q
+    // of the constraint's instances
+    let passes: Vec<(usize, usize)> = shape.constraints.iter().enumerate().flat_map(|(c, k)| (0..k.sides.len() + k.pairs.len()).map(move |q| (c, q))).collect();
+    let pass = |(c, q): (usize, usize)| {
+        let (k, rows) = (&shape.constraints[c], &st.rows[c]);
+        let of = word(rows, k.words(), q);
+        match q.checked_sub(k.sides.len()) {
+            None => by_slot(of, slots[k.sides[q]]),
+            Some(p) => {
+                let x = k.pairs[p].2;
+                by_slot(of.map(|s| owners[x][s as usize]), cross_slots[x])
+            }
+        }
+    };
+    let instances: usize = st.rows.iter().zip(&shape.constraints).map(|(r, k)| r.len() / k.words()).sum();
+    let tasks = threads.min(instances / min.max(1)).clamp(1, passes.len().max(1));
+    // task t takes the passes t, t + tasks, t + 2 tasks, ...
+    let mut out: Vec<Vec<(Vec<u32>, Vec<u32>)>> = vec![Vec::new(); tasks];
+    let run = |t: usize, out: &mut Vec<(Vec<u32>, Vec<u32>)>| *out = passes.iter().skip(t).step_by(tasks).map(|&j| pass(j)).collect();
+    if let [one] = &mut out[..] {
+        run(0, one);
+    } else {
+        arael_faer::pool::run_over(&mut out, run);
+    }
+    let mut done = (0..passes.len()).map(|j| core::mem::take(&mut out[j % tasks][j / tasks]));
     shape
         .constraints
         .iter()
-        .zip(&st.rows)
-        .map(|(k, rows)| {
-            let w = k.words();
-            Groups {
-                sides: k.sides.iter().enumerate().map(|(i, &e)| by_slot(word(rows, w, i), slots[e])).collect(),
-                pairs: k
-                    .pairs
-                    .iter()
-                    .enumerate()
-                    .map(|(p, &(_, _, x))| by_slot(word(rows, w, k.sides.len() + p).map(|s| owners[x][s as usize]), cross_slots[x]))
-                    .collect(),
-            }
-        })
+        .map(|k| Groups { sides: done.by_ref().take(k.sides.len()).collect(), pairs: done.by_ref().take(k.pairs.len()).collect() })
         .collect()
 }
 
@@ -1064,7 +1080,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         }
         let mut t = tiles(&shape, &st, &slots, &cross_slots, &Resolver::new(pattern), (threads, PAR_MIN));
         let owners: Vec<Vec<u32>> = t.cross.iter().map(|t| tile_owners(t)).collect();
-        let groups = groups(&shape, &st, &slots, &cross_slots, &owners);
+        let groups = groups(&shape, &st, &slots, &cross_slots, &owners, (threads, PAR_MIN));
         let zero_h = stores(&shape, &groups, &mut t, pattern.nblocks());
         let route = Values::of(ts, wide);
         let layout = Layout::new(columns(&shape, &slots, &cross_slots, &counts, ts, route));
@@ -1748,9 +1764,19 @@ mod tests {
         assert!(matches!(dump_unit(&blocked, "Scene", "sm_89", Wide::F64, ""), Err(GpuError::Dump(_))));
     }
 
-    /// The tiles looked up on several threads equal the ones looked up on
-    /// one: two entity tables (three and two parameters a slot, some fixed
-    /// throughout), a cross constraint between them, every row a lookup.
+    /// A cross slot's owner is the first slot of its tile; a slot without a
+    /// tile is its own, also where its record's base matches a tile's.
+    #[test]
+    fn a_slot_is_owned_by_the_first_slot_of_its_tile() {
+        // (base, stride, flip) per slot: bases 40, 7, 40, none, 7, 0, 40, none with base 7
+        let tiles = [40, 3, 0, 7, 2, 1, 40, 3, 0, 0, 0, 0, 7, 2, 1, 0, 3, 0, 40, 3, 0, 7, 0, 0];
+        assert_eq!(tile_owners(&tiles), [0, 1, 0, 3, 1, 5, 0, 7]);
+    }
+
+    /// The tiles looked up and the instances grouped on several threads
+    /// equal the ones on one: two entity tables (three and two parameters a
+    /// slot, some fixed throughout), a cross constraint between them, every
+    /// row a lookup, and a one-sided constraint on the second table.
     #[test]
     fn tiles_on_several_threads_are_the_tiles_on_one() {
         let (s0, s1, nrows) = (50usize, 70usize, 300usize);
@@ -1768,12 +1794,16 @@ mod tests {
             entities: vec![3, 2],
             references: Vec::new(),
             crosses: 1,
-            constraints: vec![DeviceConstraint { data: 0, rows: 1, sides: vec![0, 1], pairs: vec![(0, 1, 0)] }],
+            constraints: vec![
+                DeviceConstraint { data: 0, rows: 1, sides: vec![0, 1], pairs: vec![(0, 1, 0)] },
+                DeviceConstraint { data: 0, rows: 1, sides: vec![1], pairs: Vec::new() },
+            ],
             entity_data: vec![0, 0],
             root_data: 0,
         };
         let rows: Vec<u32> = (0..nrows).flat_map(|k| [cols[0][k], cols[1][k], cols[2][k]]).collect();
-        let st = DeviceStructure { idx: vec![idx0, idx1], rows: vec![rows], keep: vec![vec![true; nrows]] };
+        let priors: Vec<u32> = (0..40).map(|k| k * 3 % s1 as u32).collect();
+        let st = DeviceStructure { idx: vec![idx0, idx1], rows: vec![rows, priors], keep: vec![vec![true; nrows], vec![true; 40]] };
         // one block per entity, the diagonal blocks and the coupled pairs
         let mut part = vec![0usize];
         for k in 0..s0 + s1 {
@@ -1796,6 +1826,13 @@ mod tests {
         assert_eq!(one.entity[0][21..24], [0, 0, 0]);
         assert!(one.entity[0][..21].chunks(3).all(|t| t[1] > 0));
         assert_eq!(one.whole, [true, true]);
+        // four passes: on two threads two each, on eight one each
+        let owners: Vec<Vec<u32>> = one.cross.iter().map(|t| tile_owners(t)).collect();
+        let grouped = |threads| groups(&shape, &st, &[s0, s1], &[nrows], &owners, (threads, 1));
+        let want = grouped(1);
+        assert_eq!(want[1].sides[0].1.len(), 40);
+        assert_eq!(grouped(2), want);
+        assert_eq!(grouped(8), want);
     }
 
     /// Which kernels store their tiles, and whether H is zeroed first. A
@@ -1848,7 +1885,7 @@ mod tests {
             let (slots, cross_slots) = ([s0, s1], [n, if second { 5 } else { 0 }]);
             let mut t = tiles(&shape, &st, &slots, &cross_slots, &Resolver::new(&pattern), (1, usize::MAX));
             let owners: Vec<Vec<u32>> = t.cross.iter().map(|t| tile_owners(t)).collect();
-            let zero = stores(&shape, &groups(&shape, &st, &slots, &cross_slots, &owners), &mut t, pattern.nblocks());
+            let zero = stores(&shape, &groups(&shape, &st, &slots, &cross_slots, &owners, (1, usize::MAX)), &mut t, pattern.nblocks());
             let stored = |recs: &[u32]| recs.chunks(3).map(|r| r[1] & TILE_STORE != 0).collect::<Vec<bool>>();
             (stored(&t.entity[0]), stored(&t.entity[1]), stored(&t.cross[0]), zero)
         };
