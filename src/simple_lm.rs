@@ -7940,6 +7940,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 DevicePricing::None => {}
             }
         }
+        let t_order = lap(vb);
 
         // The reduction is a GEMM loop over pairs of observers plus a
         // one-column update per observer, and the tile shapes both need come
@@ -8164,7 +8165,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             String::from(" (skipped)")
         } else {
             std::format!(
-                " (ordering the reduced system {:.1}, AMD over the whole system {:.1}, \
+                " (analysing the reduced system {:.1}, AMD over the whole system {:.1}, \
                  nested dissection over it {:.1}{})",
                 t_sym_reduced,
                 t_amd_full,
@@ -8284,11 +8285,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 let rest = lap(true);
                 info!(
                     "schur: setup {:.1} ms = finding the blocks {:.1} + finding the \
-                     reduction {:.1} (thrown away with it) + weighing it {:.1}{} + CSC \
-                     pattern, scatter map and the rest {:.1}",
-                    t_block + t_schur_symbolic + t_gate + rest,
+                     reduction {:.1} and ordering it {:.1} (thrown away with it) + weighing \
+                     it {:.1}{} + CSC pattern, scatter map and the rest {:.1}",
+                    t_block + t_schur_symbolic + t_order + t_gate + rest,
                     t_block,
                     t_schur_symbolic,
+                    t_order,
                     t_gate,
                     decision_detail,
                     rest,
@@ -8566,10 +8568,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let rest = lap(true);
             info!(
                 "schur: setup {:.1} ms = finding the blocks {:.1} + finding the \
-                 reduction {:.1} + weighing it {:.1}{} + factor setup {:.1}",
-                t_block + t_schur_symbolic + t_gate + rest,
+                 reduction {:.1} + ordering it {:.1} + weighing it {:.1}{} + factor setup {:.1}",
+                t_block + t_schur_symbolic + t_order + t_gate + rest,
                 t_block,
                 t_schur_symbolic,
+                t_order,
                 t_gate,
                 decision_detail,
                 rest,

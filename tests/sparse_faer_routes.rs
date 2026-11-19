@@ -188,6 +188,40 @@ fn force_skips_the_analysis() {
     assert!(plan.fill_ratio.is_none() && plan.flop_ratio.is_none());
 }
 
+/// The verbose setup report times the reduced system's ordering as an item
+/// of its own, apart from the weighing of the routes, and its items add up
+/// to its total.
+#[test]
+fn the_setup_report_itemises_the_ordering() {
+    use arael::log::{self, Level};
+    use std::sync::{Arc, Mutex};
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    log::set_sink(move |level, msg| {
+        if level == Level::Info && msg.starts_with("schur: setup") {
+            sink.lock().unwrap().push(msg.to_string());
+        }
+    });
+    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Force));
+    let mut w = build(0.05);
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut w, &mut params);
+    let r = lm_solve(&params, &mut solver, &mut w, &LmConfig { max_iters: 60, verbose: true, ..Default::default() });
+    log::reset_sink();
+    assert!(r.unwrap().end_cost < 1e-14);
+    let lines = seen.lock().unwrap().clone();
+    assert!(!lines.is_empty(), "no setup report");
+    for line in &lines {
+        // schur: setup T ms = finding the blocks a + finding the reduction b
+        // + ordering it c + weighing it d (skipped) + factor setup e
+        assert!(line.contains(" + ordering it ") && line.contains(" (skipped) + factor setup "), "{line}");
+        let nums: Vec<f64> = line.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+        assert_eq!(nums.len(), 6, "{line}");
+        let parts: f64 = nums[1..].iter().sum();
+        assert!((nums[0] - parts).abs() <= 0.26, "{line}");
+    }
+}
+
 /// Every ordering of the whole system reaches the same optimum. They differ
 /// in fill and speed, never in the answer.
 #[test]
