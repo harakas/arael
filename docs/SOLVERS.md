@@ -1136,6 +1136,15 @@ if let Some(gpu) = &r.gpu {
   (conjugate gradients, the envelope, the scalar factorization); the
   plan says which.
 
+A solve also logs it: a warning when a GPU was given and not used, with
+the route that ran instead, and under `verbose` the device and what ran
+on it:
+
+```text
+[arael WARN] gpu: cuda:0 was given and is not used -- the reduced system is solved by conjugate gradients, on the CPU. ...
+[arael INFO] gpu: cuda:0 NVIDIA GeForce RTX 4090 (sm_89), wide f64 -- assembly, damped solves and the LM loop on the device
+```
+
 `LmResult::report` prints it as a `gpu` block (see Reporting a solve).
 
 ## Where the log goes

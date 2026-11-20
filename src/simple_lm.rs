@@ -2046,33 +2046,85 @@ fn render_route(plan: &SchurPlan) -> String {
     }
 }
 
-/// The GPU block of the report: the device, what ran on it, its scalars
-/// and its memory.
-fn render_gpu(g: &GpuReport, style: Style) -> String {
+/// A GPU's runtime and index, as the report and the log name it: `cuda:0`.
+fn gpu_label(g: &GpuReport) -> String {
     let runtime = match g.backend {
         GpuBackend::Cuda => "cuda",
         GpuBackend::Hip => "hip",
         GpuBackend::Cpu => "cpu",
         GpuBackend::Metal => "metal",
     };
-    let work = match &g.work {
-        GpuWork::Unused => {
-            return format!(
-                "  gpu       {runtime}:{} {}\n",
-                g.index,
-                style.paint("33", "not used: the solve took a route that does not run on a device")
+    format!("{runtime}:{}", g.index)
+}
+
+/// What ran on the device and what on the host; `None` for a GPU the
+/// solve did not use.
+fn gpu_work(work: &GpuWork) -> Option<String> {
+    match work {
+        GpuWork::Unused => None,
+        GpuWork::Loop => Some("assembly, damped solves and the LM loop on the device".to_string()),
+        GpuWork::Solves(why) => Some(format!("damped solves on the device, assembly on the host ({why})")),
+    }
+}
+
+/// Log what a solve's GPU does, once its first compute has chosen the
+/// route: a warning when the GPU was given and the route does not run on
+/// it, and under `verbose` the device and its share of the work.
+fn log_gpu(gpu: Option<GpuReport>, plan: Option<SolverReport>, verbose: bool) {
+    let Some(g) = gpu else { return };
+    match gpu_work(&g.work) {
+        Some(work) => {
+            if verbose {
+                let wide = match g.wide {
+                    GpuWide::F64 => "f64",
+                    GpuWide::Df32 => "df32",
+                };
+                info!("gpu: {} {} ({}), wide {wide} -- {work}", gpu_label(&g), g.name, g.target);
+            }
+        }
+        None => {
+            // which route ran instead
+            let route = match plan {
+                Some(SolverReport::Schur(p)) => format!(
+                    "the {} system is {}",
+                    if p.reduced { "reduced" } else { "whole" },
+                    if p.cg_iterations.is_some() {
+                        "solved by conjugate gradients"
+                    } else if p.envelope {
+                        "factored under its envelope"
+                    } else {
+                        "factored by the scalar sparse Cholesky"
+                    }
+                ),
+                None => "the solver took another route".to_string(),
+            };
+            warn!(
+                "gpu: {} was given and is not used -- {route}, on the CPU. Only the block supernodal \
+                 Cholesky runs on a device (SparseFaerOptions::with_block_supernodal, with_envelope_schur \
+                 and with_schur_solve choose the route)",
+                gpu_label(&g)
             );
         }
-        GpuWork::Loop => "assembly, damped solves and the LM loop on the device".to_string(),
-        GpuWork::Solves(why) => format!("damped solves on the device, assembly on the host ({why})"),
+    }
+}
+
+/// The GPU block of the report: the device, what ran on it, its scalars
+/// and its memory.
+fn render_gpu(g: &GpuReport, style: Style) -> String {
+    let Some(work) = gpu_work(&g.work) else {
+        return format!(
+            "  gpu       {} {}\n",
+            gpu_label(g),
+            style.paint("33", "not used: the solve took a route that does not run on a device")
+        );
     };
     let wide = match g.wide {
         GpuWide::F64 => "f64",
         GpuWide::Df32 => "df32",
     };
     let mut out = format!(
-        "  gpu       {runtime}:{} {} ({}{}), wide {wide}\n",
-        g.index,
+        "  gpu       {} {} ({}{}), wide {wide}\n",
+        gpu_label(g),
         g.name,
         g.target,
         if g.integrated { ", integrated" } else { "" }
@@ -3336,6 +3388,9 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             }
         }
         if first {
+            // The first compute chose the route: say what the solve's GPU
+            // does on it, a warning when it is given and not used.
+            log_gpu(solver.gpu_report(), solver.report(), config.verbose);
             // The cost is a free byproduct of assembly; using it here
             // replaces the separate calc_cost(x0) pass of the old loop.
             first = false;
@@ -5847,9 +5902,10 @@ impl SparseFaerOptions {
     /// damped solve. The symbolic analysis stays on the CPU.
     ///
     /// Solvers given clones of one [`GpuDevice`] share its stream and
-    /// buffers. Ignored unless the supernodal block route runs (conjugate
-    /// gradients stay on the CPU); a device whose runtime is not compiled
-    /// in fails the solve with [`SetupError::SolverUnavailable`].
+    /// buffers. Not used unless the supernodal block route runs (conjugate
+    /// gradients stay on the CPU): the solve then warns, and its
+    /// [`GpuReport::work`] is [`GpuWork::Unused`]. A device whose runtime is
+    /// not compiled in fails the solve with [`SetupError::SolverUnavailable`].
     ///
     /// ```ignore
     /// let opts = SparseFaerOptions::default().with_gpu(Some(GpuDevice::cuda(0)));
@@ -8786,6 +8842,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.factor_mem = Vec::new();
             self.solve_mem = Vec::new();
             self.sn_num.clear();
+            // the plan names the route from here on: no iteration yet
+            if let Some(plan) = self.plan.as_mut() {
+                plan.cg_iterations = Some(self.cg_iters);
+            }
             if vb {
                 info!(
                     "schur: reduced system {} params ({:.0}% dense), solving it with \
