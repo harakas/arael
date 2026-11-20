@@ -1443,6 +1443,14 @@ pub struct GpuTiming {
     pub attempts: Duration,
     /// The attempts timed.
     pub attempt_count: usize,
+    /// The conjugate gradients' iterations, a part of `attempts`, summed:
+    /// from an attempt's first iterations queued to the status read that
+    /// finds its solve stopped, the waits between its rounds included.
+    /// Zero for a solve that factorizes.
+    pub cg: Duration,
+    /// The rounds of iterations the conjugate gradients took, each a wait
+    /// for the device beside the attempt's one.
+    pub cg_rounds: usize,
 }
 
 /// Where a structure's one-time setup went ([`LmTiming::setup`]): the parts
@@ -1923,6 +1931,9 @@ impl<T: Float> LmResult<T> {
                 parts.push(format!("assembly {:.2} ms in {} calls", ms(g.assembly), g.assembly_count));
             }
             parts.push(format!("attempts {:.2} ms in {} calls", ms(g.attempts), g.attempt_count));
+            if g.cg_rounds > 0 {
+                parts.push(format!("of them conjugate gradients {:.2} ms in {} rounds", ms(g.cg), g.cg_rounds));
+            }
             out.push_str(&format!("    {:<13} {:>8.2} ms  {}\n", "on the device", ms(g.assembly + g.attempts), parts.join(", ")));
         }
         // After the solve and outside `total`, so no share of it.

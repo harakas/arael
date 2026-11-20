@@ -259,7 +259,8 @@ views are named by their container's nature: `PathPosesDeque`,
   `has_timing` flags validity; `timing.setup`, an
   `option<SetupTiming>`, is where the analysis went, and `timing.gpu`,
   an `option<GpuTiming>`, the device's own assembly and attempt time
-  on a GPU, see docs/SOLVERS.md) and `r.steps()` -- the per-attempt
+  on a GPU and within the attempts the conjugate gradients' iterations
+  (`cg`, `cg_rounds`), see docs/SOLVERS.md) and `r.steps()` -- the per-attempt
   timeline as a vector of `LmStep` (attempt and retry indices,
   accepted, lambda, costs, step and gradient norms, per-phase
   seconds; a damping retry is its own record).

@@ -193,6 +193,10 @@ pub struct GpuCg<D: Device> {
     nks: u32,
     /// The iterations of the solve before this one.
     last: Option<u32>,
+    /// The stamps [`run`](Self::run) makes ([`stamp_runs`](Self::stamp_runs)),
+    /// and its rounds since they were last taken.
+    stamps: Option<(usize, usize)>,
+    rounds_run: usize,
     /// The status as a round reads it.
     host: [u8; CG_STATUS_BYTES],
 }
@@ -303,6 +307,8 @@ impl<D: Device> GpuCg<D> {
             nk: rs.nk,
             nks: nks as u32,
             last: None,
+            stamps: None,
+            rounds_run: 0,
             host: [0; CG_STATUS_BYTES],
         })
     }
@@ -448,6 +454,27 @@ impl<D: Device> GpuCg<D> {
         self.last = Some(iters.min(u32::MAX as usize) as u32);
     }
 
+    /// Have [`run`](Self::run) stamp the device's queue ([`Device::stamp`])
+    /// before its first iterations (`stamps.0`) and after the status read
+    /// that finds the solve stopped (`stamps.1`), so the span between them,
+    /// read after the next wait, is the iterations' time with the rounds'
+    /// waits; `None` (the default) stamps nothing.
+    ///
+    /// ```ignore
+    /// cg.stamp_runs(Some((4, 5)));
+    /// cg.solve(&mut g, &hvals, &rhs, &mut delta)?;
+    /// let seconds = dev.span(4, 5)?;
+    /// ```
+    pub fn stamp_runs(&mut self, stamps: Option<(usize, usize)>) {
+        self.stamps = stamps;
+    }
+
+    /// The rounds [`run`](Self::run) has made since the last call, which
+    /// starts the count again.
+    pub fn take_rounds(&mut self) -> usize {
+        std::mem::take(&mut self.rounds_run)
+    }
+
     /// Run the iterations to the end of the solve, after
     /// [`launch_start`](Self::launch_start): rounds of queued iterations
     /// and one status read each (the wait), until the solve has converged,
@@ -455,6 +482,9 @@ impl<D: Device> GpuCg<D> {
     /// back-substitution reads it ([`GpuSchur::launch_backsub`]).
     pub fn run(&mut self, gs: &GpuSchur<D>) -> Result<GpuCgStats, GpuError> {
         let (mut graphs, mut queued, mut rounds) = (self.first_graphs(), 0u32, 0usize);
+        if let Some((before, _)) = self.stamps {
+            self.dev.stamp(before)?;
+        }
         loop {
             self.queue(gs, graphs)?;
             queued = queued.saturating_add(graphs);
@@ -464,6 +494,10 @@ impl<D: Device> GpuCg<D> {
             self.host = host;
             let st = self.status(&host);
             if !st.active {
+                if let Some((_, after)) = self.stamps {
+                    self.dev.stamp(after)?;
+                }
+                self.rounds_run += rounds;
                 self.note_iterations(st.iters);
                 let queued = queued as usize * self.params.graph_iters as usize;
                 return Ok(GpuCgStats { iters: st.iters, converged: st.converged, breakdown: st.breakdown, relative_residual: st.relative_residual, rounds, queued });

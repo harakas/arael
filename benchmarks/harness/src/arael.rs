@@ -235,6 +235,14 @@ pub fn print_timing<T>(r: &LmResult<T>) {
                 g.attempt_count,
                 ms(g.attempts) / g.attempt_count.max(1) as f64,
             );
+            if g.cg_rounds > 0 {
+                eprintln!(
+                    "  [gpu] of the attempts, conjugate gradients {:.2} ms in {} rounds ({:.3} an attempt)",
+                    ms(g.cg),
+                    g.cg_rounds,
+                    ms(g.cg) / g.attempt_count.max(1) as f64,
+                );
+            }
         }
     }
 }

@@ -51,10 +51,11 @@ enum Solve<D: Device> {
     Cg(CgParams),
 }
 
-/// The stamps ([`Device::stamp`]) around a linearization and around an
-/// attempt.
+/// The stamps ([`Device::stamp`]) around a linearization, around an
+/// attempt, and within it around the conjugate gradients' iterations.
 const LIN: (usize, usize) = (0, 1);
 const ATTEMPT: (usize, usize) = (2, 3);
+const CG: (usize, usize) = (4, 5);
 
 /// The device assembly of the reduced route and the LM loop's vectors
 /// beside it.
@@ -201,6 +202,15 @@ impl<T: crate::utils::Float, D: Device> DeviceSolver<T, D> {
             self.times.attempts += d;
             self.times.attempt_count += 1;
         }
+        // the iterations of the attempt's conjugate gradients, when it ran
+        // any: its rounds since the last attempt
+        if attempt && let Some(cg) = self.cg.as_mut() {
+            let rounds = cg.take_rounds();
+            if rounds > 0 && let Some(d) = span(CG)? {
+                self.times.cg += d;
+                self.times.cg_rounds += rounds;
+            }
+        }
         Ok(())
     }
 
@@ -241,6 +251,10 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         if let Some(gs) = self.schur.as_mut() {
             gs.stamp_solves(on.then_some(ATTEMPT));
         }
+        if let Some(cg) = self.cg.as_mut() {
+            cg.stamp_runs(on.then_some(CG));
+            cg.take_rounds();
+        }
     }
 
     fn timing(&self) -> Option<crate::simple_lm::GpuTiming> {
@@ -260,7 +274,9 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         };
         gs.stamp_solves(self.timed.then_some(ATTEMPT));
         if let Solve::Cg(params) = &self.solve {
-            self.cg = Some(GpuCg::new(&gs, params, &GpuCgParams::default())?);
+            let mut cg = GpuCg::new(&gs, params, &GpuCgParams::default())?;
+            cg.stamp_runs(self.timed.then_some(CG));
+            self.cg = Some(cg);
         }
         self.schur = Some(gs);
         Ok(())

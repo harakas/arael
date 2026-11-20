@@ -1324,11 +1324,16 @@ pub struct GpuTiming {
     pub assembly_count: usize,
     pub attempts: Duration,     // the damped attempts on the device, summed
     pub attempt_count: usize,
+    pub cg: Duration,           // within the attempts: the conjugate gradients' iterations, summed
+    pub cg_rounds: usize,       // the rounds they took, each a wait for the device
 }
 ```
 
 `assembly` is zero when the host assembles (`GpuWork::Solves`); `attempts`
-then starts at the upload of the Hessian's values.
+then starts at the upload of the Hessian's values. `cg` and `cg_rounds`
+are zero for a solve that factorizes; with conjugate gradients `cg` runs
+from an attempt's first iterations queued to the status read that finds
+its solve stopped, the waits between its rounds included.
 
 With the loop on the device (`GpuWork::Loop`) the report names the host's
 rows for what the host does there, `queueing` (`assembly`: the
@@ -1349,17 +1354,23 @@ adds the device's own time:
 ```
 
 With the assembly on the host the rows keep their names, and `on the
-device` has the attempts alone.
+device` has the attempts alone. With conjugate gradients it adds their
+part of the attempts:
+
+```text
+    on the device    52.12 ms  assembly 4.80 ms in 9 calls, attempts 47.33 ms in 16 calls, of them conjugate gradients 30.12 ms in 23 rounds
+```
 
 Timing a GPU solve adds two markers to the device's queue around each
 linearization and each attempt, about ten microseconds an attempt on CUDA;
 an untimed solve adds none. `gpu` is `None` without a GPU and on Metal,
 whose device keeps no timestamps.
 
-An attempt is one captured graph on the device, and a timestamp inside a
-graph cannot be read back, so `LmTiming` does not split an attempt into
-its stages (reduction, factorization, solve, back-substitution, trial
-cost). For the time of each kernel, trace the solve: build with the
+With a factor an attempt is one captured graph on the device, and a
+timestamp inside a graph cannot be read back, so `LmTiming` does not
+split an attempt into its stages (reduction, factorization, solve,
+back-substitution, trial cost). The conjugate gradients' iterations are
+queued between two graphs, which is where `cg`'s timestamps sit. For the time of each kernel, trace the solve: build with the
 `gpu-trace` feature and set `ARAEL_GPU_TRACE=<file>` and
 `ARAEL_GPU_TRACE_TIME=1`. Every device operation of the process is then
 written to the file, each launch with its time on the device.

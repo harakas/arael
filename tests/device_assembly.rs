@@ -451,8 +451,12 @@ fn conjugate_gradients_on_the_device_reach_the_optimum() {
             let t = r.timing.as_ref().unwrap().gpu.unwrap_or_else(|| panic!("{}: a timed device solve", label(&d)));
             assert_eq!(t.attempt_count, r.iterations, "{}: every attempt timed", label(&d));
             assert!(!t.attempts.is_zero() && t.assembly.is_zero() != assembly, "{}: {t:?}", label(&d));
+            // the iterations' time, a part of the attempts', and their
+            // rounds: a wait or more an attempt
+            assert!(!t.cg.is_zero() && t.cg <= t.attempts && t.cg_rounds >= t.attempt_count, "{}: {t:?}", label(&d));
             let text = r.report();
             assert!(text.contains(", conjugate gradients, system in ") && text.contains("solved by conjugate gradients ("), "{}:\n{text}", label(&d));
+            assert!(text.contains(" calls, of them conjugate gradients ") && text.contains(&format!(" ms in {} rounds\n", t.cg_rounds)), "{}:\n{text}", label(&d));
         }
     }
     for d in f32_devices() {
@@ -4984,6 +4988,7 @@ fn a_timed_device_solve_reports_the_devices_time() {
         assert!(g.assembly_count >= 1 && g.assembly_count <= r.accepted_iterations + 1, "{}: {g:?} of {} accepted", label(&d), r.accepted_iterations);
         assert!(!g.assembly.is_zero() && !g.attempts.is_zero(), "{}: {g:?}", label(&d));
         assert!(g.assembly + g.attempts <= t.total, "{}: {g:?} within {:?}", label(&d), t.total);
+        assert!(g.cg.is_zero() && g.cg_rounds == 0, "{}: a factor has no iterations to time, {g:?}", label(&d));
         // the loop on the device: the host's rows say what the host does,
         // the trial cost and the accepted step have none, and the device's
         // own time has both its parts

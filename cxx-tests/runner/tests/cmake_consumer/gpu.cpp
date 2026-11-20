@@ -49,6 +49,9 @@ static void timing(const char* tag, const LmResult& r) {
     if (t.gpu) {
         std::printf("%s_attempts_timed %d\n%s_assembly_timed %u\n", tag,
             (t.gpu->attempt_count == r.iterations && t.gpu->attempts > 0.0) ? 1 : 0, tag, t.gpu->assembly_count);
+        // the conjugate gradients' iterations, within the attempts
+        std::printf("%s_cg_timed %d\n", tag,
+            (t.gpu->cg > 0.0 && t.gpu->cg <= t.gpu->attempts && t.gpu->cg_rounds >= t.gpu->attempt_count) ? 1 : 0);
     }
 }
 
@@ -71,6 +74,7 @@ int main() {
     // items, which the reduction eliminates.
     LmConfig cfg;
     cfg.max_iters = 50;
+    cfg.gather_timing = true;
     Fit fit;
     fill(fit);
     fit.items().reserve(3);
@@ -94,5 +98,6 @@ int main() {
     SchurPlan p = cg->plan().value();
     std::printf("cg_solve %u\ncg_is_cg %d\ncg_work %u\ncg_iters %d\n", unsigned(g.solve), g.solve == GpuSolve::ConjugateGradients ? 1 : 0,
         unsigned(g.work), (p.cg_iterations && *p.cg_iterations > 0) ? 1 : 0);
+    timing("cg", cg.value());
     return 0;
 }

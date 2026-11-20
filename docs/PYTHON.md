@@ -449,7 +449,8 @@ status, costs, the timing breakdown and the backend's plan. With
 `cfg.gather_timing = True`, `r.timing` holds the breakdown
 (`r.timing.setup`, a `SetupTiming` or `None`, is where the analysis
 went, and `r.timing.gpu`, a `GpuTiming` or `None`, the device's own
-assembly and attempt time on a GPU) and
+assembly and attempt time on a GPU and within the attempts the
+conjugate gradients' iterations, `cg` and `cg_rounds`) and
 `r.steps` the per-attempt timeline (a list of `LmStep`). `r.threads`
 holds what the solve's threads did (a `ThreadReport`) and
 `r.threads_held` what each split store held. A warm

@@ -428,6 +428,11 @@ struct GpuTiming {
     /// The linearizations and the attempts timed.
     uint32_t assembly_count;
     uint32_t attempt_count;
+    /// Within the attempts, the conjugate gradients' iterations, summed
+    /// (the waits between their rounds included), and the rounds they
+    /// took, each a wait for the device; zero for a solve that factorizes.
+    double cg;
+    uint32_t cg_rounds;
 };
 
 /// Per-phase wall-clock seconds plus call counts, gathered when

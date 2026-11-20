@@ -73,6 +73,8 @@ def timing(tag, r):
     if g is not None:
         pi(tag + "_attempts_timed", 1 if g.attempt_count == r.iterations and g.attempts > 0.0 else 0)
         pi(tag + "_assembly_timed", g.assembly_count)
+        # the conjugate gradients' iterations, within the attempts
+        pi(tag + "_cg_timed", 1 if 0.0 < g.cg <= g.attempts and g.cg_rounds >= g.attempt_count else 0)
 
 
 fit.set_log_level(fit.LogLevel.WARN)
@@ -94,7 +96,9 @@ so.schur_solve = fit.SchurSolve.ITERATIVE
 so.gpu = fit.GpuBackend.CPU
 cfg = fit.LmConfig()
 cfg.max_iters = 50
+cfg.gather_timing = True
 r = f.solve_sparse(cfg, so)
+timing("cg", r)
 pi("cg_solve", int(r.gpu.solve))
 pi("cg_is_cg", 1 if r.gpu.solve == fit.GpuSolve.CONJUGATE_GRADIENTS else 0)
 pi("cg_work", int(r.gpu.work))

@@ -1647,7 +1647,8 @@ pub struct CSetupTiming {{
 }}
 
 /// GpuTiming mirror: the device's own time in a GPU solve, in seconds,
-/// and the linearizations and attempts timed.
+/// the linearizations and attempts timed, and within the attempts the
+/// conjugate gradients' iterations and their rounds.
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct CGpuTiming {{
@@ -1655,6 +1656,8 @@ pub struct CGpuTiming {{
     pub attempts: f64,
     pub assembly_count: u32,
     pub attempt_count: u32,
+    pub cg: f64,
+    pub cg_rounds: u32,
 }}
 
 /// {{has, v}} mirrors of `arael::option<T>` for the timing's optional
@@ -2071,6 +2074,8 @@ unsafe fn fill_result(out: *mut CLmResult, r: &arael::simple_lm::LmResult<{fp}>)
                         attempts: g.attempts.as_secs_f64(),
                         assembly_count: g.assembly_count as u32,
                         attempt_count: g.attempt_count as u32,
+                        cg: g.cg.as_secs_f64(),
+                        cg_rounds: g.cg_rounds as u32,
                     }},
                 }},
                 None => COptGpuTiming::default(),

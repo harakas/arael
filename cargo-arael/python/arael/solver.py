@@ -682,14 +682,19 @@ class GpuTiming(ctypes.Structure):
     GpuTiming), in seconds, from timestamps in its queue: `assembly` the
     linearizations (zero when the host assembles) and `attempts` the
     damped attempts, summed, with `assembly_count` and `attempt_count`
-    how many were timed. The host's phases cannot show it: the host
-    waits once per attempt, so LmTiming.linear_solve holds the device's
-    assembly and trial cost too."""
+    how many were timed; within the attempts `cg` the conjugate
+    gradients' iterations, summed, and `cg_rounds` the rounds they took,
+    each a wait for the device (zero for a solve that factorizes). The
+    host's phases cannot show it: the host waits once per attempt, so
+    LmTiming.linear_solve holds the device's assembly and trial cost
+    too."""
     _fields_ = [
         ("assembly", ctypes.c_double),
         ("attempts", ctypes.c_double),
         ("assembly_count", ctypes.c_uint32),
         ("attempt_count", ctypes.c_uint32),
+        ("cg", ctypes.c_double),
+        ("cg_rounds", ctypes.c_uint32),
     ]
 
 
