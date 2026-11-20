@@ -1304,6 +1304,23 @@ linearization and each attempt, about ten microseconds an attempt on CUDA;
 an untimed solve adds none. `gpu` is `None` without a GPU and on Metal,
 whose device keeps no timestamps.
 
+An attempt is one captured graph on the device, and a timestamp inside a
+graph cannot be read back, so `LmTiming` does not split an attempt into
+its stages (reduction, factorization, solve, back-substitution, trial
+cost). For the time of each kernel, trace the solve: build with the
+`gpu-trace` feature and set `ARAEL_GPU_TRACE=<file>` and
+`ARAEL_GPU_TRACE_TIME=1`. Every device operation of the process is then
+written to the file, each launch with its time on the device.
+`tools/devmap` shows a trace by phase, stage and kernel. Timed launches
+run one at a time, so a timed trace gives the kernels' times, not the
+solve's:
+
+```bash
+# a program that solves on a GPU, built with --features gpu-cuda,gpu-trace
+ARAEL_GPU_TRACE=solve.trace ARAEL_GPU_TRACE_TIME=1 ./my_program
+tools/devmap/gen/devmap.py solve.trace --id my-case --title "my model, f32, cuda"
+```
+
 ### The timeline -- `LmTiming::steps`
 
 One record per **attempt**, damping retries included, so
