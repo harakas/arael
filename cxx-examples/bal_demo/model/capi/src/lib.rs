@@ -1063,9 +1063,9 @@ pub struct CGpuReport {
     /// GpuWork: 0 unused, 1 the damped solves, 2 the assembly, the damped
     /// solves and the LM loop.
     pub work: u32,
-    /// CpuAssembly, why the assembly ran on the CPU when work is 1: 1 asked,
+    /// HostAssembly, why the assembly ran on the CPU when work is 1: 1 asked,
     /// 2 no device form (the reason in no_device_form), 3 no f64; else 0.
-    pub cpu_assembly: u32,
+    pub host_assembly: u32,
     pub no_device_form: *const c_char,
     pub reserved_bytes: u64,
     pub buffers_created: u64,
@@ -1207,7 +1207,7 @@ fn boxed(r: arael::simple_lm::LmResult<f64>) -> *mut ResultDetail {
             text(&g.name),
             text(&g.target),
             match &g.work {
-                arael::simple_lm::GpuWork::Solves(arael::simple_lm::CpuAssembly::NoDeviceForm(why)) => text(why),
+                arael::simple_lm::GpuWork::Solves(arael::simple_lm::HostAssembly::NoDeviceForm(why)) => text(why),
                 _ => CString::default(),
             },
         ],
@@ -1268,7 +1268,7 @@ pub unsafe extern "C" fn scene_result_plan(d: *const ResultDetail, out: *mut CSc
 /// with `out` untouched for a solve without a GPU.
 #[no_mangle]
 pub unsafe extern "C" fn scene_result_gpu(d: *const ResultDetail, out: *mut CGpuReport) -> bool {
-    use arael::simple_lm::{CpuAssembly, GpuBackend, GpuWide, GpuWork};
+    use arael::simple_lm::{HostAssembly, GpuBackend, GpuWide, GpuWork};
     let dd = &*d;
     let Some(g) = &dd.result.gpu else { return false };
     *out = CGpuReport {
@@ -1293,10 +1293,10 @@ pub unsafe extern "C" fn scene_result_gpu(d: *const ResultDetail, out: *mut CGpu
             GpuWork::Solves(_) => 1,
             GpuWork::Loop => 2,
         },
-        cpu_assembly: match &g.work {
-            GpuWork::Solves(CpuAssembly::Asked) => 1,
-            GpuWork::Solves(CpuAssembly::NoDeviceForm(_)) => 2,
-            GpuWork::Solves(CpuAssembly::NoF64) => 3,
+        host_assembly: match &g.work {
+            GpuWork::Solves(HostAssembly::Asked) => 1,
+            GpuWork::Solves(HostAssembly::NoDeviceForm(_)) => 2,
+            GpuWork::Solves(HostAssembly::NoF64) => 3,
             _ => 0,
         },
         no_device_form: dd.gpu_text[2].as_ptr(),

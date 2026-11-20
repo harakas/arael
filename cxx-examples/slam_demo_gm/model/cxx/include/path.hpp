@@ -68,7 +68,7 @@ using arael::GpuBackend;
 using arael::GpuWide;
 using arael::GpuStaging;
 using arael::GpuWork;
-using arael::CpuAssembly;
+using arael::HostAssembly;
 using arael::GpuReport;
 using arael::SparseOptionsT;
 using arael::LogLevel;

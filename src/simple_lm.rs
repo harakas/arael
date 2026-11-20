@@ -1341,7 +1341,9 @@ pub struct LmTiming {
     /// Whole `lm_solve` wall clock, from the first assembly to the return.
     pub total: Duration,
     /// Gradient + Hessian assembly (residual, Jacobian, accumulation) summed
-    /// over every iteration.
+    /// over every iteration. With the loop on a GPU ([`GpuWork::Loop`]) the
+    /// host only queues the linearizations (and waits for the first): this
+    /// is that, and the device's assembly time is [`GpuTiming::assembly`].
     pub assembly: Duration,
     /// The first assembly alone. Recorded apart because the steady-state mean
     /// drops it uniformly with the other phases.
@@ -1363,7 +1365,9 @@ pub struct LmTiming {
     /// on a device that keeps no timestamps (Metal).
     pub gpu: Option<GpuTiming>,
     /// Damped linear solve (factorization + triangular solve) summed over
-    /// every inner attempt.
+    /// every inner attempt. With the loop on a GPU, the host's waits for the
+    /// device, one an attempt: each covers the linearization queued before
+    /// it, the damped solve and the trial cost ([`GpuTiming`] splits it).
     pub linear_solve: Duration,
     /// The first damped solve alone. Recorded apart so the steady-state mean can
     /// drop the first iteration uniformly with the other phases. NOTE it does NOT
@@ -1371,12 +1375,15 @@ pub struct LmTiming {
     /// reported as `analysis`. `solve_damped` only ever factorizes numerically.
     pub first_linear_solve: Duration,
     /// Trial-point cost evaluation (residual only, no Jacobian) summed over
-    /// every inner attempt.
+    /// every inner attempt. Zero with the loop on a GPU: the trial cost is
+    /// part of the device's attempt.
     pub cost_eval: Duration,
     /// The first cost evaluation alone (recorded apart so the steady-state
     /// mean can drop the first iteration uniformly with the other phases).
     pub first_cost_eval: Duration,
     /// Post-step `advance` (parameter re-centering) summed over accepted steps.
+    /// Near zero with the loop on a GPU: the device applies an accepted step
+    /// with the linearization after it.
     pub advance: Duration,
     /// The first `advance` alone (recorded apart so the steady-state mean can
     /// drop the first iteration uniformly with the other phases).
@@ -1424,13 +1431,13 @@ pub struct LmTiming {
 pub struct GpuTiming {
     /// The linearizations on the device, summed: the accepted step applied,
     /// the gradient and the Hessian assembled, the diagonal read off. Zero
-    /// when the CPU assembles ([`GpuWork::Solves`]).
+    /// when the host assembles ([`GpuWork::Solves`]).
     pub assembly: Duration,
     /// The linearizations timed.
     pub assembly_count: usize,
     /// The damped attempts on the device, summed: the damping, the
     /// reduction, the factorization, the solve with its refinement, the
-    /// back-substitution, the trial point and its cost; when the CPU
+    /// back-substitution, the trial point and its cost; when the host
     /// assembles, the upload of the Hessian's values, the solve and the
     /// step.
     pub attempts: Duration,
@@ -1896,28 +1903,27 @@ impl<T: Float> LmResult<T> {
                 }
             }
         }
-        out.push_str(&row("assembly", t.assembly, t.first_assembly, t.assembly_count));
-        out.push_str(&row(
-            "linear solve",
-            t.linear_solve,
-            t.first_linear_solve,
-            t.linear_solve_count,
-        ));
-        out.push_str(&row("cost eval", t.cost_eval, t.first_cost_eval, t.cost_eval_count));
-        out.push_str(&row("advance", t.advance, t.first_advance, t.advance_count));
-        // The device's own time, which the rows above see only as the
-        // host's waits.
+        // With the loop on the device the host queues the linearizations
+        // and waits once an attempt: its two rows are named for what the
+        // host does, and the trial cost and the accepted step, applied on
+        // the device inside its attempts and linearizations, have no row.
+        let device_loop = self.gpu.as_ref().is_some_and(|g| g.work == GpuWork::Loop);
+        let (assembly, linear_solve) = if device_loop { ("queueing", "device wait") } else { ("assembly", "linear solve") };
+        out.push_str(&row(assembly, t.assembly, t.first_assembly, t.assembly_count));
+        out.push_str(&row(linear_solve, t.linear_solve, t.first_linear_solve, t.linear_solve_count));
+        if !device_loop {
+            out.push_str(&row("cost eval", t.cost_eval, t.first_cost_eval, t.cost_eval_count));
+            out.push_str(&row("advance", t.advance, t.first_advance, t.advance_count));
+        }
+        // The device's own time, which the host's rows see only as waits.
         if let Some(g) = &t.gpu {
             let ms = |d: Duration| d.as_secs_f64() * 1e3;
-            out.push_str(&format!(
-                "    {:<13} {:>8.2} ms  on the device: assembly {:.2} ms in {} calls, attempts {:.2} ms in {} calls\n",
-                "gpu",
-                ms(g.assembly + g.attempts),
-                ms(g.assembly),
-                g.assembly_count,
-                ms(g.attempts),
-                g.attempt_count,
-            ));
+            let mut parts = std::vec::Vec::new();
+            if g.assembly_count > 0 {
+                parts.push(format!("assembly {:.2} ms in {} calls", ms(g.assembly), g.assembly_count));
+            }
+            parts.push(format!("attempts {:.2} ms in {} calls", ms(g.attempts), g.attempt_count));
+            out.push_str(&format!("    {:<13} {:>8.2} ms  {}\n", "on the device", ms(g.assembly + g.attempts), parts.join(", ")));
         }
         // After the solve and outside `total`, so no share of it.
         if t.covariance > Duration::ZERO {
@@ -2058,7 +2064,7 @@ fn render_gpu(g: &GpuReport, style: Style) -> String {
             );
         }
         GpuWork::Loop => "assembly, damped solves and the LM loop on the device".to_string(),
-        GpuWork::Solves(why) => format!("damped solves on the device, assembly on the CPU ({why})"),
+        GpuWork::Solves(why) => format!("damped solves on the device, assembly on the host ({why})"),
     };
     let wide = match g.wide {
         GpuWide::F64 => "f64",
@@ -5532,16 +5538,16 @@ pub enum GpuWork {
     /// [`SchurPlan`] says which).
     Unused,
     /// The damped solves. The gradient and the Hessian were assembled on
-    /// the CPU, for the reason given, and the Hessian's values uploaded
+    /// the host, for the reason given, and the Hessian's values uploaded
     /// for each damped solve.
-    Solves(CpuAssembly),
+    Solves(HostAssembly),
     /// The assembly, the damped solves and the LM loop's vectors.
     Loop,
 }
 
-/// Why a GPU solve assembled on the CPU ([`GpuWork::Solves`]).
+/// Why a GPU solve assembled on the host ([`GpuWork::Solves`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CpuAssembly {
+pub enum HostAssembly {
     /// [`SparseFaerOptions::with_gpu_assembly`]`(false)` asked for it.
     Asked,
     /// The root has no device form, and why
@@ -5551,12 +5557,12 @@ pub enum CpuAssembly {
     NoF64,
 }
 
-impl fmt::Display for CpuAssembly {
+impl fmt::Display for HostAssembly {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CpuAssembly::Asked => f.write_str("as asked"),
-            CpuAssembly::NoDeviceForm(why) => f.write_str(why),
-            CpuAssembly::NoF64 => f.write_str("the device has no f64, which the root's scalar is"),
+            HostAssembly::Asked => f.write_str("as asked"),
+            HostAssembly::NoDeviceForm(why) => f.write_str(why),
+            HostAssembly::NoF64 => f.write_str("the device has no f64, which the root's scalar is"),
         }
     }
 }
@@ -6761,10 +6767,10 @@ pub struct SparseFaer<T = f64> {
     // The structure is set up on the device's assembly route.
     #[cfg(feature = "gpu")]
     on_device: bool,
-    // Why a device solve of this structure assembles on the CPU; `None`
+    // Why a device solve of this structure assembles on the host; `None`
     // when the device assembles.
     #[cfg(feature = "gpu")]
-    cpu_assembly: Option<CpuAssembly>,
+    host_assembly: Option<HostAssembly>,
     bdiag_pos: Vec<ValueIndex>,
     schur: Option<arael_faer::schur::SchurSymbolic<SparseIndex>>,
     s: Option<arael_faer::bsc::SparseBlockColMat<SparseIndex, T>>,
@@ -6862,7 +6868,7 @@ impl<T> SparseFaer<T> {
             #[cfg(feature = "gpu")]
             on_device: false,
             #[cfg(feature = "gpu")]
-            cpu_assembly: None,
+            host_assembly: None,
             bdiag_pos: Vec::new(),
             schur: None,
             s: None,
@@ -6983,7 +6989,7 @@ impl<T> SparseFaer<T> {
             report.integrated = arch.integrated;
             report.f32_factor = g.precision() == arael_gpu::GpuPrecision::F32;
             report.f32_system = g.f32_reduction();
-            report.work = match &self.cpu_assembly {
+            report.work = match &self.host_assembly {
                 Some(why) => GpuWork::Solves(why.clone()),
                 None => GpuWork::Loop,
             };
@@ -7184,17 +7190,17 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
         #[cfg(feature = "gpu")]
         if self.sn_num.gpu_reduces() {
-            // why this structure assembles on the CPU, when it does
-            self.cpu_assembly = if !self.sn_num.gpu_assembly {
-                Some(CpuAssembly::Asked)
+            // why this structure assembles on the host, when it does
+            self.host_assembly = if !self.sn_num.gpu_assembly {
+                Some(HostAssembly::Asked)
             } else if problem.device_root().is_none() {
-                Some(CpuAssembly::NoDeviceForm(problem.device_unsupported().unwrap_or("no device form").to_string()))
+                Some(HostAssembly::NoDeviceForm(problem.device_unsupported().unwrap_or("no device form").to_string()))
             } else if core::mem::size_of::<T>() == 8 && !self.sn_num.gpu_ref().arch().has_f64 {
-                Some(CpuAssembly::NoF64)
+                Some(HostAssembly::NoF64)
             } else {
                 None
             };
-            match &self.cpu_assembly {
+            match &self.host_assembly {
                 None => {
                     problem.update_params(params);
                     let root = problem.device_root().expect("a device root");
@@ -7220,10 +7226,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     self.on_device = true;
                     return Ok(cost);
                 }
-                Some(CpuAssembly::Asked) => {}
+                Some(HostAssembly::Asked) => {}
                 Some(why) => {
                     if vb {
-                        info!("gpu assembly: on the CPU -- {why}");
+                        info!("gpu assembly: on the host -- {why}");
                     }
                 }
             }

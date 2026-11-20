@@ -24,12 +24,12 @@ pub fn verify(text: &str) {
         // the device
         assert_eq!(v("work"), 1.0, "{tag}:\n{text}");
     }
-    // CpuAssembly::NoDeviceForm, with its reason
-    assert_eq!(g("on_cpu_assembly"), 2.0, "{text}");
+    // HostAssembly::NoDeviceForm, with its reason
+    assert_eq!(g("on_host_assembly"), 2.0, "{text}");
     assert!(g("on_why") > 0.0, "the reason the fixture has no device form\n{text}");
     assert_eq!(g("on_report"), 1.0, "the text report has the gpu block");
-    // CpuAssembly::Asked, which comes before the model's form is asked
-    assert_eq!((g("off_cpu_assembly"), g("off_why")), (1.0, 0.0), "{text}");
+    // HostAssembly::Asked, which comes before the model's form is asked
+    assert_eq!((g("off_host_assembly"), g("off_why")), (1.0, 0.0), "{text}");
     // the timed solves' setup parts, within the analysis: the device's
     // plan among them on the device alone
     for (tag, on_device) in [("none", 0.0), ("on", 1.0)] {

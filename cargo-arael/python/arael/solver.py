@@ -432,15 +432,15 @@ class SchurPlan(ctypes.Structure):
 class GpuWork(enum.IntEnum):
     """How much of a solve ran on its GPU (GpuReport.work): nothing (the
     solve took a route that does not run on a device), the damped solves
-    (the assembly on the CPU, GpuReport.cpu_assembly says why), or the
+    (the assembly on the host, GpuReport.host_assembly says why), or the
     assembly, the damped solves and the LM loop's vectors."""
     UNUSED = 0
     SOLVES = 1
     LOOP = 2
 
 
-class CpuAssembly(enum.IntEnum):
-    """Why a GPU solve assembled on the CPU (GpuReport.cpu_assembly): it
+class HostAssembly(enum.IntEnum):
+    """Why a GPU solve assembled on the host (GpuReport.host_assembly): it
     did not, SparseOptions.gpu_assembly was off, the model has no device
     form (GpuReport.no_device_form says why), or the model is f64 and
     the device has no f64 (Metal)."""
@@ -462,7 +462,7 @@ class GpuReportRaw(ctypes.Structure):
         ("f32_factor", ctypes.c_bool),
         ("f32_system", ctypes.c_bool),
         ("work", ctypes.c_uint32),
-        ("cpu_assembly", ctypes.c_uint32),
+        ("host_assembly", ctypes.c_uint32),
         ("no_device_form", ctypes.c_char_p),
         ("reserved_bytes", ctypes.c_uint64),
         ("buffers_created", ctypes.c_uint64),
@@ -484,13 +484,13 @@ class GpuReport:
     that the factor is f32; `f32_system` that the system the device
     factorizes is f32 (an f32 solve without mixed_precision; otherwise it
     is in the wide values); `work` (GpuWork) how much of the solve ran
-    there, with `cpu_assembly` (CpuAssembly) and `no_device_form` why the
-    assembly ran on the CPU when it did; `reserved_bytes` the device
+    there, with `host_assembly` (HostAssembly) and `no_device_form` why the
+    assembly ran on the host when it did; `reserved_bytes` the device
     memory its state holds and `buffers_created` the device buffers it
     has allocated over its life."""
 
     __slots__ = ("backend", "index", "name", "target", "integrated", "wide",
-                 "f32_factor", "f32_system", "work", "cpu_assembly",
+                 "f32_factor", "f32_system", "work", "host_assembly",
                  "no_device_form", "reserved_bytes", "buffers_created")
 
     def __init__(self, raw):
@@ -503,7 +503,7 @@ class GpuReport:
         self.f32_factor = raw.f32_factor
         self.f32_system = raw.f32_system
         self.work = GpuWork(raw.work)
-        self.cpu_assembly = CpuAssembly(raw.cpu_assembly)
+        self.host_assembly = HostAssembly(raw.host_assembly)
         self.no_device_form = (raw.no_device_form or b"").decode()
         self.reserved_bytes = raw.reserved_bytes
         self.buffers_created = raw.buffers_created
@@ -662,7 +662,7 @@ class SetupTiming(ctypes.Structure):
 class GpuTiming(ctypes.Structure):
     """The device's own time in a GPU solve (mirror of the Rust
     GpuTiming), in seconds, from timestamps in its queue: `assembly` the
-    linearizations (zero when the CPU assembles) and `attempts` the
+    linearizations (zero when the host assembles) and `attempts` the
     damped attempts, summed, with `assembly_count` and `attempt_count`
     how many were timed. The host's phases cannot show it: the host
     waits once per attempt, so LmTiming.linear_solve holds the device's

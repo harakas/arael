@@ -54,7 +54,7 @@ def show(tag, g):
     pi(tag + "_f32_factor", 1 if g.f32_factor else 0)
     pi(tag + "_f32_system", 1 if g.f32_system else 0)
     pi(tag + "_work", int(g.work))
-    pi(tag + "_cpu_assembly", int(g.cpu_assembly))
+    pi(tag + "_host_assembly", int(g.host_assembly))
     pi(tag + "_why", len(g.no_device_form))
     pi(tag + "_reserved", 1 if g.reserved_bytes > 0 else 0)
     pi(tag + "_buffers", 1 if g.buffers_created > 0 else 0)

@@ -1385,7 +1385,7 @@ from .arael import math as _m
 from .arael import transform as _tf
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
-                           CpuAssembly, FaerOrdering, GpuBackend, GpuReport, GpuReportRaw,
+                           HostAssembly, FaerOrdering, GpuBackend, GpuReport, GpuReportRaw,
                            GpuStaging, GpuTiming, GpuWide, GpuWork, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
                            SchurPolicy, SchurSolve, SetupTiming, SolveFailure,

@@ -403,7 +403,7 @@ factorizes in f32, and under `mixed_precision` in the wide values (with
 `max_refinements` 0: formed wide, not refined). `LmResult.gpu` is what
 the solve did on the device, a `GpuReport` (`None` without a GPU):
 `name`, `target`, `integrated`, `wide`, `f32_factor`, `f32_system`,
-`work` (`GpuWork` UNUSED / SOLVES / LOOP), `cpu_assembly` (`CpuAssembly`
+`work` (`GpuWork` UNUSED / SOLVES / LOOP), `host_assembly` (`HostAssembly`
 NONE / ASKED / NO_DEVICE_FORM / NO_F64) with `no_device_form`,
 `reserved_bytes` and `buffers_created`. Metal has no f64 (`GpuBackend.METAL.has_f64` is false):
 an f64 model on it needs `mixed_precision`, and `GpuWide.F64` fails the

@@ -297,9 +297,9 @@ views are named by their container's nature: `PathPosesDeque`,
   device, an `option<GpuReport>` (empty without a GPU): the device's
   `name` and compile `target`, `wide`, `f32_factor`, `f32_system`,
   `work` (`GpuWork` Unused / Solves / Loop: nothing, the damped solves,
-  or the assembly, the solves and the LM loop), `cpu_assembly`
-  (`CpuAssembly` None / Asked / NoDeviceForm / NoF64: why the assembly
-  ran on the CPU) with the reason in `no_device_form`, and the device
+  or the assembly, the solves and the LM loop), `host_assembly`
+  (`HostAssembly` None / Asked / NoDeviceForm / NoF64: why the assembly
+  ran on the host) with the reason in `no_device_form`, and the device
   memory in `reserved_bytes` and `buffers_created`; its strings live as
   long as the result. The text report prints it as a `gpu` block.
   The interface must

@@ -329,7 +329,7 @@ fn options(gpu: Option<&GpuDevice>, assembly: bool) -> arael::simple_lm::SparseF
 /// The LM solve through the device assembly (H, the gradient and the
 /// trial costs on the GPU, the rotations re-centred there after every
 /// accepted step) reaches the CPU route's optimum, as the GPU route with
-/// the assembly on the CPU does, on each runtime.
+/// the assembly on the host does, on each runtime.
 #[test]
 fn a_solve_through_the_device_assembly_reaches_the_cpu_optimum() {
     let run = |gpu: Option<&GpuDevice>, assembly: bool| {
@@ -4813,11 +4813,11 @@ fn a_user_function_of_rust_code_has_no_device_form() {
 
 /// A solve's GPU report ([`LmResult::gpu`], the solver's `gpu_report`): no
 /// report without a GPU; the device named, with the loop on it and memory
-/// reserved; the assembly on the CPU as asked; and on the CPU because the
+/// reserved; the assembly on the host as asked; and on the CPU because the
 /// root has no device form, with the reason.
 #[test]
 fn a_solve_reports_what_ran_on_its_gpu() {
-    use arael::simple_lm::{CpuAssembly, SparseFaer};
+    use arael::simple_lm::{HostAssembly, SparseFaer};
     let solve = |opts: &arael::simple_lm::SparseFaerOptions| {
         let (cameras, points, observations) = consistent_scene::<f64>();
         let mut s = Scene { cameras, points, observations };
@@ -4838,7 +4838,7 @@ fn a_solve_reports_what_ran_on_its_gpu() {
         assert_eq!(g.reserved_bytes, d.reserved_bytes(), "{}", label(&d));
 
         let g = solve(&options(Some(&d), false)).unwrap();
-        assert_eq!(g.work, GpuWork::Solves(CpuAssembly::Asked), "{}", label(&d));
+        assert_eq!(g.work, GpuWork::Solves(HostAssembly::Asked), "{}", label(&d));
 
         let mut items = refs::Vec::new();
         for k in 0..4 {
@@ -4847,7 +4847,7 @@ fn a_solve_reports_what_ran_on_its_gpu() {
         let mut s = OpaqueRoot { items };
         let mut solver = SparseFaer::<f64>::from_options(&whole_options(Some(&d)));
         let r = s.solve_with(&mut solver, &arael::simple_lm::LmConfig::<f64> { max_iters: 5, ..Default::default() }).unwrap();
-        let GpuWork::Solves(CpuAssembly::NoDeviceForm(why)) = r.gpu.expect("a GPU was given").work else {
+        let GpuWork::Solves(HostAssembly::NoDeviceForm(why)) = r.gpu.expect("a GPU was given").work else {
             panic!("{}: a root without a device form assembles on the CPU", label(&d));
         };
         assert!(why.contains("opaque_dev_eval"), "{}: {why}", label(&d));
@@ -4886,7 +4886,7 @@ fn a_timed_device_solve_itemises_the_devices_setup() {
 /// A timed device solve reports the device's own time (`LmTiming::gpu`),
 /// from stamps in its queue: every attempt timed, and with the device
 /// assembly every linearization, which the host's phases see only as
-/// waits. With the assembly on the CPU the attempts alone. An untimed
+/// waits. With the assembly on the host the attempts alone. An untimed
 /// solve stamps nothing, and a CPU solve has no device time.
 #[test]
 fn a_timed_device_solve_reports_the_devices_time() {
@@ -4909,13 +4909,24 @@ fn a_timed_device_solve_reports_the_devices_time() {
         assert!(g.assembly_count >= 1 && g.assembly_count <= r.accepted_iterations + 1, "{}: {g:?} of {} accepted", label(&d), r.accepted_iterations);
         assert!(!g.assembly.is_zero() && !g.attempts.is_zero(), "{}: {g:?}", label(&d));
         assert!(g.assembly + g.attempts <= t.total, "{}: {g:?} within {:?}", label(&d), t.total);
+        // the loop on the device: the host's rows say what the host does,
+        // the trial cost and the accepted step have none, and the device's
+        // own time has both its parts
         let text = r.report();
-        assert!(text.contains("    gpu ") && text.contains("on the device: assembly ") && text.contains(&format!("in {} calls\n", g.attempt_count)), "{}:\n{text}", label(&d));
+        let rows: Vec<&str> = text.lines().filter(|l| l.starts_with("    ") && !l.starts_with("     ")).filter_map(|l| l.split("  ").find(|w| !w.is_empty())).map(str::trim).collect();
+        assert_eq!(rows, ["analysis", "queueing", "device wait", "on the device", "steps"], "{}:\n{text}", label(&d));
+        assert!(text.contains(&format!("ms in {} calls, attempts ", g.assembly_count)) && text.contains(&format!("ms in {} calls\n", g.attempt_count)), "{}:\n{text}", label(&d));
 
         let r = solve(&options(Some(&d), false), true);
         let g = r.timing.as_ref().unwrap().gpu.unwrap_or_else(|| panic!("{}: a timed device solve", label(&d)));
-        assert_eq!((g.assembly_count, g.attempt_count), (0, r.iterations), "{}: the CPU assembles", label(&d));
+        assert_eq!((g.assembly_count, g.attempt_count), (0, r.iterations), "{}: the host assembles", label(&d));
         assert!(g.assembly.is_zero() && !g.attempts.is_zero(), "{}: {g:?}", label(&d));
+        // the host assembles and evaluates the trial costs: its rows keep
+        // their names, and the device's row has its attempts alone
+        let text = r.report();
+        let rows: Vec<&str> = text.lines().filter(|l| l.starts_with("    ") && !l.starts_with("     ")).filter_map(|l| l.split("  ").find(|w| !w.is_empty())).map(str::trim).collect();
+        assert_eq!(rows, ["analysis", "assembly", "linear solve", "cost eval", "advance", "on the device", "steps"], "{}:\n{text}", label(&d));
+        assert!(text.contains("ms  attempts ") && !text.contains("ms  assembly "), "{}:\n{text}", label(&d));
     }
 }
 

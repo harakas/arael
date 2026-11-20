@@ -417,7 +417,7 @@ struct SetupTiming {
 /// host queues a linearization and waits once per attempt, so
 /// LmTiming::linear_solve holds the device's assembly and trial cost too.
 struct GpuTiming {
-    /// The linearizations on the device, summed; zero when the CPU
+    /// The linearizations on the device, summed; zero when the host
     /// assembles.
     double assembly;
     /// The damped attempts on the device, summed: the reduction, the
@@ -581,16 +581,16 @@ enum class GpuWork : uint32_t {
     /// Nothing: the solve took a route that does not run on a device
     /// (conjugate gradients, the envelope, the scalar factorization).
     Unused = 0,
-    /// The damped solves; the assembly ran on the CPU
-    /// (GpuReport::cpu_assembly says why) and the Hessian's values were
+    /// The damped solves; the assembly ran on the host
+    /// (GpuReport::host_assembly says why) and the Hessian's values were
     /// uploaded for each.
     Solves = 1,
     /// The assembly, the damped solves and the LM loop's vectors.
     Loop = 2,
 };
 
-/// Why a GPU solve assembled on the CPU (GpuReport::cpu_assembly).
-enum class CpuAssembly : uint32_t {
+/// Why a GPU solve assembled on the host (GpuReport::host_assembly).
+enum class HostAssembly : uint32_t {
     /// It did not: the device assembled, or was not used.
     None = 0,
     /// SparseOptions::gpu_assembly was off.
@@ -627,10 +627,10 @@ struct GpuReport {
     /// without mixed_precision. Otherwise it is in the wide values.
     bool f32_system;
     /// How much of the solve ran on the device, and when the assembly ran
-    /// on the CPU, why (the reason a model has no device form in
+    /// on the host, why (the reason a model has no device form in
     /// no_device_form, empty otherwise).
     GpuWork work;
-    CpuAssembly cpu_assembly;
+    HostAssembly host_assembly;
     const char* no_device_form;
     /// Device memory the device's state holds after the solve, in use or
     /// free, in bytes, and the device buffers it has allocated over its

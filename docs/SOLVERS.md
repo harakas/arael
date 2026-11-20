@@ -1127,8 +1127,8 @@ if let Some(gpu) = &r.gpu {
 
 - `Loop`: the assembly, the damped solves and the LM loop's vectors.
 - `Solves(why)`: the damped solves; the gradient and the Hessian were
-  assembled on the CPU and the Hessian's values uploaded for each. `why`
-  is a `CpuAssembly`: `Asked` (`with_gpu_assembly(false)`),
+  assembled on the host and the Hessian's values uploaded for each. `why`
+  is a `HostAssembly`: `Asked` (`with_gpu_assembly(false)`),
   `NoDeviceForm(reason)` (the model has none, with
   `device_unsupported`'s reason) or `NoF64` (an f64 root on a device
   without f64).
@@ -1190,13 +1190,12 @@ LM converged in 12 iterations (9 accepted, 3 retried)
                   + accepted   - rejected   x not positive definite
   backend   Schur: 480 blocks / 1440 params eliminated, 360 kept
             fill ratio 0.45, ordered by Amd, factored by the block supernodal Cholesky
-  gpu       cuda:0 NVIDIA GeForce RTX 4090 (sm_89), wide f64
-            assembly, damped solves and the LM loop on the device, f64 factor, system in f64, 412.3 MB reserved in 57 buffers
 ```
 
-The timing block appears only when `gather_timing` was set, the backend line
-only when the backend reported a plan, and the gpu block only when the solve
-was given a GPU (see What ran on the GPU).
+The timing block appears only when `gather_timing` was set, and the backend line
+only when the backend reported a plan. A solve given a GPU adds a `gpu` block
+(see What ran on the GPU), and with its loop on the device the timing rows are
+the host's and the device's sides of it (see On a GPU).
 
 ## Profiling a solve -- `LmTiming`
 
@@ -1268,8 +1267,8 @@ The report prints the parts under the analysis row, with what is left of
 the analysis as `other`:
 
 ```text
-    analysis         18.20 ms   26.1%  #####...............    1 call
-                  blocks 0.76, structure 7.03, ordering 1.79, factor 1.48, gpu plan 2.50, gpu layout 4.61 ms
+    analysis         17.95 ms   25.8%  #####...............    1 call
+                  blocks 0.85, structure 7.45, ordering 1.46, factor 1.43, gpu plan 2.17, gpu layout 4.58, other 0.01 ms
 ```
 
 ### On a GPU -- `LmTiming::gpu`
@@ -1290,14 +1289,29 @@ pub struct GpuTiming {
 }
 ```
 
-`assembly` is zero when the CPU assembles (`GpuWork::Solves`); `attempts`
-then starts at the upload of the Hessian's values. The report prints it as
-a row of the timing block:
+`assembly` is zero when the host assembles (`GpuWork::Solves`); `attempts`
+then starts at the upload of the Hessian's values.
+
+With the loop on the device (`GpuWork::Loop`) the report names the host's
+rows for what the host does there, `queueing` (`assembly`: the
+linearizations queued, the first one waited for) and `device wait`
+(`linear_solve`: one wait an attempt), leaves out `cost eval` and
+`advance` (the trial cost and the accepted step are the device's), and
+adds the device's own time:
 
 ```text
-    linear solve     50.60 ms   72.5%  ##############......   19 calls, first 2.66 ms
-    gpu              50.64 ms  on the device: assembly 3.16 ms in 10 calls, attempts 47.48 ms in 19 calls
+  time      69.59 ms
+    analysis         17.95 ms   25.8%  #####...............    1 call
+                  blocks 0.85, structure 7.45, ordering 1.46, factor 1.43, gpu plan 2.17, gpu layout 4.58, other 0.01 ms
+    queueing          0.75 ms    1.1%  ....................   10 calls, first 0.68 ms
+    device wait      50.57 ms   72.7%  ###############.....   19 calls, first 2.78 ms
+    on the device    50.62 ms  assembly 3.16 ms in 10 calls, attempts 47.46 ms in 19 calls
+  gpu       cuda:0 NVIDIA GeForce RTX 4090 (sm_89), wide f64
+            assembly, damped solves and the LM loop on the device, f32 factor, system in f32, 222.3 MB reserved in 7 buffers
 ```
+
+With the assembly on the host the rows keep their names, and `on the
+device` has the attempts alone.
 
 Timing a GPU solve adds two markers to the device's queue around each
 linearization and each attempt, about ten microseconds an attempt on CUDA;
