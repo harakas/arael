@@ -591,9 +591,11 @@ mod tests {
         }
     }
 
-    /// The f32 system (`GpuSchurParams::f32_reduction`, an f32 root's
-    /// values): S, the vectors and the products in f32 with wide dot
-    /// products, as the CPU's f32 route.
+    /// The f32 system (`GpuSchurParams::f32_reduction`): S, the vectors and
+    /// the products in f32 with wide dot products, as the CPU's f32 route.
+    /// From an f32 root's values, and from wide values rounded to f32 on
+    /// the device (an f64 solve under mixed precision), whose step comes
+    /// back in the wide scalar.
     #[test]
     fn the_f32_system_solves_as_the_cpus_f32_route() {
         let (h, dense, rhs, _, sym) = setup(40, 300, 5);
@@ -614,6 +616,16 @@ mod tests {
             assert!(e < 1e-3, "{wide:?}: the f32 step against the CPU's f32 one, err/max {e}");
             let res = rel_residual(&dense, n, &delta, &rhs);
             assert!(res < 1e-3, "{wide:?}: residual {res}");
+            // wide values, the system in f32
+            let mut g = GpuSchur::with_params(&dev, &sym, h.symbolic(), wide, &params).unwrap();
+            assert!(g.f32_reduction() && !g.values().is_f32());
+            let mut solver = GpuCg::new(&g, &cg, &GpuCgParams::default()).unwrap();
+            let mut delta = vec![0.0f64; n];
+            let stats = solver.solve(&mut g, h.vals(), &rhs, &mut delta).unwrap();
+            assert!(stats.iters > 0 && stats.iters.abs_diff(cpu.iters) <= 4, "{wide:?}, wide values: {stats:?} against {cpu:?}");
+            let e = err_max(&delta, &want);
+            assert!(e < 1e-3, "{wide:?}, wide values: the step against the CPU's f32 one, err/max {e}");
+            assert!(rel_residual(&dense, n, &delta, &rhs) < 1e-3, "{wide:?}, wide values");
         }
     }
 

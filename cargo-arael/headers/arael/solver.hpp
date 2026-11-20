@@ -365,6 +365,9 @@ struct SparseOptionsT {
     /// under refine_tol. Off by default. An f32 solve on a GPU forms the
     /// system it factorizes in f32, and under mixed_precision in the GPU's
     /// wide values (with max_refinements 0: formed wide, not refined).
+    /// Conjugate gradients on a GPU (SchurSolve::Iterative) have no
+    /// factor: under mixed_precision an f64 solve forms and solves the
+    /// reduced system in f32 there.
     bool mixed_precision;
     uint32_t max_refinements;
     double refine_tol;
@@ -637,8 +640,10 @@ struct GpuReport {
     GpuWide wide;
     /// How the device solves the system: a factor or conjugate gradients.
     GpuSolve solve;
-    /// The system the device forms and solves is f32: an f32 solve
-    /// without mixed_precision. Otherwise it is in the wide values.
+    /// The system the device forms and solves is f32: with a factor, an
+    /// f32 solve without mixed_precision; with conjugate gradients, an
+    /// f32 solve or an f64 one under mixed_precision. Otherwise it is in
+    /// the wide values.
     bool f32_system;
     /// How much of the solve ran on the device, and when the assembly ran
     /// on the host, why (the reason a model has no device form in

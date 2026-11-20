@@ -464,6 +464,20 @@ fn conjugate_gradients_on_the_device_reach_the_optimum() {
         assert!(g.solve == Some(GpuSolve::ConjugateGradients) && g.work == GpuWork::Loop && g.f32_system, "{}: {g:?}", label(&d));
         assert!(off(c) <= 1e-4, "{}: {c} against the optimum {optimum}", label(&d));
     }
+    // an f64 model under mixed precision: the reduced system formed and
+    // solved in f32, the assembly, the costs and the step f64, so the
+    // solve lands on the f64 optimum closer than an f32 model's does
+    for d in devices() {
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let opts = options(Some(&d), true).with_iterative_schur(cg).with_mixed_precision(Some(Default::default()));
+        let mut solver = SparseFaer::<f64>::from_options(&opts);
+        let c = s.solve_with(&mut solver, &to_the_optimum()).unwrap().end_cost;
+        let g = solver.gpu_report().expect("a GPU was given");
+        assert!(g.solve == Some(GpuSolve::ConjugateGradients) && g.work == GpuWork::Loop && g.f32_system, "{}: {g:?}", label(&d));
+        assert!(solver.plan().unwrap().refinements.is_none(), "{}: nothing is refined", label(&d));
+        assert!(off(c) <= 1e-6, "{}: {c} against the optimum {optimum}", label(&d));
+    }
 }
 
 /// `MixedPrecision` with no refinement steps: an f32 solve under it forms

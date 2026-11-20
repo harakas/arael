@@ -323,6 +323,9 @@ class SparseOptions(ctypes.Structure):
         # under refine_tol. An f32 solve on a GPU forms the system it
         # factorizes in f32, and under mixed_precision in the GPU's wide
         # values (with max_refinements 0: formed wide, not refined).
+        # Conjugate gradients on a GPU (SchurSolve.ITERATIVE) have no
+        # factor: under mixed_precision an f64 solve forms and solves
+        # the reduced system in f32 there.
         ("mixed_precision", ctypes.c_bool),
         ("max_refinements", ctypes.c_uint32),
         ("refine_tol", ctypes.c_double),
@@ -495,8 +498,10 @@ class GpuReport:
     memory; `wide` (GpuWide) the scalar of its wide values; `solve`
     (GpuSolve) how the device solves the system, a factor or conjugate
     gradients; `f32_system` that the system the device forms and solves
-    is f32 (an f32 solve without mixed_precision; otherwise it is in the
-    wide values); `work` (GpuWork) how much of the solve ran
+    is f32 (with a factor, an f32 solve without mixed_precision; with
+    conjugate gradients, an f32 solve or an f64 one under
+    mixed_precision; otherwise it is in the wide values); `work`
+    (GpuWork) how much of the solve ran
     there, with `host_assembly` (HostAssembly) and `no_device_form` why the
     assembly ran on the host when it did; `reserved_bytes` the device
     memory its state holds and `buffers_created` the device buffers it

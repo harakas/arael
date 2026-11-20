@@ -400,7 +400,10 @@ DEFAULT, the default: the device's own, df32 on Metal, else f64),
 and `gpu_staging` (`GpuStaging` PINNED / PAGEABLE), as in the
 C++ interface (docs/CXX.md). An f32 solve forms the system it
 factorizes in f32, and under `mixed_precision` in the wide values (with
-`max_refinements` 0: formed wide, not refined). `LmResult.gpu` is what
+`max_refinements` 0: formed wide, not refined). With conjugate gradients
+on the device (`SchurSolve.ITERATIVE`), which have no factor, an f64
+solve under `mixed_precision` forms and solves the reduced system in
+f32, its assembly, costs and step f64. `LmResult.gpu` is what
 the solve did on the device, a `GpuReport` (`None` without a GPU):
 `name`, `target`, `integrated`, `wide`, `solve` (`GpuSolve` NONE /
 FACTOR / FACTOR_F32 / CONJUGATE_GRADIENTS: how the device solves the

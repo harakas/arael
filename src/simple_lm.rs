@@ -5189,7 +5189,11 @@ pub enum BlockSupernodalMode {
 ///
 /// Only the supernodal block route factors this way
 /// ([`BlockSupernodalMode`]); the scalar, envelope and iterative routes
-/// ignore the setting. The refinement itself runs in `f64` whatever the
+/// ignore the setting, with one exception: conjugate gradients on a GPU
+/// ([`SchurMethod::Iterative`] with [`SparseFaerOptions::with_gpu`]), which
+/// have no factor, take it as the reduced system formed and solved in
+/// `f32` under an `f64` solve (the refinement's settings unused), while
+/// the assembly, the costs and the step stay `f64`. The refinement itself runs in `f64` whatever the
 /// solver's scalar: the residual is accumulated in `f64` from the matrix's
 /// entries and the iterate kept in `f64` until it is handed back. An `f32`
 /// solver's factor is single precision already, so there the setting adds
@@ -5581,9 +5585,10 @@ pub struct GpuReport {
     /// the device.
     pub solve: Option<GpuSolve>,
     /// Whether the system the device forms and solves (the reduced one, or
-    /// the whole system) is `f32`, as the CPU's f32 route forms it: an f32
-    /// solve without [`MixedPrecision`]. Otherwise it is in the wide
-    /// values.
+    /// the whole system) is `f32`, as the CPU's f32 route forms it. With a
+    /// factor: an f32 solve without [`MixedPrecision`]. With conjugate
+    /// gradients: an f32 solve, or an f64 one under [`MixedPrecision`].
+    /// Otherwise it is in the wide values.
     pub f32_system: bool,
     /// How much of the solve ran on the device.
     pub work: GpuWork,
@@ -5919,6 +5924,20 @@ impl SparseFaerOptions {
     /// let opts = SparseFaerOptions::default()
     ///     .with_gpu(Some(GpuDevice::cuda(0)))
     ///     .with_mixed_precision(Some(wide_system));
+    /// ```
+    ///
+    /// With conjugate gradients on a GPU ([`Self::with_iterative_schur`])
+    /// there is no factor: an f64 solve under mixed precision forms and
+    /// solves the reduced system in f32 there, its assembly, costs and
+    /// step f64. On the CPU conjugate gradients ignore the setting, with a
+    /// warning.
+    ///
+    /// ```ignore
+    /// let opts = SparseFaerOptions::default()
+    ///     .with_policy(SchurPolicy::Force)
+    ///     .with_iterative_schur(CgParams::default())
+    ///     .with_gpu(Some(GpuDevice::cuda(0)))
+    ///     .with_mixed_precision(Some(MixedPrecision::default()));
     /// ```
     pub fn with_mixed_precision(mut self, mixed: Option<MixedPrecision>) -> Self {
         self.mixed_precision = mixed;
@@ -6701,11 +6720,12 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> GpuSide<T> {
 
     /// Build the device solver that solves the reduced system by conjugate
     /// gradients under `cg`, when a GPU is given; the reduction it runs on
-    /// follows ([`prepare_schur`](Self::prepare_schur)). The system is in
-    /// the solver's scalar: f32 for an f32 solve, else the wide values. The
+    /// follows ([`prepare_schur`](Self::prepare_schur)). The system is
+    /// formed and solved in f32 for an f32 solve, and for an f64 one with
+    /// `f32_system` (mixed precision); else in the wide values. The
     /// device's work is timed when `timed`. Without the `gpu` feature, or
     /// with a runtime not compiled in, the solve is unavailable.
-    fn prepare_cg(&mut self, cg: arael_faer::cg::CgParams, timed: bool) -> Result<(), SolveFailureKind> {
+    fn prepare_cg(&mut self, cg: arael_faer::cg::CgParams, f32_system: bool, timed: bool) -> Result<(), SolveFailureKind> {
         let Some(dev) = self.given.as_ref() else {
             return Ok(());
         };
@@ -6713,7 +6733,7 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> GpuSide<T> {
         {
             self.solver = None;
             metal_supports(dev, false)?;
-            let f32_reduction = core::mem::size_of::<T>() == 4;
+            let f32_reduction = core::mem::size_of::<T>() == 4 || f32_system;
             let mut solver = device_solver(dev, crate::gpu_solver::Method::Cg(cg), f32_reduction)?;
             solver.set_timing(timed);
             self.solver = Some(solver);
@@ -6721,7 +6741,7 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> GpuSide<T> {
         }
         #[cfg(not(feature = "gpu"))]
         {
-            let _ = (dev, cg, timed);
+            let _ = (dev, cg, f32_system, timed);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "arael built without the `gpu` feature" }.into())
         }
     }
@@ -8992,12 +9012,16 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // device, on the reduction built below; the implicit route
             // stays on the CPU.
             if let (false, Some(cg)) = (implicit, self.schur_solve.cg()) {
-                self.gpu.prepare_cg(cg, self.measure)?;
+                self.gpu.prepare_cg(cg, self.sn_num.mixed.is_some(), self.measure)?;
             }
-            if self.sn_num.mixed.is_some() {
+            // Under mixed precision the device forms and solves the reduced
+            // system in f32; on the CPU there is no factor to keep in f32
+            // and the setting does nothing.
+            if self.sn_num.mixed.is_some() && !self.gpu.built() {
                 warn!(
-                    "mixed precision is ignored: it names the scalar of a factor, and conjugate gradients \
-                     (SparseFaerOptions::with_iterative_schur, with_implicit_schur) have none"
+                    "mixed precision is ignored: conjugate gradients on the CPU solve in the solver's scalar. \
+                     On a GPU (SparseFaerOptions::with_gpu, with_iterative_schur) they form and solve the \
+                     reduced system in f32 under it"
                 );
             }
             // the plan names the route from here on: no iteration yet

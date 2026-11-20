@@ -327,6 +327,7 @@ fn solve64_schur_cg(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmCon
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
         .with_iterative_schur(cg_options())
+        .with_mixed_precision(bench_harness::arael::mixed_precision())
         .with_gpu(bench_harness::arael::gpu()));
     let r = arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {

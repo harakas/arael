@@ -948,8 +948,13 @@ the same stopping rule as on the CPU. The iterations are queued in
 rounds, and the solver waits once a round for their status: usually one
 round a damped solve, sized from the solve before it. Nothing is ordered
 or factorized, so the device holds no factor. The system is in the
-solver's scalar: f32 for an f32 solve, else the wide values.
-`MixedPrecision` names a factor's scalar and is ignored, with a warning.
+solver's scalar: f32 for an f32 solve, else the wide values. Under
+`MixedPrecision` an f64 solve forms and solves the reduced system in f32
+there (the refinement's settings are unused), while its assembly, its
+costs and its step stay f64: less device time an attempt at the f64
+model's result quality, and it solves bundle adjustments an f32 model
+cannot assemble. On the CPU conjugate gradients ignore `MixedPrecision`,
+with a warning.
 The assembly and the LM loop run on the device as with a factor.
 `with_implicit_schur`, which does not form the reduced system, stays on
 the CPU.
@@ -1142,7 +1147,7 @@ if let Some(gpu) = &r.gpu {
 | `integrated` | the device shares the host's memory: an integrated GPU, or the CPU device |
 | `wide` | the scalar of its wide values, f64 or df32 |
 | `solve` | how the device solves the system: `Some(GpuSolve::Factor { f32 })` (the factor is f32 for an f32 solve, or under `MixedPrecision`), `Some(GpuSolve::ConjugateGradients)`, or `None` when the device was not used |
-| `f32_system` | the system the device forms and solves (S, or H) is f32: an f32 solve without `MixedPrecision`; otherwise it is in the wide values |
+| `f32_system` | the system the device forms and solves (S, or H) is f32: with a factor, an f32 solve without `MixedPrecision`; with conjugate gradients, an f32 solve or an f64 one under `MixedPrecision`; otherwise it is in the wide values |
 | `work` | how much of the solve ran on the device (`GpuWork`, below) |
 | `reserved_bytes`, `buffers_created` | the device memory the `GpuDevice`'s state holds, and the buffers it has allocated over its life |
 

@@ -109,20 +109,26 @@ fn a_solve_logs_what_its_gpu_does() {
     // conjugate gradients on the formed reduced system run on the device
     // too: no warning, and under verbose each solve's iterations
     let (log, r) = solve(reduced().with_iterative_schur(Default::default()).with_gpu(Some(GpuDevice::cpu())), true);
-    assert_eq!(r.gpu.unwrap().solve, Some(arael::simple_lm::GpuSolve::ConjugateGradients));
+    let g = r.gpu.unwrap();
+    assert!(g.solve == Some(arael::simple_lm::GpuSolve::ConjugateGradients) && !g.f32_system, "an f64 solve, its system in f64: {g:?}");
     assert!(unused(&log).is_empty(), "{log:?}");
     let line = log.iter().find(|(_, m)| m.starts_with("gpu schur (cpu, cg): ")).unwrap_or_else(|| panic!("a solve's line in {log:?}"));
     assert!(line.1.contains("conjugate gradients") && line.1.contains(" iterations (") && line.1.contains(" queued) in 1 round"), "{}", line.1);
 
-    // mixed precision names a factor's scalar: ignored by conjugate
-    // gradients, with a warning, on the device and on the host
+    // mixed precision with conjugate gradients: on the device the reduced
+    // system in f32, no warning; on the CPU ignored, with a warning
     let mixed = |log: &[(Level, String)]| log.iter().filter(|(l, m)| *l == Level::Warn && m.starts_with("mixed precision is ignored")).count();
     assert_eq!(mixed(&log), 0, "{log:?}");
-    for gpu in [None, Some(GpuDevice::cpu())] {
-        let opts = reduced().with_iterative_schur(Default::default()).with_mixed_precision(Some(Default::default())).with_gpu(gpu);
-        let (log, _) = solve(opts, false);
-        assert_eq!(mixed(&log), 1, "{log:?}");
-    }
+    let cg_mixed = || reduced().with_iterative_schur(Default::default()).with_mixed_precision(Some(Default::default()));
+    let (log, r) = solve(cg_mixed().with_gpu(Some(GpuDevice::cpu())), false);
+    let g = r.gpu.unwrap();
+    assert!(g.f32_system && g.solve == Some(arael::simple_lm::GpuSolve::ConjugateGradients), "{g:?}");
+    assert_eq!(mixed(&log), 0, "{log:?}");
+    let (log, _) = solve(cg_mixed(), false);
+    assert_eq!(mixed(&log), 1, "{log:?}");
+    // the implicit route is on the CPU also with a GPU given
+    let (log, _) = solve(reduced().with_implicit_schur(Default::default()).with_mixed_precision(Some(Default::default())).with_gpu(Some(GpuDevice::cpu())), false);
+    assert_eq!(mixed(&log), 1, "{log:?}");
 
     // given and not used: one warning a solve, naming the route that ran
     let cases = [

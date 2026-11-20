@@ -295,7 +295,10 @@ views are named by their container's nature: `PathPosesDeque`,
   slow). An f32 solve without `mixed_precision` forms the system it
   factorizes in f32, as the CPU's f32 route; with `mixed_precision` it
   forms it in the wide values (with `max_refinements` 0: formed wide,
-  not refined). `LmResult::gpu()` returns what the solve did on the
+  not refined). With conjugate gradients on the device
+  (`SchurSolve::Iterative`), which have no factor, an f64 solve under
+  `mixed_precision` forms and solves the reduced system in f32, its
+  assembly, costs and step f64. `LmResult::gpu()` returns what the solve did on the
   device, an `option<GpuReport>` (empty without a GPU): the device's
   `name` and compile `target`, `wide`, `solve` (`GpuSolve` None /
   Factor / FactorF32 / ConjugateGradients: how the device solves the
