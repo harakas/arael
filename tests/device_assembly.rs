@@ -4854,6 +4854,71 @@ fn a_solve_reports_what_ran_on_its_gpu() {
     }
 }
 
+/// A timed device solve's setup has the device's parts: its plan of the
+/// reduction and the device assembly's layout, on the reduced route and on
+/// the whole-system one.
+#[test]
+fn a_timed_device_solve_itemises_the_devices_setup() {
+    let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 5, gather_timing: true, ..Default::default() };
+    for d in devices() {
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let r = s.solve_with(&mut arael::simple_lm::SparseFaer::<f64>::from_options(&options(Some(&d), true)), &cfg).unwrap();
+        let t = r.timing.as_ref().unwrap();
+        let setup = t.setup.expect("the sparse backend times its setup");
+        assert!(!setup.gpu_plan.is_zero() && !setup.gpu_layout.is_zero() && !setup.factor.is_zero(), "{}: {setup:?}", label(&d));
+        assert!(setup.total() <= t.analysis, "{}: {setup:?} within {:?}", label(&d), t.analysis);
+        // the device loop's later linearizations do not go through
+        // `compute`: one analysis, its setup counted once
+        assert_eq!(t.analysis_count, 1, "{}", label(&d));
+        assert!(r.report().contains("gpu plan ") && r.report().contains("gpu layout "), "{}:\n{}", label(&d), r.report());
+
+        let (poses, edges, prior) = pose_graph::<f64>(40, 3);
+        let mut s = Graph2D { poses, edges, prior };
+        let r = s.solve_with(&mut arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(Some(&d))), &cfg).unwrap();
+        let t = r.timing.as_ref().unwrap();
+        let setup = t.setup.expect("the sparse backend times its setup");
+        assert!(!setup.gpu_plan.is_zero() && !setup.gpu_layout.is_zero() && !setup.factor.is_zero(), "{}, whole: {setup:?}", label(&d));
+        assert!(setup.weighing.is_zero() && setup.total() <= t.analysis, "{}, whole: {setup:?} within {:?}", label(&d), t.analysis);
+    }
+}
+
+/// A timed device solve reports the device's own time (`LmTiming::gpu`),
+/// from stamps in its queue: every attempt timed, and with the device
+/// assembly every linearization, which the host's phases see only as
+/// waits. With the assembly on the CPU the attempts alone. An untimed
+/// solve stamps nothing, and a CPU solve has no device time.
+#[test]
+fn a_timed_device_solve_reports_the_devices_time() {
+    let solve = |opts: &arael::simple_lm::SparseFaerOptions, timed: bool| {
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 12, gather_timing: timed, ..Default::default() };
+        s.solve_with(&mut arael::simple_lm::SparseFaer::<f64>::from_options(opts), &cfg).unwrap()
+    };
+    assert_eq!(solve(&options(None, true), true).timing.unwrap().gpu, None, "no device, no device time");
+    for d in devices() {
+        assert!(solve(&options(Some(&d), true), false).timing.is_none(), "{}", label(&d));
+
+        let r = solve(&options(Some(&d), true), true);
+        let t = r.timing.as_ref().unwrap();
+        let g = t.gpu.unwrap_or_else(|| panic!("{}: a timed device solve", label(&d)));
+        assert_eq!(g.attempt_count, r.iterations, "{}: every attempt timed", label(&d));
+        // the first linearization and one after each accepted step that
+        // another attempt followed
+        assert!(g.assembly_count >= 1 && g.assembly_count <= r.accepted_iterations + 1, "{}: {g:?} of {} accepted", label(&d), r.accepted_iterations);
+        assert!(!g.assembly.is_zero() && !g.attempts.is_zero(), "{}: {g:?}", label(&d));
+        assert!(g.assembly + g.attempts <= t.total, "{}: {g:?} within {:?}", label(&d), t.total);
+        let text = r.report();
+        assert!(text.contains("    gpu ") && text.contains("on the device: assembly ") && text.contains(&format!("in {} calls\n", g.attempt_count)), "{}:\n{text}", label(&d));
+
+        let r = solve(&options(Some(&d), false), true);
+        let g = r.timing.as_ref().unwrap().gpu.unwrap_or_else(|| panic!("{}: a timed device solve", label(&d)));
+        assert_eq!((g.assembly_count, g.attempt_count), (0, r.iterations), "{}: the CPU assembles", label(&d));
+        assert!(g.assembly.is_zero() && !g.attempts.is_zero(), "{}: {g:?}", label(&d));
+    }
+}
+
 /// Data fields whose paths look alike once spelled as record fields:
 /// `p.x` and `p_x` of an entity, `q.x` and `q_x` of the root.
 #[arael::model]

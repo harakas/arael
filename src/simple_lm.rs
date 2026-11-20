@@ -1356,6 +1356,12 @@ pub struct LmTiming {
     /// Zero for a backend that does no analysis (`Dense`, `Band`) or does not
     /// report it.
     pub analysis: Duration,
+    /// Where `analysis` went, from a backend that times its parts (the
+    /// sparse one); `None` otherwise.
+    pub setup: Option<SetupTiming>,
+    /// The device's own time in a solve on a GPU; `None` without one, and
+    /// on a device that keeps no timestamps (Metal).
+    pub gpu: Option<GpuTiming>,
     /// Damped linear solve (factorization + triangular solve) summed over
     /// every inner attempt.
     pub linear_solve: Duration,
@@ -1398,6 +1404,107 @@ pub struct LmTiming {
     /// Populated only when [`LmConfig::gather_timing`] is set; empty otherwise,
     /// and nothing is computed for it.
     pub steps: std::vec::Vec<LmStep>,
+}
+
+/// The device's own time in a GPU solve ([`LmTiming::gpu`]), from stamps
+/// in its queue read at the waits the solve already makes. The host's
+/// phases cannot show it: the host queues a linearization and returns, and
+/// waits once per attempt, so on the device loop [`LmTiming::assembly`]
+/// and [`LmTiming::cost_eval`] read near zero and
+/// [`LmTiming::linear_solve`] holds the device's assembly and trial cost
+/// with its solve.
+///
+/// ```ignore
+/// let r = model.solve_with(&mut solver, &LmConfig::default().with_gather_timing(true))?;
+/// if let Some(gpu) = r.timing.unwrap().gpu {
+///     println!("assembly {:?}, attempts {:?}", gpu.assembly, gpu.attempts);
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GpuTiming {
+    /// The linearizations on the device, summed: the accepted step applied,
+    /// the gradient and the Hessian assembled, the diagonal read off. Zero
+    /// when the CPU assembles ([`GpuWork::Solves`]).
+    pub assembly: Duration,
+    /// The linearizations timed.
+    pub assembly_count: usize,
+    /// The damped attempts on the device, summed: the damping, the
+    /// reduction, the factorization, the solve with its refinement, the
+    /// back-substitution, the trial point and its cost; when the CPU
+    /// assembles, the upload of the Hessian's values, the solve and the
+    /// step.
+    pub attempts: Duration,
+    /// The attempts timed.
+    pub attempt_count: usize,
+}
+
+/// Where a structure's one-time setup went ([`LmTiming::setup`]): the parts
+/// of [`LmTiming::analysis`] the sparse backend times. A part a route does
+/// not have, or does not time, is zero; the parts add up to at most
+/// `analysis`.
+///
+/// ```ignore
+/// let r = model.solve_sparse(&LmConfig::default().with_gather_timing(true))?;
+/// let setup = r.timing.unwrap().setup.unwrap();
+/// println!("ordering {:?} of {:?}", setup.ordering, setup.total());
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SetupTiming {
+    /// Finding the model's blocks and the ones to marginalize.
+    pub blocks: Duration,
+    /// The Hessian's block pattern, the blocks' positions in it and, when
+    /// reducing, the Schur symbolic (the reduced system's pattern).
+    pub structure: Duration,
+    /// On a GPU, opening the device: its first use in a process creates
+    /// its context and stream (tens to hundreds of milliseconds); nothing
+    /// after that.
+    pub gpu_open: Duration,
+    /// Ordering the system that is factorized.
+    pub ordering: Duration,
+    /// Pricing the reduced route against the whole system
+    /// ([`SchurPolicy::Auto`]'s exact comparison); zero when it was skipped.
+    pub weighing: Duration,
+    /// The symbolic factorization and the factor's buffers; on a GPU the
+    /// device factor's plan and kernels.
+    pub factor: Duration,
+    /// On a GPU, the device's plan of the reduction.
+    pub gpu_plan: Duration,
+    /// On a GPU that assembles, the device assembly's layout: the model's
+    /// image and its kernels.
+    pub gpu_layout: Duration,
+}
+
+impl SetupTiming {
+    /// The parts, named, in the order they run.
+    pub fn parts(&self) -> [(&'static str, Duration); 8] {
+        [
+            ("blocks", self.blocks),
+            ("structure", self.structure),
+            ("gpu open", self.gpu_open),
+            ("ordering", self.ordering),
+            ("weighing", self.weighing),
+            ("factor", self.factor),
+            ("gpu plan", self.gpu_plan),
+            ("gpu layout", self.gpu_layout),
+        ]
+    }
+
+    /// The sum of the parts.
+    pub fn total(&self) -> Duration {
+        self.parts().iter().map(|p| p.1).sum()
+    }
+
+    /// Add `other`'s parts: a solve whose structure was set up twice.
+    fn add(&mut self, other: &SetupTiming) {
+        self.blocks += other.blocks;
+        self.structure += other.structure;
+        self.gpu_open += other.gpu_open;
+        self.ordering += other.ordering;
+        self.weighing += other.weighing;
+        self.factor += other.factor;
+        self.gpu_plan += other.gpu_plan;
+        self.gpu_layout += other.gpu_layout;
+    }
 }
 
 /// One attempted LM step. The per-iteration timeline in [`LmTiming::steps`].
@@ -1773,6 +1880,21 @@ impl<T: Float> LmResult<T> {
         };
         if t.analysis_count > 0 {
             out.push_str(&row("analysis", t.analysis, t.analysis, t.analysis_count));
+            // where the analysis went: the parts the backend timed, and
+            // what is left of it
+            if let Some(setup) = &t.setup {
+                let ms = |d: Duration| d.as_secs_f64() * 1e3;
+                // the parts that show at two decimals
+                let mut parts: std::vec::Vec<String> =
+                    setup.parts().iter().filter(|p| ms(p.1) >= 0.005).map(|(name, d)| format!("{name} {:.2}", ms(*d))).collect();
+                let other = t.analysis.saturating_sub(setup.total());
+                if !parts.is_empty() && ms(other) >= 0.005 {
+                    parts.push(format!("other {:.2}", ms(other)));
+                }
+                if !parts.is_empty() {
+                    out.push_str(&format!("                  {}\n", style.paint("2", &format!("{} ms", parts.join(", ")))));
+                }
+            }
         }
         out.push_str(&row("assembly", t.assembly, t.first_assembly, t.assembly_count));
         out.push_str(&row(
@@ -1783,6 +1905,20 @@ impl<T: Float> LmResult<T> {
         ));
         out.push_str(&row("cost eval", t.cost_eval, t.first_cost_eval, t.cost_eval_count));
         out.push_str(&row("advance", t.advance, t.first_advance, t.advance_count));
+        // The device's own time, which the rows above see only as the
+        // host's waits.
+        if let Some(g) = &t.gpu {
+            let ms = |d: Duration| d.as_secs_f64() * 1e3;
+            out.push_str(&format!(
+                "    {:<13} {:>8.2} ms  on the device: assembly {:.2} ms in {} calls, attempts {:.2} ms in {} calls\n",
+                "gpu",
+                ms(g.assembly + g.attempts),
+                ms(g.assembly),
+                g.assembly_count,
+                ms(g.attempts),
+                g.attempt_count,
+            ));
+        }
         // After the solve and outside `total`, so no share of it.
         if t.covariance > Duration::ZERO {
             out.push_str(&format!(
@@ -2202,6 +2338,20 @@ pub trait LmSolver<T: Float> {
     /// steady-state compute would charge the trait call's own overhead to
     /// analysis on every iteration.
     fn assembly_time(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Where the analysis of the LAST [`compute`](Self::compute) went, from
+    /// a backend that times its parts. `None` when that compute did no
+    /// analysis, and when [`LmConfig::gather_timing`] is off.
+    fn setup_timing(&self) -> Option<SetupTiming> {
+        None
+    }
+
+    /// The device's own time in this solve so far, from a backend on a
+    /// GPU, surfaced in [`LmTiming::gpu`]. `None` without a GPU, and when
+    /// [`LmConfig::gather_timing`] is off.
+    fn gpu_timing(&self) -> Option<GpuTiming> {
         None
     }
 
@@ -3118,6 +3268,10 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         }
 
         let t_asm = gather.then(Instant::now);
+        // Whether this linearization goes through `compute`: the backend's
+        // assembly and setup times are that call's, stale on the device
+        // loop's linearizations, which do not make it.
+        let computed = !resident;
         let computed_cost = if resident {
             // In place on the device, no wait. Only the first
             // linearization's cost is used, and that one comes from
@@ -3156,7 +3310,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             // the rest of the call is its structural analysis. A backend that
             // reports nothing -- or a steady-state compute, where the whole call
             // is assembly -- yields a zero analysis.
-            match solver.assembly_time() {
+            match if computed { solver.assembly_time() } else { None } {
                 Some(a) => {
                     asm_dt = a.min(dt);
                     ana_dt = dt - asm_dt;
@@ -3171,6 +3325,9 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 timing.analysis += ana_dt;
                 timing.analysis_count += 1;
             }
+            if let Some(setup) = if computed { solver.setup_timing() } else { None } {
+                timing.setup.get_or_insert_with(SetupTiming::default).add(&setup);
+            }
         }
         if first {
             // The cost is a free byproduct of assembly; using it here
@@ -3181,6 +3338,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             // Already at zero cost — nothing to do
             if start_cost == T::zero() {
                 if let Some(s) = solve_start { timing.total = s.elapsed(); }
+                timing.gpu = solver.gpu_timing();
                 return Ok(LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
                     accepted_iterations: 0, status: LmStatus::Converged, final_lambda: lambda,
                     timing: gather.then_some(timing), solver: solver.report(), gpu: solver.gpu_report(),
@@ -3195,6 +3353,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             // improve.
             if start_cost <= config.cost_threshold {
                 if let Some(s) = solve_start { timing.total = s.elapsed(); }
+                timing.gpu = solver.gpu_timing();
                 return Ok(LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
                     accepted_iterations: 0, status: LmStatus::CostThreshold, final_lambda: lambda,
                     timing: gather.then_some(timing), solver: solver.report(), gpu: solver.gpu_report(),
@@ -3836,6 +3995,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         }
     }
     if let Some(s) = solve_start { timing.total = s.elapsed(); }
+    timing.gpu = solver.gpu_timing();
     let result = LmResult {
         x: cur_x,
         start_cost,
@@ -5993,6 +6153,9 @@ struct SnNumeric<T> {
     #[cfg(feature = "gpu")]
     gpu_solver: Option<Box<dyn crate::gpu_solver::GpuSolver<T>>>,
     gpu_assembly: bool,
+    /// Whether the device's work is timed (`LmConfig::gather_timing`): a
+    /// device solver made later takes it.
+    timed: bool,
     rf: Refine,
 }
 
@@ -6132,6 +6295,7 @@ impl<T> SnNumeric<T> {
             #[cfg(feature = "gpu")]
             gpu_solver: None,
             gpu_assembly: true,
+            timed: false,
             rf: Refine::default(),
         }
     }
@@ -6377,7 +6541,9 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
             // an f32 solve forms the system it factorizes in f32, as the
             // CPU's f32 route; under mixed precision in the wide values
             let f32_reduction = precision == arael_gpu::GpuPrecision::F32 && self.mixed.is_none();
-            self.gpu_solver = Some(device_solver(dev, precision, sn, asym, f32_reduction)?);
+            let mut solver = device_solver(dev, precision, sn, asym, f32_reduction)?;
+            solver.set_timing(self.timed);
+            self.gpu_solver = Some(solver);
             Ok(())
         }
         #[cfg(not(feature = "gpu"))]
@@ -6572,6 +6738,10 @@ pub struct SparseFaer<T = f64> {
     // Read the clock at all? Set from LmConfig::gather_timing by configure().
     // Nothing here reads it otherwise -- the wasm build has no working clock.
     measure: bool,
+    // The setup's stopwatch (setup_lap), running while a timed or verbose
+    // solve sets its structure up, and where that setup went.
+    setup_clock: Option<Instant>,
+    setup: SetupTiming,
     // Threads for the factorization and the triangular solve, from
     // LmConfig::num_threads via configure(). configure() runs before the first
     // compute, which matters: the scratch buffers are sized for this Par, and a
@@ -6683,6 +6853,8 @@ impl<T> SparseFaer<T> {
             plan: None,
             verbose: false,
             measure: false,
+            setup_clock: None,
+            setup: SetupTiming::default(),
             par: faer::Par::Seq,
             assembly_time: Duration::ZERO,
             did_setup: false,
@@ -6742,6 +6914,34 @@ impl<T> SparseFaer<T> {
         } else {
             arael_faer::supernodal::SupernodalParams::default()
         }
+    }
+
+    /// The time since the setup's last lap (or its start); zero when the
+    /// setup is not timed, and the clock is then not read.
+    fn setup_lap(&mut self) -> Duration {
+        match self.setup_clock.as_mut() {
+            Some(last) => {
+                let now = Instant::now();
+                let lap = now - *last;
+                *last = now;
+                lap
+            }
+            None => Duration::ZERO,
+        }
+    }
+
+    /// Open the solver's GPU, when it has one, booking the time as the
+    /// setup's `gpu_open` (what ran since the last lap is ordering's):
+    /// whether it is integrated, `None` inside when it does not open, which
+    /// the solve then reports. `None` without a GPU.
+    fn open_gpu(&mut self) -> Option<Option<bool>> {
+        self.sn_num.gpu.as_ref()?;
+        let before = self.setup_lap();
+        self.setup.ordering += before;
+        let integrated = self.sn_num.gpu.as_ref().map(|gpu| gpu.integrated());
+        let opened = self.setup_lap();
+        self.setup.gpu_open += opened;
+        integrated
     }
 
     /// What the first compute decided (`None` before the first compute).
@@ -6996,24 +7196,23 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             };
             match &self.cpu_assembly {
                 None => {
-                    let clock = vb.then(Instant::now);
                     problem.update_params(params);
                     let root = problem.device_root().expect("a device root");
-                    let gs = self.sn_num.gpu_mut();
-                    let built = gs.build_route(root, &hsym, &self.bdiag_pos, ctx.threads());
+                    let built = self.sn_num.gpu_mut().build_route(root, &hsym, &self.bdiag_pos, ctx.threads());
                     report_kernel_cache();
                     built.map_err(|e| gpu_setup_failed("setup of the device assembly", e))?;
-                    let t_layout = clock.map(|c| c.elapsed());
+                    let layout = self.setup_lap();
+                    self.setup.gpu_layout += layout;
                     let t_a = self.measure.then(Instant::now);
-                    let cost = gs.route_compute(problem, params, grad)?;
+                    let cost = self.sn_num.gpu_mut().route_compute(problem, params, grad)?;
                     if let Some(t) = t_a {
                         self.assembly_time = t.elapsed();
                     }
-                    if let (Some(c), Some(l)) = (clock, t_layout) {
+                    if vb {
                         info!(
                             "gpu: the device assembly's layout {:.1} ms, its first assembly {:.1} ms",
-                            l.as_secs_f64() * 1e3,
-                            (c.elapsed() - l).as_secs_f64() * 1e3
+                            layout.as_secs_f64() * 1e3,
+                            self.setup_lap().as_secs_f64() * 1e3
                         );
                     }
                     matrix.h = None;
@@ -7040,6 +7239,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             );
         }
         let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
+        // the blocks' positions in H and H's values
+        let bound = self.setup_lap();
+        self.setup.structure += bound;
         let t_a = self.measure.then(Instant::now);
         let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions, ctx);
         if let Some(t) = t_a {
@@ -7187,6 +7389,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         if self.schur_solve.cg().is_some() {
             return Err(SetupError::IterativeSchurWithoutReduction.into());
         }
+        // H's pattern, which the caller built
+        let pattern = self.setup_lap();
+        self.setup.structure += pattern;
+        // the device this route factors on, opened here so its first use
+        // is not booked as the factor's setup
+        self.open_gpu();
         let n = *partition.last().unwrap();
         let nblk = partition.len() - 1;
         // No scalar CSC, no Schur, no faer factorization on this route.
@@ -7331,6 +7539,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 Some(arael_faer::supernodal::amd_block_order(&hsym))
             }
         };
+        let ordered = self.setup_lap();
+        self.setup.ordering += ordered;
         let sn = match priced {
             Some(sn) => sn,
             None => arael_faer::supernodal::SupernodalSymbolic::new(
@@ -7342,12 +7552,20 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         };
         self.sn_num.resize(sn.factor_val_count());
         self.sn_num.prepare(&sn, &hsym)?;
+        let factor = self.setup_lap();
+        self.setup.factor += factor;
         // On a GPU the whole system takes the device reduction with nothing
         // eliminated: S is H, and an attempt is the reduced route's (one
         // wait, a captured graph, the refinement on the device, and the
         // device assembly with the LM loop there when the model has one).
         #[cfg(feature = "gpu")]
         self.sn_num.prepare_whole(&hsym)?;
+        let planned = self.setup_lap();
+        if self.sn_num.gpu_reduces() {
+            self.setup.gpu_plan += planned;
+        } else {
+            self.setup.factor += planned;
+        }
         self.sn_active = true;
         self.envelope_active = false;
         self.envelope_sym = None;
@@ -7651,8 +7869,14 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
     fn configure(&mut self, config: &LmConfig<T>) {
         self.verbose = config.verbose;
-        // The clock is only read when the caller asked for timing.
+        // The clock is only read when the caller asked for timing, and the
+        // device then stamps its queue; its times start from zero.
         self.measure = config.gather_timing;
+        self.sn_num.timed = self.measure;
+        #[cfg(feature = "gpu")]
+        if let Some(g) = self.sn_num.gpu_solver.as_mut() {
+            g.set_timing(self.measure);
+        }
         // A solve starts here: the model a session hands it may have other
         // data than the device holds from the last one.
         #[cfg(feature = "gpu")]
@@ -7679,6 +7903,18 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
     fn assembly_time(&self) -> Option<Duration> {
         (self.measure && self.did_setup).then_some(self.assembly_time)
+    }
+
+    fn setup_timing(&self) -> Option<SetupTiming> {
+        (self.measure && self.did_setup).then_some(self.setup)
+    }
+
+    fn gpu_timing(&self) -> Option<GpuTiming> {
+        #[cfg(feature = "gpu")]
+        if self.measure && self.sn_active {
+            return self.sn_num.gpu_solver.as_ref().and_then(|g| g.timing());
+        }
+        None
     }
 
     // The whole-system block route's pattern, binding and symbolic, when the
@@ -7743,14 +7979,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // detected, how the reduction was decided, and what each analysis
         // cost -- the phases that make a first iteration expensive.
         let vb = self.verbose;
-        let mut clock = vb.then(Instant::now);
-        let mut lap = move |on: bool| -> f64 {
-            let ms = clock.map_or(0.0, |c| c.elapsed().as_secs_f64() * 1e3);
-            if on {
-                clock = Some(Instant::now());
-            }
-            ms
-        };
+        self.setup = SetupTiming::default();
+        self.setup_clock = (vb || self.measure).then(Instant::now);
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
 
         // The model's own marginalize(..), when the caller named nothing.
         // Nobody has to carry the hint from the model into the solver: the
@@ -7847,7 +8078,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
              another candidate) and none were named, but the policy is Force. \
              Supply with_marginalize(..) or use SchurPolicy::Auto."
         );
-        let t_block = lap(vb);
+        self.setup.blocks = self.setup_lap();
+        let t_block = ms(self.setup.blocks);
         if vb && !eliminated.is_empty() {
             let elim_params: usize =
                 eliminated.iter().map(|&b| partition[b + 1] - partition[b]).sum();
@@ -7968,7 +8200,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // Declining means eliminating NOTHING, which makes S == H and the
         // reduction degenerate into an ordinary full-system factorization:
         // one code path, always correct, only the route changes.
-        let t_schur_symbolic = lap(vb);
+        self.setup.structure = self.setup_lap();
+        let t_schur_symbolic = ms(self.setup.structure);
 
         // The reduced system's ordering: the caller's, else the rule's from
         // S's block structure (nnz straight off the symbolic, no scalar CSC
@@ -7981,10 +8214,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let band = if eliminated.is_empty() { 0 } else { schur.kept_bandwidth() };
         // The device that factors it, as integrated or not; one that does
         // not open is taken for a discrete one, and the solve reports it.
-        let device = match &self.sn_num.gpu {
-            Some(gpu) if !iterative && self.sn_take() => Some(gpu.integrated().unwrap_or(false)),
-            _ => None,
-        };
+        let device = if !iterative && self.sn_take() { self.open_gpu().map(|integrated| integrated.unwrap_or(false)) } else { None };
         let (mut ord, mut ordered_by, pricing) = match reduced_ordering_for(self.ordering, device, schur.s.val_count(), schur.s.nrows(), band) {
             (ReducedOrdering::NestedDissection, ..) if iterative => (ordering_for(schur.s.val_count(), schur.s.nrows(), band), OrderedBy::Rule, DevicePricing::None),
             choice => choice,
@@ -8058,7 +8288,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 DevicePricing::None => {}
             }
         }
-        let t_order = lap(vb);
+        self.setup.ordering = self.setup_lap();
+        let t_order = ms(self.setup.ordering);
 
         // The reduction is a GEMM loop over pairs of observers plus a
         // one-column update per observer, and the tile shapes both need come
@@ -8277,7 +8508,14 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
         }
         let reduced = !eliminated.is_empty();
-        let t_gate = lap(vb);
+        // weighed only when the exact comparison ran
+        let weighed = self.setup_lap();
+        if fill_ratio.is_some() {
+            self.setup.weighing = weighed;
+        } else {
+            self.setup.ordering += weighed;
+        }
+        let t_gate = ms(weighed);
         // The weighing step only has parts to itemise when it actually ran.
         let decision_detail = if fill_ratio.is_none() {
             String::from(" (skipped)")
@@ -8375,6 +8613,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // none of the scalar machinery (the pricing pass's scalar
             // analysis is dropped with the reduction it priced); the scalar
             // route reuses that analysis instead of rebuilding it.
+            let t_rest = vb.then(Instant::now);
             let cost = if self.sn_take() {
                 let cost = self.setup_whole_supernodal(
                     problem,
@@ -8396,8 +8635,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     ctx, params, grad, matrix, n, Some((&partition, &cells)), prebuilt, vb,
                 )
             };
-            if vb {
-                let rest = lap(true);
+            if let Some(t) = t_rest {
+                let rest = ms(t.elapsed());
                 info!(
                     "schur: setup {:.1} ms = finding the blocks {:.1} + finding the \
                      reduction {:.1} and ordering it {:.1} (thrown away with it) + weighing \
@@ -8678,8 +8917,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.size_llt_buffers(&llt_symbolic);
             self.llt_symbolic = Some(llt_symbolic);
         }
+        self.setup.factor = self.setup_lap();
         if vb {
-            let rest = lap(true);
+            let rest = ms(self.setup.factor);
             info!(
                 "schur: setup {:.1} ms = finding the blocks {:.1} + finding the \
                  reduction {:.1} + ordering it {:.1} + weighing it {:.1}{} + factor setup {:.1}",
@@ -8698,13 +8938,17 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // The device route forms S on the device and never reads a host copy.
         self.s = if self.sn_num.gpu_reduces() { None } else { s };
         self.schur = Some(schur);
-        #[cfg(feature = "gpu")]
-        let t_reduction = lap(vb);
+        // the device's plan of the reduction, where a device reduces
+        let planned = self.setup_lap();
+        if self.sn_num.gpu_reduces() {
+            self.setup.gpu_plan = planned;
+        } else {
+            self.setup.factor += planned;
+        }
 
         // First numeric fill. Everything above it in this call was analysis.
-        #[cfg(feature = "gpu")]
         if vb && self.sn_num.gpu_reduces() {
-            info!("gpu: the reduction's plan {:.1} ms", t_reduction);
+            info!("gpu: the reduction's plan {:.1} ms", ms(planned));
         }
         self.first_fill(problem, params, grad, matrix, hsym, ctx, vb)
     }

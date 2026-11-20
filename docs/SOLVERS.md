@@ -1208,6 +1208,8 @@ is never read):
 pub struct LmTiming {
     pub total: Duration,          // whole solve
     pub analysis: Duration,       // the backend's ONE-TIME structural work
+    pub setup: Option<SetupTiming>,   // ...and where it went (the sparse backend)
+    pub gpu: Option<GpuTiming>,   // the device's own time, on a GPU -- see below
     pub assembly: Duration,       // residual + Jacobian + Hessian, all iters
     pub first_assembly: Duration, //   ...of which the first
     pub linear_solve: Duration,   // damped NUMERIC factorization + solve, all attempts
@@ -1246,6 +1248,61 @@ ordering comparison alone runs into seconds.
 The symbolic factorization is here, not in `linear_solve` -- `solve_damped` only
 ever factorizes numerically, against the symbolic factorization `compute` made
 once.
+
+`LmTiming::setup` is where the analysis went, from the sparse backend
+(`None` from the others): a `SetupTiming` of the parts it times. A part a
+route does not have is zero, and they add up to at most `analysis`.
+
+| part | what it times |
+|---|---|
+| `blocks` | finding the model's blocks and the ones to marginalize |
+| `structure` | the Hessian's block pattern, the blocks' positions in it and, when reducing, the reduced system's pattern |
+| `gpu_open` | on a GPU, opening the device: its first use in a process creates its context (tens to hundreds of milliseconds), nothing after |
+| `ordering` | ordering the system that is factorized |
+| `weighing` | pricing the reduced route against the whole system; zero when the comparison was skipped |
+| `factor` | the symbolic factorization and the factor's buffers |
+| `gpu_plan` | on a GPU, the device's plan of the reduction |
+| `gpu_layout` | on a GPU that assembles, the device assembly's layout: the model's image and its kernels |
+
+The report prints the parts under the analysis row, with what is left of
+the analysis as `other`:
+
+```text
+    analysis         18.20 ms   26.1%  #####...............    1 call
+                  blocks 0.76, structure 7.03, ordering 1.79, factor 1.48, gpu plan 2.50, gpu layout 4.61 ms
+```
+
+### On a GPU -- `LmTiming::gpu`
+
+On a GPU that assembles, the host queues a linearization and returns, and
+waits once per attempt. Its phases then show the waits, not the work:
+`assembly` and `cost_eval` read near zero and `linear_solve` holds the
+device's assembly and trial cost with its solve. `LmTiming::gpu` is the
+device's own time, a `GpuTiming`, from timestamps in its queue read at
+those waits:
+
+```rust,ignore
+pub struct GpuTiming {
+    pub assembly: Duration,     // the linearizations on the device, summed
+    pub assembly_count: usize,
+    pub attempts: Duration,     // the damped attempts on the device, summed
+    pub attempt_count: usize,
+}
+```
+
+`assembly` is zero when the CPU assembles (`GpuWork::Solves`); `attempts`
+then starts at the upload of the Hessian's values. The report prints it as
+a row of the timing block:
+
+```text
+    linear solve     50.60 ms   72.5%  ##############......   19 calls, first 2.66 ms
+    gpu              50.64 ms  on the device: assembly 3.16 ms in 10 calls, attempts 47.48 ms in 19 calls
+```
+
+Timing a GPU solve adds two markers to the device's queue around each
+linearization and each attempt, about ten microseconds an attempt on CUDA;
+an untimed solve adds none. `gpu` is `None` without a GPU and on Metal,
+whose device keeps no timestamps.
 
 ### The timeline -- `LmTiming::steps`
 

@@ -440,7 +440,10 @@ r2 = sess.solve(f, cfg)      # warm
 The result owns the whole Rust-side solve and stays valid however
 many solves follow. `r.report()` and `r.pretty_report()` render
 status, costs, the timing breakdown and the backend's plan. With
-`cfg.gather_timing = True`, `r.timing` holds the breakdown and
+`cfg.gather_timing = True`, `r.timing` holds the breakdown
+(`r.timing.setup`, a `SetupTiming` or `None`, is where the analysis
+went, and `r.timing.gpu`, a `GpuTiming` or `None`, the device's own
+assembly and attempt time on a GPU) and
 `r.steps` the per-attempt timeline (a list of `LmStep`). `r.threads`
 holds what the solve's threads did (a `ThreadReport`) and
 `r.threads_held` what each split store held. A warm

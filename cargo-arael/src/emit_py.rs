@@ -1386,9 +1386,9 @@ from .arael import transform as _tf
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
                            CpuAssembly, FaerOrdering, GpuBackend, GpuReport, GpuReportRaw,
-                           GpuStaging, GpuWide, GpuWork, LmPreset, LmStatus, LmStep,
+                           GpuStaging, GpuTiming, GpuWide, GpuWork, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
-                           SchurPolicy, SchurSolve, SolveFailure,
+                           SchurPolicy, SchurSolve, SetupTiming, SolveFailure,
                            SolveFailureKind, StoreFootprint, ThreadReport,
                            AraelVersion)
 

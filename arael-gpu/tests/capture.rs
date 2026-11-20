@@ -183,6 +183,49 @@ fn captures_leave_other_threads_alone() {
 /// all but the Metal device, which has its own `time_kernels`.
 const TIMED: bool = cfg!(any(feature = "cuda", feature = "hip", not(all(feature = "metal", target_vendor = "apple"))));
 
+/// Whether the device keeps stamps: every one but Metal's.
+const STAMPED: bool = cfg!(any(feature = "cuda", feature = "hip", not(all(feature = "metal", target_vendor = "apple"))));
+
+/// Stamps mark points of the device's queue without waiting, and a span is
+/// the device's time between two of them once it has passed both: a long
+/// loop's span is longer than a short one's, the two add up to the span
+/// over both, a stamp never made has no span, and a stamp made again moves.
+#[test]
+fn stamps_give_the_devices_time_between_two_points() {
+    let dev = Dev::new(0).unwrap();
+    let k = dev.compile(SOURCE, "", "spin").unwrap();
+    let out = dev.alloc(4 * N).unwrap();
+    let spin = |n: u32| dev.launch(&k, Launch::linear(1, 1), &[Arg::Block(&out, 0), Arg::U32(n)]);
+    let wait = || {
+        let mut x = [0f32; 1];
+        dev.read(&out, 0, bytemuck::cast_slice_mut(&mut x)).unwrap();
+    };
+    spin(1000).unwrap();
+    wait();
+    assert_eq!(dev.span(0, 1).unwrap(), None, "no stamp made yet");
+
+    dev.stamp(0).unwrap();
+    spin(1_000).unwrap();
+    dev.stamp(1).unwrap();
+    spin(8_000_000).unwrap();
+    dev.stamp(2).unwrap();
+    wait();
+    if !STAMPED {
+        assert_eq!(dev.span(0, 2).unwrap(), None, "a device without stamps");
+        return;
+    }
+    let span = |a, b| dev.span(a, b).unwrap().expect("both stamps were made");
+    let (short, long, both) = (span(0, 1), span(1, 2), span(0, 2));
+    assert!(short >= 0.0 && long > 4.0 * short, "the longer loop takes longer: {short} and {long}");
+    assert!((both - (short + long)).abs() <= 0.05 * both + 2e-5, "{short} + {long} against {both}");
+    assert_eq!(dev.span(2, 3).unwrap(), None, "stamp 3 was never made");
+
+    dev.stamp(1).unwrap();
+    dev.stamp(2).unwrap();
+    wait();
+    assert!(span(1, 2) < 0.25 * long, "the stamps moved: nothing between them now, {} against {long}", span(1, 2));
+}
+
 /// A device asked to time its launches gives a time a launch, in launch
 /// order: of direct launches, and of the launches of a graph captured while
 /// timing, whose capture runs nothing and whose every replay is timed.

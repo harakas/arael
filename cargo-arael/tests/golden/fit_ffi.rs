@@ -764,6 +764,48 @@ impl CLmConfig {
     }
 }
 
+/// SetupTiming mirror: where the analysis went, in seconds; a part a
+/// route does not have is zero.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct CSetupTiming {
+    pub blocks: f64,
+    pub structure: f64,
+    pub gpu_open: f64,
+    pub ordering: f64,
+    pub weighing: f64,
+    pub factor: f64,
+    pub gpu_plan: f64,
+    pub gpu_layout: f64,
+}
+
+/// GpuTiming mirror: the device's own time in a GPU solve, in seconds,
+/// and the linearizations and attempts timed.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct CGpuTiming {
+    pub assembly: f64,
+    pub attempts: f64,
+    pub assembly_count: u32,
+    pub attempt_count: u32,
+}
+
+/// {has, v} mirrors of `arael::option<T>` for the timing's optional
+/// parts (layouts must match the C++ side).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct COptSetupTiming {
+    pub has: bool,
+    pub v: CSetupTiming,
+}
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct COptGpuTiming {
+    pub has: bool,
+    pub v: CGpuTiming,
+}
+
 /// LmTiming mirror: per-phase wall-clock seconds plus call counts.
 /// The per-step records are read with fit_result_steps.
 #[repr(C)]
@@ -787,6 +829,10 @@ pub struct CLmTiming {
     /// The covariance assembly the config asked for, after the solve
     /// and outside `total`; zero when none was asked.
     pub covariance: f64,
+    /// Where `analysis` went, from the sparse backend.
+    pub setup: COptSetupTiming,
+    /// The device's own time, in a solve on a GPU that keeps timestamps.
+    pub gpu: COptGpuTiming,
 }
 
 /// LmStep mirror: one attempted step of the per-attempt timeline
@@ -1132,6 +1178,34 @@ unsafe fn fill_result(out: *mut CLmResult, r: &arael::simple_lm::LmResult<f64>) 
             cost_eval_count: t.cost_eval_count as u32,
             advance_count: t.advance_count as u32,
             covariance: t.covariance.as_secs_f64(),
+            setup: match &t.setup {
+                Some(s) => COptSetupTiming {
+                    has: true,
+                    v: CSetupTiming {
+                        blocks: s.blocks.as_secs_f64(),
+                        structure: s.structure.as_secs_f64(),
+                        gpu_open: s.gpu_open.as_secs_f64(),
+                        ordering: s.ordering.as_secs_f64(),
+                        weighing: s.weighing.as_secs_f64(),
+                        factor: s.factor.as_secs_f64(),
+                        gpu_plan: s.gpu_plan.as_secs_f64(),
+                        gpu_layout: s.gpu_layout.as_secs_f64(),
+                    },
+                },
+                None => COptSetupTiming::default(),
+            },
+            gpu: match &t.gpu {
+                Some(g) => COptGpuTiming {
+                    has: true,
+                    v: CGpuTiming {
+                        assembly: g.assembly.as_secs_f64(),
+                        attempts: g.attempts.as_secs_f64(),
+                        assembly_count: g.assembly_count as u32,
+                        attempt_count: g.attempt_count as u32,
+                    },
+                },
+                None => COptGpuTiming::default(),
+            },
         }, true),
         None => (CLmTiming::default(), false),
     };

@@ -29,7 +29,17 @@ pub(crate) struct DeviceSolver<T, D: Device> {
     staging: crate::device::Staging,
     /// The reduction in f32 (`GpuSchurParams::f32_reduction`).
     f32_reduction: bool,
+    /// The device's work is timed ([`GpuSolver::set_timing`]), its times so
+    /// far, and whether a linearization was stamped since they were read.
+    timed: bool,
+    times: crate::simple_lm::GpuTiming,
+    linearized: bool,
 }
+
+/// The stamps ([`Device::stamp`]) around a linearization and around an
+/// attempt.
+const LIN: (usize, usize) = (0, 1);
+const ATTEMPT: (usize, usize) = (2, 3);
 
 /// The device assembly of the reduced route and the LM loop's vectors
 /// beside it.
@@ -81,7 +91,7 @@ impl<T, D: Device> DeviceSolver<T, D> {
     ) -> Result<Self, GpuError> {
         let _scope = (Scope::new(&**dev, "setup"), Scope::new(&**dev, "factor"));
         let factor = GpuFactor::new(dev, precision, sn, asym, &Default::default(), wide)?;
-        Ok(DeviceSolver { route: None, schur: None, factor, wide, staging, f32_reduction })
+        Ok(DeviceSolver { route: None, schur: None, factor, wide, staging, f32_reduction, timed: false, times: Default::default(), linearized: false })
     }
 
     /// The scalar of the vectors, H and the gradient: the root's, as the
@@ -148,7 +158,35 @@ fn run_graph<D: Device, K: PartialEq>(
     Ok(())
 }
 
+/// Stamp `dev`'s queue at `slot` when its work is `timed`.
+fn stamp<D: Device>(dev: &D, timed: bool, slot: usize) -> Result<(), DeviceFailure> {
+    if !timed {
+        return Ok(());
+    }
+    on_device(dev.stamp(slot), "timestamp")
+}
+
 impl<T: crate::utils::Float, D: Device> DeviceSolver<T, D> {
+    /// Add the spans of the stamps made since the last call: an attempt's
+    /// when `attempt`, a linearization's when one was stamped. The device
+    /// has passed them: the caller has just read from it.
+    fn collect(&mut self, attempt: bool) -> Result<(), DeviceFailure> {
+        if !self.timed {
+            return Ok(());
+        }
+        let dev = self.factor.device();
+        let span = |(a, b): (usize, usize)| on_device(dev.span(a, b), "timestamp").map(|s| s.map(std::time::Duration::from_secs_f64));
+        if std::mem::take(&mut self.linearized) && let Some(d) = span(LIN)? {
+            self.times.assembly += d;
+            self.times.assembly_count += 1;
+        }
+        if attempt && let Some(d) = span(ATTEMPT)? {
+            self.times.attempts += d;
+            self.times.attempt_count += 1;
+        }
+        Ok(())
+    }
+
     /// The pending accept applied, without waiting.
     fn settle(&mut self) -> Result<(), DeviceFailure> {
         let r = self.route.as_mut().expect("a device route");
@@ -176,6 +214,19 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         self.factor.device().arch()
     }
 
+    fn set_timing(&mut self, on: bool) {
+        self.timed = on;
+        self.times = Default::default();
+        self.linearized = false;
+        if let Some(gs) = self.schur.as_mut() {
+            gs.stamp_solves(on.then_some(ATTEMPT));
+        }
+    }
+
+    fn timing(&self) -> Option<crate::simple_lm::GpuTiming> {
+        (self.timed && self.times.assembly_count + self.times.attempt_count > 0).then_some(self.times)
+    }
+
     fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), GpuError> {
         // the old blocks go first, so the device holds one structure's at a time
         self.drop_reduction();
@@ -183,10 +234,12 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         let _scope = (Scope::new(&**dev, "setup"), Scope::new(&**dev, "reduction"));
         let params = arael_gpu::GpuSchurParams { f32_reduction: self.f32_reduction, ..Default::default() };
         let values = self.values();
-        self.schur = Some(match schur {
+        let mut gs = match schur {
             Some(s) => GpuSchur::with_params(dev, s, hsym, values, &params)?,
             None => GpuSchur::whole_with_params(dev, hsym, values, &params)?,
-        });
+        };
+        gs.stamp_solves(self.timed.then_some(ATTEMPT));
+        self.schur = Some(gs);
         Ok(())
     }
 
@@ -207,11 +260,13 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         let dev = self.factor.device().clone();
         let _scope = Scope::new(&*dev, "solve_reduced");
         let gs = self.schur.as_mut().expect("the device reduction is built with the Schur symbolic");
-        match gs.solve(&mut self.factor, hvals, grad, refine, delta) {
-            Ok(stats) => Ok(Some(stats)),
-            Err(GpuSchurError::Eliminated { .. } | GpuSchurError::Reduced) => Ok(None),
-            Err(GpuSchurError::Device(e)) => on_device(Err(e), "reduced solve"),
-        }
+        let solved = match gs.solve(&mut self.factor, hvals, grad, refine, delta) {
+            Ok(stats) => Some(stats),
+            Err(GpuSchurError::Eliminated { .. } | GpuSchurError::Reduced) => None,
+            Err(GpuSchurError::Device(e)) => return on_device(Err(e), "reduced solve"),
+        };
+        self.collect(true)?;
+        Ok(solved)
     }
 
     fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex], threads: usize) -> Result<(), GpuError> {
@@ -257,6 +312,7 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         let (values, wide) = (self.values(), Values::from(self.wide));
         let dev = self.factor.device().clone();
         let _scope = Scope::new(&*dev, "compute");
+        let timed = self.timed;
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a device route");
         // what the device holds is the last compute's only once this one
@@ -272,15 +328,20 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         r.host.extend(params.iter().map(|&v| SchurReal::to_f64(v)));
         on_device(r.vec.write_x(&r.host), "upload of the parameters")?;
         let (g, h, cost) = (gs.rhs_target(), gs.h_target(), r.vec.slot(S_COST_X));
+        stamp(&*dev, timed, LIN.0)?;
         let queued = r.asm.assemble_at(r.vec.x(), g, n, h, r.nh, cost).and_then(|()| r.vec.gather_diag(h));
         on_device(queued, "assembly")?;
+        stamp(&*dev, timed, LIN.1)?;
         let diag = r.vec.diag();
         let read = read_values(&**r.asm.device(), &[(g.0, g.1, n, values), (diag.0, diag.1, n, values), (cost.0, cost.1, 1, wide)], &mut r.bytes, &mut r.host);
         on_device(read, "read of the gradient")?;
         narrow(grad, &r.host[..n]);
         narrow(&mut r.diag_host, &r.host[n..2 * n]);
         r.live = true;
-        Ok(T::from(r.host[2 * n]).unwrap())
+        let cost = T::from(r.host[2 * n]).unwrap();
+        self.linearized = timed;
+        self.collect(false)?;
+        Ok(cost)
     }
 
     fn route_diagonal(&self, diagonal: &mut [T]) {
@@ -313,9 +374,11 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
     fn linearize(&mut self) -> Result<(), DeviceFailure> {
         let dev = self.factor.device().clone();
         let _scope = Scope::new(&*dev, "linearize");
+        let timed = self.timed;
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a device route");
         r.live = false;
+        stamp(&*dev, timed, LIN.0)?;
         let accept = std::mem::take(&mut r.accept_due);
         let key = (gs.graph_key(&self.factor, None), r.asm.generation(), r.floor.map_or(u64::MAX, f64::to_bits));
         let (asm, vec, nh, floor) = (&r.asm, &r.vec, r.nh, r.floor);
@@ -331,16 +394,21 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         };
         let queued = if accept { run_graph(&**asm.device(), &mut r.step_graph, key, launches) } else { launches() };
         on_device(queued, "linearization")?;
+        stamp(&*dev, timed, LIN.1)?;
         r.live = true;
+        // its span is read at the next wait, an attempt's
+        self.linearized = timed;
         Ok(())
     }
 
     fn attempt(&mut self, lambda: f64, refine: Option<(usize, f64)>) -> Result<(Option<RefineStats>, ResidentAttempt), DeviceFailure> {
         let dev = self.factor.device().clone();
         let _scope = Scope::new(&*dev, "attempt");
+        let timed = self.timed;
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let gf = &self.factor;
         let r = self.route.as_mut().expect("a resident solve has its device route");
+        stamp(&*dev, timed, ATTEMPT.0)?;
         on_device(r.vec.set_lambda(lambda), "upload of the damping")?;
         let key = (gs.graph_key(gf, refine), r.asm.generation());
         let (asm, vec) = (&r.asm, &r.vec);
@@ -357,6 +425,7 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
             asm.cost_at(vec.x_try(), vec.slot(S_COST_TRY))
         };
         on_device(run_graph(&**asm.device(), &mut r.attempt_graph, key, launches), "attempt")?;
+        stamp(&*dev, timed, ATTEMPT.1)?;
         let (mut status, mut scalars) = ([0u8; STATUS_BYTES], [0u8; 8 * N_SCALARS]);
         let (st, sc) = (gs.status_view(), vec.scalars());
         on_device(asm.device().read_many(&mut [(st.0, st.1, &mut status[..]), (sc.0, sc.1, &mut scalars[..])]), "read of the attempt")?;
@@ -367,6 +436,9 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         };
         let mut values = [0.0f64; N_SCALARS];
         self.wide.decode(&scalars, &mut values);
+        // the read above waited for the attempt, and for the linearization
+        // queued before it
+        self.collect(true)?;
         Ok((solved, resident_attempt(solved.is_some(), &Scalars::from_values(&values))))
     }
 
@@ -417,6 +489,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         let dev = self.factor.device().clone();
         let _scope = Scope::new(&*dev, "finish");
         self.params(x)?;
+        // a linearization no attempt followed
+        self.collect(false)?;
         let r = self.route.as_ref().expect("a resident solve has its device route");
         on_device(r.asm.restore(problem.device_root_mut().expect("a device route's problem has a device root")), "read of the rotations")
     }

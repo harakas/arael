@@ -222,6 +222,39 @@ fn the_setup_report_itemises_the_ordering() {
     }
 }
 
+/// A timed solve says where its setup went (`LmTiming::setup`): the parts
+/// the sparse backend times, within the analysis time, none of them the
+/// GPU's on the CPU. An untimed solve reads no clock and carries no timing.
+#[test]
+fn a_timed_solve_itemises_its_setup() {
+    let solve = |policy: SchurPolicy, timed: bool| {
+        let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(policy));
+        let mut w = build(0.05);
+        let mut params = Vec::new();
+        RootProblem::serialize(&mut w, &mut params);
+        lm_solve(&params, &mut solver, &mut w, &LmConfig { max_iters: 60, gather_timing: timed, ..Default::default() }).unwrap()
+    };
+    assert!(solve(SchurPolicy::Force, false).timing.is_none());
+    for policy in [SchurPolicy::Force, SchurPolicy::Never] {
+        let r = solve(policy, true);
+        let t = r.timing.as_ref().expect("a timed solve");
+        let setup = t.setup.expect("the sparse backend times its setup");
+        assert!(setup.total() <= t.analysis, "{policy:?}: the parts {:?} within the analysis {:?}", setup.total(), t.analysis);
+        assert!(!setup.blocks.is_zero() && !setup.structure.is_zero() && !setup.factor.is_zero(), "{policy:?}: {setup:?}");
+        assert!(setup.gpu_plan.is_zero() && setup.gpu_layout.is_zero(), "{policy:?}: no GPU, {setup:?}");
+        assert_eq!(setup.parts().iter().map(|p| p.1).sum::<std::time::Duration>(), setup.total());
+        // the report names the parts that show at two decimals under the
+        // analysis row
+        let text = r.report();
+        let shown: Vec<&str> = setup.parts().iter().filter(|p| p.1.as_secs_f64() * 1e3 >= 0.005).map(|p| p.0).collect();
+        let line = text.lines().skip_while(|l| !l.trim_start().starts_with("analysis")).nth(1).expect("a line under analysis");
+        if !shown.is_empty() {
+            assert!(shown.iter().all(|name| line.contains(&format!("{name} "))) && line.trim_end().ends_with(" ms"), "{policy:?}: {shown:?} in\n{text}");
+        }
+        assert!(!text.contains("gpu "), "{policy:?}:\n{text}");
+    }
+}
+
 /// Every ordering of the whole system reaches the same optimum. They differ
 /// in fill and speed, never in the answer.
 #[test]

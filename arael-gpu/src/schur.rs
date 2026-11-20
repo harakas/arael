@@ -707,6 +707,8 @@ pub struct GpuSchur<D: Device> {
     nh: usize,
     s_len: usize,
     elim_blk: Vec<u32>,
+    /// The stamps [`solve`](Self::solve) makes ([`stamp_solves`](Self::stamp_solves)).
+    stamps: Option<(usize, usize)>,
     /// The inputs encoded in the route's values.
     conv: Vec<u8>,
     /// The step and the status as a solve reads them.
@@ -917,6 +919,7 @@ impl<D: Device> GpuSchur<D> {
             nh,
             s_len: p.s_len,
             elim_blk: p.elim_blk,
+            stamps: None,
             conv: Vec::new(),
             host_out: vec![0; status_at + STATUS_BYTES],
             step: vec![0.0; p.n],
@@ -1185,6 +1188,21 @@ impl<D: Device> GpuSchur<D> {
         self.run(&self.k.backsub, self.ne.div_ceil(THREADS), THREADS, &[plan, hd, w(s.h), w(s.rhs), w(s.dfac), w(s.out), Arg::U32(self.ne)])
     }
 
+    /// Have [`solve`](Self::solve) stamp the device's queue
+    /// ([`Device::stamp`]) before its upload (`stamps.0`) and after its
+    /// launches (`stamps.1`), so the span between them, read after the
+    /// solve, is the device's time for it; `None` (the default) stamps
+    /// nothing.
+    ///
+    /// ```ignore
+    /// g.stamp_solves(Some((0, 1)));
+    /// g.solve(&mut factor, &hvals, &rhs, None, &mut delta)?;
+    /// let seconds = dev.span(0, 1)?;
+    /// ```
+    pub fn stamp_solves(&mut self, stamps: Option<(usize, usize)>) {
+        self.stamps = stamps;
+    }
+
     /// One damped solve, entirely on the device, waiting once: form S and
     /// the reduced right-hand side from the Hessian's tile values `hvals`
     /// (in `hsym`'s storage order) and the gradient `rhs`, factorize S with
@@ -1209,8 +1227,14 @@ impl<D: Device> GpuSchur<D> {
         delta: &mut [M],
     ) -> Result<RefineStats, GpuSchurError> {
         assert_eq!(delta.len(), self.n);
+        if let Some((before, _)) = self.stamps {
+            self.dev.stamp(before)?;
+        }
         self.upload(hvals, rhs)?;
         self.enqueue(factor, refine)?;
+        if let Some((_, after)) = self.stamps {
+            self.dev.stamp(after)?;
+        }
         self.dev.read(&self.work, self.sec.out, &mut self.host_out)?;
         let stats = self.outcome(&self.host_out[self.status_at..], refine)?;
         self.values.decode(&self.host_out[..self.values.bytes() * self.n], &mut self.step);

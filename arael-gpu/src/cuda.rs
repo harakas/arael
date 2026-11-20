@@ -33,6 +33,8 @@ pub struct CudaDevice {
     /// Launches are timed ([`Device::time_launches`]).
     timing: AtomicBool,
     timer: Mutex<Timer>,
+    /// The stamps' events ([`Device::stamp`]), each made at its first use.
+    stamps: Mutex<[Option<CudaEvent>; crate::STAMPS]>,
     /// The device memory the blocks come from and go back to.
     pool: Arc<Pool<CudaSlice<u8>>>,
     /// The pinned host memory the host blocks come from and go back to.
@@ -283,6 +285,7 @@ impl CudaDevice {
             capturing: AtomicBool::new(false),
             timing: AtomicBool::new(false),
             timer: Mutex::new(timer),
+            stamps: Mutex::new(Default::default()),
             pool: Arc::new(Pool::new()),
             host_pool: Arc::new(Pool::new()),
         })
@@ -722,6 +725,22 @@ impl Device for CudaDevice {
 
     fn take_times(&self) -> Vec<f64> {
         core::mem::take(&mut self.timer().times)
+    }
+
+    /// An event recorded on the main stream; it keeps its timing, which
+    /// cudarc's default flag drops.
+    fn stamp(&self, slot: usize) -> Result<(), GpuError> {
+        let mut stamps = self.stamps.lock().unwrap_or_else(|e| e.into_inner());
+        if stamps[slot].is_none() {
+            stamps[slot] = Some(self.ctx.new_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT)).map_err(driver)?);
+        }
+        stamps[slot].as_ref().expect("made above").record(&self.stream).map_err(driver)
+    }
+
+    fn span(&self, from: usize, to: usize) -> Result<Option<f64>, GpuError> {
+        let stamps = self.stamps.lock().unwrap_or_else(|e| e.into_inner());
+        let (Some(a), Some(b)) = (&stamps[from], &stamps[to]) else { return Ok(None) };
+        Ok(Some(a.elapsed_ms(b).map_err(driver)? as f64 * 1e-3))
     }
 
     /// The side stream waits for an event recorded on the main one; in a

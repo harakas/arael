@@ -797,6 +797,8 @@ fn synthetic_result() -> LmResult<f64> {
             assembly: Duration::from_micros(120),
             first_assembly: Duration::from_micros(120),
             analysis: Duration::from_micros(200),
+            setup: None,
+            gpu: None,
             linear_solve: Duration::from_micros(450),
             first_linear_solve: Duration::from_micros(150),
             cost_eval: Duration::from_micros(40),

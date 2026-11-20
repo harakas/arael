@@ -18,6 +18,7 @@ static void fill(Fit& fit) {
 static SolveResult solve(GpuBackend gpu, bool assembly) {
     LmConfig cfg;
     cfg.max_iters = 50;
+    cfg.gather_timing = true;
     Fit fit;
     fill(fit);
     SparseOptions so;
@@ -35,6 +36,22 @@ static void show(const char* tag, const GpuReport& g) {
     std::printf("%s_reserved %d\n%s_buffers %d\n", tag, g.reserved_bytes > 0 ? 1 : 0, tag, g.buffers_created > 0 ? 1 : 0);
 }
 
+// The timed solve's setup parts and the device's own time.
+static void timing(const char* tag, const LmResult& r) {
+    const LmTiming& t = r.timing;
+    std::printf("%s_setup %d\n", tag, t.setup ? 1 : 0);
+    if (t.setup) {
+        const SetupTiming& s = *t.setup;
+        double parts = s.blocks + s.structure + s.gpu_open + s.ordering + s.weighing + s.factor + s.gpu_plan + s.gpu_layout;
+        std::printf("%s_setup_within %d\n%s_setup_gpu %d\n", tag, (parts > 0.0 && parts <= t.analysis) ? 1 : 0, tag, s.gpu_plan > 0.0 ? 1 : 0);
+    }
+    std::printf("%s_gpu_time %d\n", tag, t.gpu ? 1 : 0);
+    if (t.gpu) {
+        std::printf("%s_attempts_timed %d\n%s_assembly_timed %u\n", tag,
+            (t.gpu->attempt_count == r.iterations && t.gpu->attempts > 0.0) ? 1 : 0, tag, t.gpu->assembly_count);
+    }
+}
+
 int main() {
     SolveResult none = solve(GpuBackend::None, true);
     SolveResult on = solve(GpuBackend::Cpu, true);
@@ -44,7 +61,9 @@ int main() {
         return 1;
     }
     std::printf("none %d\n", none->gpu() ? 0 : 1);
+    timing("none", none.value());
     show("on", on->gpu().value());
+    timing("on", on.value());
     std::printf("on_report %d\n", std::strstr(on->report(), "  gpu       cpu:0 ") ? 1 : 0);
     show("off", off->gpu().value());
     return 0;

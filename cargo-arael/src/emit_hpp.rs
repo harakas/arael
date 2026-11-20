@@ -889,6 +889,8 @@ using arael::LmResultT;
 using arael::LmIterT;
 using arael::LmStep;
 using arael::LmTiming;
+using arael::SetupTiming;
+using arael::GpuTiming;
 using arael::SolveFailureKind;
 using arael::DiagonalFault;
 using arael::SolveFailure;

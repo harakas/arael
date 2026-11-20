@@ -219,6 +219,22 @@ pub fn print_timing<T>(r: &LmResult<T>) {
             r.iterations,
             t.cost_eval_count,
         );
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        if let Some(setup) = &t.setup {
+            let parts: Vec<String> = setup.parts().iter().filter(|p| ms(p.1) >= 0.005).map(|(name, d)| format!("{name} {:.2}", ms(*d))).collect();
+            eprintln!("  [setup] {} ms", parts.join(" + "));
+        }
+        if let Some(g) = &t.gpu {
+            eprintln!(
+                "  [gpu] on the device: assembly {:.2} ms in {} calls ({:.3} each), attempts {:.2} ms in {} calls ({:.3} each)",
+                ms(g.assembly),
+                g.assembly_count,
+                ms(g.assembly) / g.assembly_count.max(1) as f64,
+                ms(g.attempts),
+                g.attempt_count,
+                ms(g.attempts) / g.attempt_count.max(1) as f64,
+            );
+        }
     }
 }
 

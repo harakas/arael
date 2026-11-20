@@ -637,9 +637,62 @@ class CovPlan(ctypes.Structure):
         return CovOrdering(self._ordering)
 
 
+class SetupTiming(ctypes.Structure):
+    """Where a solve's one-time setup went (mirror of the Rust
+    SetupTiming): the parts of LmTiming.analysis the sparse backend
+    times, in seconds. A part a route does not have is zero; they add up
+    to at most the analysis. `blocks` is finding the model's blocks,
+    `structure` the Hessian's and the reduced system's patterns,
+    `gpu_open` the device's first use in a process, `ordering` and
+    `weighing` choosing the order and the route, `factor` the symbolic
+    factorization, `gpu_plan` and `gpu_layout` the device's plan of the
+    reduction and the device assembly's layout."""
+    _fields_ = [
+        ("blocks", ctypes.c_double),
+        ("structure", ctypes.c_double),
+        ("gpu_open", ctypes.c_double),
+        ("ordering", ctypes.c_double),
+        ("weighing", ctypes.c_double),
+        ("factor", ctypes.c_double),
+        ("gpu_plan", ctypes.c_double),
+        ("gpu_layout", ctypes.c_double),
+    ]
+
+
+class GpuTiming(ctypes.Structure):
+    """The device's own time in a GPU solve (mirror of the Rust
+    GpuTiming), in seconds, from timestamps in its queue: `assembly` the
+    linearizations (zero when the CPU assembles) and `attempts` the
+    damped attempts, summed, with `assembly_count` and `attempt_count`
+    how many were timed. The host's phases cannot show it: the host
+    waits once per attempt, so LmTiming.linear_solve holds the device's
+    assembly and trial cost too."""
+    _fields_ = [
+        ("assembly", ctypes.c_double),
+        ("attempts", ctypes.c_double),
+        ("assembly_count", ctypes.c_uint32),
+        ("attempt_count", ctypes.c_uint32),
+    ]
+
+
+class _OptSetupTiming(ctypes.Structure):
+    _fields_ = [("has", ctypes.c_bool), ("v", SetupTiming)]
+
+
+class _OptGpuTiming(ctypes.Structure):
+    _fields_ = [("has", ctypes.c_bool), ("v", GpuTiming)]
+
+
 class LmTiming(ctypes.Structure):
     """Per-phase wall-clock seconds plus call counts, gathered when
-    config.gather_timing is set."""
+    config.gather_timing is set. `setup` is where the analysis went
+    (SetupTiming, None from a backend that times no parts) and `gpu` the
+    device's own time in a solve on a GPU (GpuTiming, None without one):
+
+        t = result.timing
+        if t.gpu is not None:
+            print(1e3 * t.gpu.attempts / t.gpu.attempt_count, "ms an attempt")
+    """
     _fields_ = [
         ("total", ctypes.c_double),
         ("assembly", ctypes.c_double),
@@ -657,7 +710,12 @@ class LmTiming(ctypes.Structure):
         ("cost_eval_count", ctypes.c_uint32),
         ("advance_count", ctypes.c_uint32),
         ("covariance", ctypes.c_double),
+        ("_setup", _OptSetupTiming),
+        ("_gpu", _OptGpuTiming),
     ]
+
+    setup = _plan_opt("_setup", lambda v: v)
+    gpu = _plan_opt("_gpu", lambda v: v)
 
 
 class LmStep(ctypes.Structure):

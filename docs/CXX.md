@@ -256,7 +256,10 @@ views are named by their container's nature: `PathPosesDeque`,
   lambda converts directly.
 - **Timing**: set `cfg.gather_timing`; the result then carries
   `timing` (per-phase wall-clock seconds plus call counts,
-  `has_timing` flags validity) and `r.steps()` -- the per-attempt
+  `has_timing` flags validity; `timing.setup`, an
+  `option<SetupTiming>`, is where the analysis went, and `timing.gpu`,
+  an `option<GpuTiming>`, the device's own assembly and attempt time
+  on a GPU, see docs/SOLVERS.md) and `r.steps()` -- the per-attempt
   timeline as a vector of `LmStep` (attempt and retry indices,
   accepted, lambda, costs, step and gradient norms, per-phase
   seconds; a damping retry is its own record).

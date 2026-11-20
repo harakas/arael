@@ -41,6 +41,7 @@ def solve(gpu, assembly):
     so.gpu_assembly = assembly
     cfg = fit.LmConfig()
     cfg.max_iters = 50
+    cfg.gather_timing = True
     return f.solve_sparse(cfg, so)
 
 
@@ -59,9 +60,27 @@ def show(tag, g):
     pi(tag + "_buffers", 1 if g.buffers_created > 0 else 0)
 
 
+def timing(tag, r):
+    """The timed solve's setup parts and the device's own time."""
+    t = r.timing
+    s, g = t.setup, t.gpu
+    pi(tag + "_setup", 0 if s is None else 1)
+    if s is not None:
+        parts = s.blocks + s.structure + s.gpu_open + s.ordering + s.weighing + s.factor + s.gpu_plan + s.gpu_layout
+        pi(tag + "_setup_within", 1 if 0.0 < parts <= t.analysis else 0)
+        pi(tag + "_setup_gpu", 1 if s.gpu_plan > 0.0 else 0)
+    pi(tag + "_gpu_time", 0 if g is None else 1)
+    if g is not None:
+        pi(tag + "_attempts_timed", 1 if g.attempt_count == r.iterations and g.attempts > 0.0 else 0)
+        pi(tag + "_assembly_timed", g.assembly_count)
+
+
 fit.set_log_level(fit.LogLevel.WARN)
-pi("none", 1 if solve(fit.GpuBackend.NONE, True).gpu is None else 0)
+none = solve(fit.GpuBackend.NONE, True)
+pi("none", 1 if none.gpu is None else 0)
+timing("none", none)
 r = solve(fit.GpuBackend.CPU, True)
 show("on", r.gpu)
+timing("on", r)
 pi("on_report", 1 if "  gpu       cpu:0 " in r.report() else 0)
 show("off", solve(fit.GpuBackend.CPU, False).gpu)

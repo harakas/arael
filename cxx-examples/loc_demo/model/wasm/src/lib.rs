@@ -1806,8 +1806,11 @@ impl LmResult {
     #[wasm_bindgen(js_name = "prettyReport")]
     pub fn pretty_report(&self) -> String { self.r.pretty_report() }
     /// Per-phase seconds and call counts, or undefined when the solve
-    /// ran without `gatherTiming`.
+    /// ran without `gatherTiming`. The `setup*` entries are where the
+    /// analysis went (arael's SetupTiming), zero from a backend that
+    /// times no parts.
     pub fn timing(&self) -> JsValue {
+        let setup = self.r.timing.as_ref().and_then(|t| t.setup).unwrap_or_default();
         match &self.r.timing {
             Some(t) => js_obj(&[
                 ("total", t.total.as_secs_f64()),
@@ -1826,6 +1829,11 @@ impl LmResult {
                 ("costEvalCount", t.cost_eval_count as f64),
                 ("advanceCount", t.advance_count as f64),
                 ("covariance", t.covariance.as_secs_f64()),
+                ("setupBlocks", setup.blocks.as_secs_f64()),
+                ("setupStructure", setup.structure.as_secs_f64()),
+                ("setupOrdering", setup.ordering.as_secs_f64()),
+                ("setupWeighing", setup.weighing.as_secs_f64()),
+                ("setupFactor", setup.factor.as_secs_f64()),
             ]),
             None => JsValue::UNDEFINED,
         }

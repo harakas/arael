@@ -387,9 +387,53 @@ struct SparseOptionsT {
     GpuStaging gpu_staging;
 };
 
+/// Where a solve's one-time setup went (Rust's SetupTiming): the parts of
+/// LmTiming::analysis the sparse backend times, in seconds. A part a route
+/// does not have is zero; they add up to at most the analysis.
+struct SetupTiming {
+    /// Finding the model's blocks and the ones to marginalize.
+    double blocks;
+    /// The Hessian's block pattern, the blocks' positions in it and, when
+    /// reducing, the reduced system's pattern.
+    double structure;
+    /// On a GPU, opening the device: its first use in a process.
+    double gpu_open;
+    /// Ordering the system that is factorized.
+    double ordering;
+    /// Pricing the reduced route against the whole system; zero when the
+    /// comparison was skipped.
+    double weighing;
+    /// The symbolic factorization and the factor's buffers.
+    double factor;
+    /// On a GPU, the device's plan of the reduction, and the device
+    /// assembly's layout (the model's image and its kernels).
+    double gpu_plan;
+    double gpu_layout;
+};
+
+/// The device's own time in a GPU solve (Rust's GpuTiming), in seconds,
+/// from timestamps in its queue. The host's phases cannot show it: the
+/// host queues a linearization and waits once per attempt, so
+/// LmTiming::linear_solve holds the device's assembly and trial cost too.
+struct GpuTiming {
+    /// The linearizations on the device, summed; zero when the CPU
+    /// assembles.
+    double assembly;
+    /// The damped attempts on the device, summed: the reduction, the
+    /// factorization, the solve, the back-substitution and the trial cost.
+    double attempts;
+    /// The linearizations and the attempts timed.
+    uint32_t assembly_count;
+    uint32_t attempt_count;
+};
+
 /// Per-phase wall-clock seconds plus call counts, gathered when
 /// LmConfigT::gather_timing is set (see Rust's LmTiming for the
 /// phase definitions; the per-step records are LmResult::steps()).
+///
+///     if (r.has_timing && r.timing.gpu)
+///         printf("an attempt takes %.3f ms on the device\n",
+///                1e3 * r.timing.gpu->attempts / r.timing.gpu->attempt_count);
 struct LmTiming {
     double total;
     double assembly;
@@ -409,6 +453,11 @@ struct LmTiming {
     /// The covariance assembly the config asked for, after the solve
     /// and outside `total`; zero when none was asked.
     double covariance;
+    /// Where `analysis` went, from the sparse backend; empty otherwise.
+    option<SetupTiming> setup;
+    /// The device's own time in a solve on a GPU; empty without one, and
+    /// on a device that keeps no timestamps (Metal).
+    option<GpuTiming> gpu;
 };
 
 /// One attempted LM step: the per-attempt timeline behind

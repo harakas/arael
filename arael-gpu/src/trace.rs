@@ -728,6 +728,14 @@ impl<D: Device> Device for Traced<D> {
     fn time_launches(&self, on: bool) {
         self.inner.time_launches(on);
     }
+
+    fn stamp(&self, slot: usize) -> Result<(), GpuError> {
+        self.inner.stamp(slot)
+    }
+
+    fn span(&self, from: usize, to: usize) -> Result<Option<f64>, GpuError> {
+        self.inner.span(from, to)
+    }
 }
 
 #[cfg(test)]

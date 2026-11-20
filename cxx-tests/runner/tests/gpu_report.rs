@@ -30,4 +30,14 @@ pub fn verify(text: &str) {
     assert_eq!(g("on_report"), 1.0, "the text report has the gpu block");
     // CpuAssembly::Asked, which comes before the model's form is asked
     assert_eq!((g("off_cpu_assembly"), g("off_why")), (1.0, 0.0), "{text}");
+    // the timed solves' setup parts, within the analysis: the device's
+    // plan among them on the device alone
+    for (tag, on_device) in [("none", 0.0), ("on", 1.0)] {
+        let v = |n: &str| g(&format!("{tag}_{n}"));
+        assert_eq!((v("setup"), v("setup_within"), v("setup_gpu")), (1.0, 1.0, on_device), "{tag}:\n{text}");
+    }
+    // the device's own time: every attempt timed, no linearization (the
+    // CPU assembles the fixture); none without a device
+    assert_eq!(g("none_gpu_time"), 0.0, "{text}");
+    assert_eq!((g("on_gpu_time"), g("on_attempts_timed"), g("on_assembly_timed")), (1.0, 1.0, 0.0), "{text}");
 }

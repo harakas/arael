@@ -39,6 +39,13 @@ pub(crate) trait GpuSolver<T>: Send {
     /// The device: its name, its compile target, whether it computes in
     /// f64 (Metal does not: an f64 root assembles on the CPU there).
     fn arch(&self) -> &arael_gpu::Arch;
+    /// Time the device's work from here on (`on`), or stop: stamps in its
+    /// queue around each linearization and attempt, their spans read at the
+    /// waits a solve already makes. Starts the times from zero.
+    fn set_timing(&mut self, on: bool);
+    /// The device's times since [`set_timing`](Self::set_timing)`(true)`;
+    /// `None` when not timing, and on a device that keeps no stamps.
+    fn timing(&self) -> Option<crate::simple_lm::GpuTiming>;
 
     /// Build the reduction by `schur` of matrices with the structure
     /// `hsym`, or with `None` the whole system (nothing eliminated), on the

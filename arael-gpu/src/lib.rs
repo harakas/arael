@@ -879,7 +879,38 @@ pub trait Device: Send + Sync {
     fn take_times(&self) -> Vec<f64> {
         Vec::new()
     }
+
+    /// Marks this point of the device's main queue as stamp `slot` (below
+    /// [`STAMPS`]), for [`span`](Self::span): one queued marker, no wait,
+    /// the launches around it undisturbed. A device that keeps no stamps
+    /// ignores it.
+    ///
+    /// ```ignore
+    /// dev.stamp(0)?;
+    /// dev.launch(&k, Launch::linear(n, 256), &[Arg::Block(&x, 0)])?;
+    /// dev.stamp(1)?;
+    /// dev.read(&x, 0, &mut out)?;      // waits: the device has passed both
+    /// let seconds = dev.span(0, 1)?;   // Some(..) on a device with stamps
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// When `slot` is not below [`STAMPS`].
+    fn stamp(&self, slot: usize) -> Result<(), GpuError> {
+        assert!(slot < STAMPS, "stamp {slot} of {STAMPS}");
+        Ok(())
+    }
+
+    /// The device time in seconds from stamp `from` to stamp `to`, once the
+    /// device has passed both (a read waits for it). `None` on a device
+    /// that keeps no stamps, and when either was never made.
+    fn span(&self, _from: usize, _to: usize) -> Result<Option<f64>, GpuError> {
+        Ok(None)
+    }
 }
+
+/// The stamps a device keeps ([`Device::stamp`]).
+pub const STAMPS: usize = 16;
 
 /// A scope of a device's operations ([`Device::scope_begin`]), closed when
 /// dropped.

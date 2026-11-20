@@ -87,6 +87,9 @@ pub struct HipDevice {
     /// Launches are timed ([`Device::time_launches`]).
     timing: AtomicBool,
     timer: Mutex<Timer>,
+    /// The stamps' events ([`Device::stamp`]), each made at its first use;
+    /// null until then.
+    stamps: Mutex<[rt::hipEvent_t; crate::STAMPS]>,
     /// The device memory the blocks come from and go back to.
     pool: Arc<Pool<HipMem>>,
     /// The pinned host memory the host blocks come from and go back to.
@@ -117,6 +120,9 @@ impl Drop for HipDevice {
             let timer = self.timer.get_mut().unwrap_or_else(|e| e.into_inner());
             let _ = self.l.rt.hipEventDestroy(timer.start);
             let _ = self.l.rt.hipEventDestroy(timer.end);
+            for &stamp in self.stamps.get_mut().unwrap_or_else(|e| e.into_inner()).iter().filter(|s| !s.is_null()) {
+                let _ = self.l.rt.hipEventDestroy(stamp);
+            }
             let _ = self.l.rt.hipStreamDestroy(self.side);
             let _ = self.l.rt.hipStreamDestroy(self.stream);
         }
@@ -544,6 +550,7 @@ impl HipDevice {
                 capturing: AtomicBool::new(false),
                 timing: AtomicBool::new(false),
                 timer: Mutex::new(Timer { start, end, times: Vec::new(), capture: None }),
+                stamps: Mutex::new([core::ptr::null_mut(); crate::STAMPS]),
                 pool: Arc::new(Pool::new()),
                 host_pool: Arc::new(Pool::new()),
             })
@@ -896,6 +903,32 @@ impl Device for HipDevice {
 
     fn take_times(&self) -> Vec<f64> {
         core::mem::take(&mut self.timer().times)
+    }
+
+    /// An event recorded on the main stream, with its timing kept (no flag).
+    fn stamp(&self, slot: usize) -> Result<(), GpuError> {
+        self.bind()?;
+        let mut stamps = self.stamps.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the device's stream; the event is made here once and
+        // destroyed with the device.
+        unsafe {
+            if stamps[slot].is_null() {
+                check(self.l, self.l.rt.hipEventCreateWithFlags(&mut stamps[slot], 0), "hipEventCreateWithFlags")?;
+            }
+            check(self.l, self.l.rt.hipEventRecord(stamps[slot], self.stream), "hipEventRecord")
+        }
+    }
+
+    fn span(&self, from: usize, to: usize) -> Result<Option<f64>, GpuError> {
+        let stamps = self.stamps.lock().unwrap_or_else(|e| e.into_inner());
+        if stamps[from].is_null() || stamps[to].is_null() {
+            return Ok(None);
+        }
+        self.bind()?;
+        let mut ms = 0f32;
+        // SAFETY: two events of this device, both reached: the caller waited.
+        check(self.l, unsafe { self.l.rt.hipEventElapsedTime(&mut ms, stamps[from], stamps[to]) }, "hipEventElapsedTime")?;
+        Ok(Some(ms as f64 * 1e-3))
     }
 
     /// The side stream waits for an event recorded on the main one; in a

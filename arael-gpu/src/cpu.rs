@@ -319,6 +319,9 @@ pub struct CpuDevice {
     /// since the last [`Device::take_times`].
     timing: std::sync::atomic::AtomicBool,
     times: Mutex<Vec<f64>>,
+    /// When each stamp was made ([`Device::stamp`]): a launch runs before
+    /// its call returns, so the host's clock is the device's.
+    stamps: Mutex<[Option<std::time::Instant>; crate::STAMPS]>,
 }
 
 impl CpuDevice {
@@ -370,6 +373,7 @@ impl CpuDevice {
             probe: probe.then(|| Mutex::new(crate::cpu_probe::Probe::new(unsafe { *(runtime().expect("checked above").0 as *const unsafe extern "C" fn() -> *const u32) }))),
             timing: std::sync::atomic::AtomicBool::new(false),
             times: Mutex::new(Vec::new()),
+            stamps: Mutex::new([None; crate::STAMPS]),
         })
     }
 
@@ -773,6 +777,16 @@ impl Device for CpuDevice {
 
     fn take_times(&self) -> Vec<f64> {
         core::mem::take(&mut self.times.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn stamp(&self, slot: usize) -> Result<(), GpuError> {
+        self.stamps.lock().unwrap_or_else(|e| e.into_inner())[slot] = Some(std::time::Instant::now());
+        Ok(())
+    }
+
+    fn span(&self, from: usize, to: usize) -> Result<Option<f64>, GpuError> {
+        let stamps = self.stamps.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(stamps[from].zip(stamps[to]).map(|(a, b)| b.saturating_duration_since(a).as_secs_f64()))
     }
 }
 
