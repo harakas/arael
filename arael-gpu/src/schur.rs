@@ -36,7 +36,7 @@ use arael_faer::bsc::SymbolicSparseBlockColMat;
 use arael_faer::schur::{SchurReal, SchurSymbolic};
 
 use crate::plan::SparseIndex;
-use crate::supernodal::{GpuFactor, Packer};
+use crate::supernodal::GpuFactor;
 use crate::{Arg, Device, GpuError, Launch, Layout, Scope, Section, Values, WIDE, Wide, define_u32s};
 
 /// No kept-kept tile behind a tile of S.
@@ -414,7 +414,15 @@ impl SchurPlan {
         // observers' tables, their records written in place; room for the
         // tiles', the observers' and the kept blocks' words that follow.
         let (at_se, at_so) = (SHEADER, SHEADER + SE_REC * (ne + 1));
-        let mut buf: Vec<u32> = Vec::with_capacity(at_so + SO_REC * no + 7 * sym.s.nblocks() + 2 * no + 5 * nk + 64);
+        // the words packed below: six arrays of a word per tile and its pair
+        // pointers (nt + 1), the observers' kept blocks and the kept
+        // blocks' observers (no each), the kept blocks' observer pointers
+        // and first tiles (nk + 1 each) and three words each (nk), the
+        // eliminated blocks' pair pointers (ne + 1); a reallocation of
+        // the buffer cost 10 ms at Ladybug-1723
+        let nt = sym.s.nblocks();
+        let words = at_so + SO_REC * no + 7 * nt + 1 + 2 * no + 2 * (nk + 1) + 3 * nk + ne + 1;
+        let mut buf: Vec<u32> = Vec::with_capacity(words);
         buf.resize(at_so + SO_REC * no, 0);
         (buf[SE], buf[SO]) = (at_se as u32, at_so as u32);
         let (se, so) = buf[at_se..].split_at_mut(SE_REC * (ne + 1));
@@ -454,7 +462,6 @@ impl SchurPlan {
         // the tiles of S, in storage order, with their kept-kept source
         let ssym = sym.s;
         let spart = ssym.col_part();
-        let nt = ssym.nblocks();
         let mut copy_of = vec![NONE; nt];
         let (csrc, cdst) = (&sym.copy_src[..], &sym.copy_dst[..]);
         for (&src, &dst) in csrc.iter().zip(cdst) {
@@ -534,6 +541,7 @@ impl SchurPlan {
             buf[slot] = buf.len() as u32;
             buf.extend_from_slice(v);
         }
+        debug_assert_eq!(buf.len(), words, "the plan's words are the ones reserved");
         let ew_cap = round_cap(ew_max);
         let kw_cap = round_cap(kw_max);
         SchurPlan {
@@ -762,16 +770,29 @@ impl<D: Device> GpuSchur<D> {
         let (tile_warps, tile_groups, tile_shared) = fit_tiles(&widths, (warps, groups), set, dev.arch().shared_bytes)?;
         let defines = format!("{}#define SCHUR_F32 {}\n{}", values.defines(), params.f32_reduction as u32, defines(&p, lanes, tile_warps, tile_groups));
         let (kt_ptr_words, kt_words) = tiles_by_kept_block(&p);
-        let mut pk = Packer { words: p.words };
-        let blocks = tile_blocks(&pk.words, p.nt as usize, tile_warps as usize, params.split_pairs);
+        let mut words = p.words;
+        let blocks = tile_blocks(&words, p.nt as usize, tile_warps as usize, params.split_pairs);
         let tile_blocks = (blocks.len() / (tile_warps as usize + 1)) as u32;
-        let at_blocks = pk.push(&blocks);
-        pk.words[SB_ITEMS] = at_blocks as u32;
-        let on = 4 * pk.push(&[1]);
-        let kt_ptr = 4 * pk.push(&kt_ptr_words);
-        let kt_list = 4 * pk.push(&kt_words);
-        let mut ints = dev.alloc(pk.words.len() * 4)?;
-        dev.write(&mut ints, 0, bytemuck::cast_slice(&pk.words))?;
+        // the tile blocks, a word holding 1 and the kept blocks' tile lists
+        // follow the plan's words, each from a 256-byte boundary, in a tail
+        // written apart from them: appending to the plan's words would
+        // reallocate them (10 ms at Ladybug-1723)
+        let base = words.len();
+        let mut tail: Vec<u32> = Vec::new();
+        let mut put = |v: &[u32]| {
+            let at = (base + tail.len()).div_ceil(64) * 64;
+            tail.resize(at - base, 0);
+            tail.extend_from_slice(v);
+            at
+        };
+        let at_blocks = put(&blocks);
+        let on = 4 * put(&[1]);
+        let kt_ptr = 4 * put(&kt_ptr_words);
+        let kt_list = 4 * put(&kt_words);
+        words[SB_ITEMS] = at_blocks as u32;
+        let mut ints = dev.alloc(4 * (base + tail.len()))?;
+        dev.write(&mut ints, 0, bytemuck::cast_slice(&words))?;
+        dev.write(&mut ints, 4 * base, bytemuck::cast_slice(&tail))?;
         let status_at = status_at(p.n, values.bytes());
         let mut l = Layout::new();
         let sec = Sections {
@@ -794,7 +815,7 @@ impl<D: Device> GpuSchur<D> {
         let [zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert, pairs, kobs, kt]: [D::Kernel; 16] =
             dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
         let k = Kernels { zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert, pairs, kobs, kt };
-        let header: [u32; SHEADER] = pk.words[..SHEADER].try_into().expect("the plan's header");
+        let header: [u32; SHEADER] = words[..SHEADER].try_into().expect("the plan's header");
         // the expanded records of the pairs, the kept blocks' observers and
         // the kept blocks' tile entries, written on the device from the
         // plan, and the tiles' pair counters the pairs' writing takes
@@ -835,7 +856,7 @@ impl<D: Device> GpuSchur<D> {
             ]
         });
         dev.describe(&ints, "schur.plan", &|| {
-            let mut v = plan_sections(&pk.words[..at_blocks]);
+            let mut v = plan_sections(&words);
             v.extend([
                 Section::u32s("tile_blocks", 4 * at_blocks, blocks.len()).doc("k_schur_tiles' blocks: per block its units' tiles (and split parts)"),
                 Section::u32s("on", on, 1).doc("a word holding 1: the gate of kernels that always run"),
@@ -2041,6 +2062,10 @@ mod tests {
         let p = SchurPlan::reduction(&sym, h.symbolic());
         let (ne, no, nt, np) = (p.ne as usize, p.no as usize, p.nt as usize, sym.pair_count());
         let w = &p.words;
+        // the words were reserved for, not grown into
+        assert_eq!(w.capacity(), w.len());
+        let whole = SchurPlan::whole(h.symbolic());
+        assert_eq!(whole.words.capacity(), whole.words.len());
         let se = &w[w[SE] as usize..][..SE_REC * (ne + 1)];
         let so = &w[w[SO] as usize..][..SO_REC * no];
         for (e, r) in se.chunks_exact(SE_REC).enumerate() {
