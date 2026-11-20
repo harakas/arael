@@ -65,7 +65,11 @@ const N_FLAGS: usize = 8;
 /// [`GpuCg::status`].
 pub const CG_STATUS_BYTES: usize = 8 * N_STATE + 4 * N_FLAGS;
 
-/// How [`GpuCg`] queues its iterations.
+/// The most warps a kept block takes in the product with S: a block of
+/// 1024 threads.
+const MAX_MATVEC_WARPS: u32 = 32;
+
+/// How [`GpuCg`] queues its iterations and cuts its product with S.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GpuCgParams {
     /// Iterations in the captured graph a round replays.
@@ -73,11 +77,31 @@ pub struct GpuCgParams {
     /// Iterations queued before the first status read of the first solve;
     /// a later solve starts from the count of the solve before it.
     pub first_iters: u32,
+    /// Warps (32 threads) a kept block takes in the product with S, 1 to
+    /// 32; `None` takes [`Self::matvec_warps_for`]'s. Kept blocks wider
+    /// than 32 columns take one.
+    pub matvec_warps: Option<u32>,
+}
+
+impl GpuCgParams {
+    /// [`matvec_warps`](Self::matvec_warps), unset: from the tile entries
+    /// the `kept_blocks` kept blocks have in all (`tile_entries`) and
+    /// their width rounded up (`kw_cap`, at most 32), by
+    /// [`kept_warps_for`](crate::schur::kept_warps_for), up to 8 (more
+    /// measured no faster for the product).
+    ///
+    /// ```ignore
+    /// // 372 cameras of 9 parameters, 54692 tile entries: 8 warps
+    /// assert_eq!(GpuCgParams::default().matvec_warps_for(54692, 372, 16), 8);
+    /// ```
+    pub fn matvec_warps_for(&self, tile_entries: usize, kept_blocks: usize, kw_cap: usize) -> u32 {
+        self.matvec_warps.unwrap_or_else(|| crate::schur::kept_warps_for(tile_entries, kept_blocks, kw_cap, 8))
+    }
 }
 
 impl Default for GpuCgParams {
     fn default() -> Self {
-        GpuCgParams { graph_iters: 8, first_iters: 16 }
+        GpuCgParams { graph_iters: 8, first_iters: 16, matvec_warps: None }
     }
 }
 
@@ -113,6 +137,9 @@ pub struct GpuCgStats {
     pub relative_residual: f64,
     /// Status reads: the waits the iterations took.
     pub rounds: usize,
+    /// Iterations queued, those launched after the solve had stopped
+    /// included (they do nothing): `iters` of them ran.
+    pub queued: usize,
 }
 
 struct Kernels<K> {
@@ -160,6 +187,8 @@ pub struct GpuCg<D: Device> {
     params: GpuCgParams,
     /// The iteration cap: [`CgParams::max_iters`], or the dimension.
     cap: u32,
+    /// Threads a block of the product's kernel.
+    matvec_threads: u32,
     nk: u32,
     nks: u32,
     /// The iterations of the solve before this one.
@@ -210,6 +239,12 @@ impl<D: Device> GpuCg<D> {
                 ("F_FACTOR", F_FACTOR),
             ],
         );
+        // the product's warps a kept block; blocks wider than a plane's
+        // lanes take one warp, its lanes over the tile entries
+        let warps = if rs.kw_cap <= PLANE as usize { params.matvec_warps_for(rs.kt_entries, nk, rs.kw_cap) } else { 1 };
+        assert!((1..=MAX_MATVEC_WARPS).contains(&warps), "{warps} warps a kept block in the product, 1 to {MAX_MATVEC_WARPS}");
+        define_u32s(&mut defines, &[("MWARPS", warps as usize)]);
+        let matvec_threads = warps * PLANE;
         let source = format!("{WIDE}\n{SHARED}\n{SOURCE}");
         let entries = ["k_cg_blocks", "k_cg_precond", "k_cg_start", "k_cg_begin", "k_cg_matvec", "k_cg_alpha", "k_cg_update", "k_cg_apply", "k_cg_rho", "k_cg_direction"];
         let [blocks, precond, start, begin, matvec, alpha, update, apply, rho, direction]: [D::Kernel; 10] =
@@ -264,6 +299,7 @@ impl<D: Device> GpuCg<D> {
             cg: *cg,
             params: *params,
             cap: cap.min(u32::MAX as usize) as u32,
+            matvec_threads,
             nk: rs.nk,
             nks: nks as u32,
             last: None,
@@ -329,7 +365,7 @@ impl<D: Device> GpuCg<D> {
         let restart = self.cg.restart_every.min(u32::MAX as usize) as u32;
         for _ in 0..count {
             let matvec = [fl, Arg::Block(rs.plan, rs.kt_ptr), Arg::Block(rs.expanded, rs.kt), w(s.kb), g(rs.s), w(s.p), w(s.q), w(s.part)];
-            self.dev.launch(&self.k.matvec, Launch { grid: [self.nk, 1, 1], block: [PLANE, 1, 1], shared_bytes: 0 }, &matvec)?;
+            self.dev.launch(&self.k.matvec, Launch { grid: [self.nk, 1, 1], block: [self.matvec_threads, 1, 1], shared_bytes: 0 }, &matvec)?;
             self.dev.launch(&self.k.alpha, one, &[fl, w(s.part), st, nk, Arg::U32(restart)])?;
             self.dev.launch(&self.k.update, per_block, &[fl, st, w(s.kb), w(s.mfac), w(s.p), w(s.q), g(rs.x), g(rs.r), w(s.z), w(s.part), nk])?;
             if restart != 0 {
@@ -400,9 +436,11 @@ impl<D: Device> GpuCg<D> {
     }
 
     /// The graphs a round queues after `queued` of them left the solve
-    /// unfinished: half as many again.
+    /// unfinished: as many again. An iteration launched after the stop
+    /// costs little against a round's wait (measured on an NVIDIA discrete
+    /// GPU: about 3 us against 100), so a miss doubles what is queued.
     pub fn more_graphs(&self, queued: u32) -> u32 {
-        (queued / 2).max(1)
+        queued.max(1)
     }
 
     /// The iterations a finished solve took, the next one's first guess.
@@ -427,7 +465,8 @@ impl<D: Device> GpuCg<D> {
             let st = self.status(&host);
             if !st.active {
                 self.note_iterations(st.iters);
-                return Ok(GpuCgStats { iters: st.iters, converged: st.converged, breakdown: st.breakdown, relative_residual: st.relative_residual, rounds });
+                let queued = queued as usize * self.params.graph_iters as usize;
+                return Ok(GpuCgStats { iters: st.iters, converged: st.converged, breakdown: st.breakdown, relative_residual: st.relative_residual, rounds, queued });
             }
             graphs = self.more_graphs(queued);
         }
@@ -622,14 +661,62 @@ mod tests {
             assert!(err_max(&again, &delta) < 1e-13, "{params:?}: a second solve");
             (delta, first, second)
         };
-        let (long, long_stats, _) = run(&mut g, GpuCgParams { graph_iters: 256, first_iters: 256 }, true);
+        let (long, long_stats, _) = run(&mut g, GpuCgParams { graph_iters: 256, first_iters: 256, ..Default::default() }, true);
         assert!(long_stats.converged && long_stats.iters < 256 && long_stats.rounds == 1, "{long_stats:?}");
         for graphs in [true, false] {
-            let (short, first, second) = run(&mut g, GpuCgParams { graph_iters: 1, first_iters: 1 }, graphs);
+            let (short, first, second) = run(&mut g, GpuCgParams { graph_iters: 1, first_iters: 1, ..Default::default() }, graphs);
             assert_eq!(first.iters, long_stats.iters, "graphs {graphs}");
             assert!(first.rounds > 1 && second.rounds == 1 && second.iters == first.iters, "graphs {graphs}: {first:?} then {second:?}");
             assert!(err_max(&short, &long) < 1e-13, "graphs {graphs}");
         }
+    }
+
+    /// The product with S cut over any number of warps a kept block is the
+    /// same product: the solve is the CPU's with 1 warp, with as many as
+    /// leave most without a tile, and with a count that is no power of
+    /// two; on both scalars of the system.
+    #[test]
+    fn the_product_over_any_warps_is_the_same_product() {
+        let (h, _, rhs, _, sym) = setup(40, 300, 5);
+        let n = h.symbolic().ncols();
+        let dev = device();
+        let cg = tight();
+        let (want, cpu) = cpu_solve::<f64>(&h, &rhs, &sym, &cg);
+        let (want32, cpu32) = cpu_solve::<f32>(&h, &rhs, &sym, &CgParams { tol: 1e-10, ..Default::default() });
+        let (h32, r32): (Vec<f32>, Vec<f32>) = (h.vals().iter().map(|&v| v as f32).collect(), rhs.iter().map(|&v| v as f32).collect());
+        let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide(&*dev)).unwrap();
+        let f32_system = GpuSchurParams { f32_reduction: true, ..Default::default() };
+        let mut g32 = GpuSchur::with_params(&dev, &sym, h.symbolic(), Values::f32(wide(&*dev)), &f32_system).unwrap();
+        for warps in [1u32, 2, 5, 8, 32] {
+            let params = GpuCgParams { matvec_warps: Some(warps), ..Default::default() };
+            let mut solver = GpuCg::new(&g, &cg, &params).unwrap();
+            let mut delta = vec![0.0f64; n];
+            let stats = solver.solve(&mut g, h.vals(), &rhs, &mut delta).unwrap();
+            assert!(stats.converged && stats.iters.abs_diff(cpu.iters) <= 2, "{warps} warps: {stats:?} against {cpu:?}");
+            assert!(err_max(&delta, &want) < 1e-8, "{warps} warps");
+            let mut solver = GpuCg::new(&g32, &CgParams { tol: 1e-10, ..Default::default() }, &params).unwrap();
+            let mut delta = vec![0.0f32; n];
+            let stats = solver.solve(&mut g32, &h32, &r32, &mut delta).unwrap();
+            let delta: Vec<f64> = delta.iter().map(|&v| v as f64).collect();
+            assert!(stats.iters.abs_diff(cpu32.iters) <= 4, "{warps} warps, f32: {stats:?} against {cpu32:?}");
+            assert!(err_max(&delta, &want32) < 1e-3, "{warps} warps, f32");
+        }
+    }
+
+    /// The warps a kept block takes in the product: about 8 tiles a group
+    /// of lanes, a power of two from 1 to 8; as set when set.
+    #[test]
+    fn the_products_warps_follow_the_tiles_a_block() {
+        let p = GpuCgParams::default();
+        // 372 cameras of 9 parameters (two groups a warp): 147 tiles a block
+        assert_eq!(p.matvec_warps_for(54692, 372, 16), 8);
+        // a SLAM map's 900 poses of 6 (four groups a warp): 272 tiles a block
+        assert_eq!(p.matvec_warps_for(244820, 900, 8), 8);
+        // 40 tiles a block in two groups: 2.5 groups' worth a warp
+        assert_eq!(p.matvec_warps_for(40 * 100, 100, 16), 2);
+        assert_eq!(p.matvec_warps_for(5 * 100, 100, 8), 1);
+        assert_eq!(p.matvec_warps_for(0, 0, 4), 1);
+        assert_eq!(GpuCgParams { matvec_warps: Some(3), ..p }.matvec_warps_for(54692, 372, 16), 3);
     }
 
     /// Iterations queued after the solve has stopped do nothing: the

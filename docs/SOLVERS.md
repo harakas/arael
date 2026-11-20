@@ -1166,7 +1166,7 @@ it, and each damped solve:
 ```text
 [arael WARN] gpu: cuda:0 was given and is not used -- the reduced system is factored under its envelope, on the CPU. ...
 [arael INFO] gpu: cuda:0 NVIDIA GeForce RTX 4090 (sm_89), wide f64 -- assembly, damped solves and the LM loop on the device
-[arael INFO] gpu schur (cuda, cg): damp + reduce + conjugate gradients + back-substitution + trial cost 5.6 ms, 46 iterations in 1 round, relative residual 7.9e-4
+[arael INFO] gpu schur (cuda, cg): damp + reduce + conjugate gradients + back-substitution + trial cost 5.0 ms, 74 iterations (96 queued) in 1 round, relative residual 9.4e-4
 ```
 
 `LmResult::report` prints it as a `gpu` block (see Reporting a solve).

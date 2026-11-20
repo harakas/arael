@@ -213,6 +213,39 @@ pub struct GpuSchurParams {
     /// factor is f32 and that does not refine against S: a refined solve
     /// panics. Off: in the wide scalar.
     pub f32_reduction: bool,
+    /// Warps (32 threads) a kept block takes in the kernels whose lanes
+    /// are its rows, the reduced right-hand side (over the block's
+    /// observers) and the refinement's residual (over its tiles of S), 1
+    /// to 32; `None` takes [`kept_warps_for`]'s for each. Kept blocks
+    /// wider than 32 columns take one.
+    pub kept_warps: Option<u32>,
+}
+
+/// The most warps a kept block takes in a kernel whose lanes are its rows:
+/// a block of 1024 threads.
+pub(crate) const MAX_KEPT_WARPS: u32 = 32;
+
+/// The warps (32 threads) a kept block takes in a kernel whose lanes are
+/// its rows, from the items (observers, or tiles of S) the `blocks` kept
+/// blocks have in all and their width rounded up (`kw_cap`, at most 32): a
+/// power of two, 1 to `most`.
+///
+/// A warp is `32 / kw_cap` groups of lanes, a lane a row of the block, and
+/// a group takes an item at a time. The choice gives a group about 8 items.
+/// Measured on an NVIDIA discrete GPU, on bundle adjustment's camera
+/// systems and a SLAM map's pose system: the kernels are fastest near
+/// there, 2 to 3 times as fast as with one warp. On an AMD integrated GPU
+/// the warps make no difference.
+///
+/// ```ignore
+/// // 372 cameras of 9 parameters (two groups a warp), 147 tiles of S each
+/// assert_eq!(kept_warps_for(54692, 372, 16, 8), 8);
+/// ```
+pub fn kept_warps_for(items: usize, blocks: usize, kw_cap: usize, most: u32) -> u32 {
+    let groups = (PLANE as usize / kw_cap).max(1);
+    let warps = items / (blocks.max(1) * 8 * groups);
+    // the power of two at or under it
+    (1u32 << warps.max(1).ilog2()).min(most)
 }
 
 impl GpuSchurParams {
@@ -234,7 +267,7 @@ impl GpuSchurParams {
 
 impl Default for GpuSchurParams {
     fn default() -> Self {
-        GpuSchurParams { tile_warps: None, split_pairs: 128, tile_groups: None, f32_reduction: false }
+        GpuSchurParams { tile_warps: None, split_pairs: 128, tile_groups: None, f32_reduction: false, kept_warps: None }
     }
 }
 
@@ -686,10 +719,13 @@ pub(crate) struct ReducedSystem<'a, D: Device> {
     pub r: usize,
     pub flags: usize,
     /// Kept blocks, the reduced system's scalar dimension, the widest kept
-    /// block's columns.
+    /// block's columns and them rounded up to the kernels' cap (`KW`), and
+    /// the kept blocks' tile entries in all.
     pub nk: u32,
     pub nks: usize,
     pub kw_max: usize,
+    pub kw_cap: usize,
+    pub kt_entries: usize,
 }
 
 /// The device plan of a [`SchurSymbolic`] and the device state of one
@@ -710,8 +746,17 @@ pub struct GpuSchur<D: Device> {
     /// The kernels' #defines, for another unit over the same plan (the
     /// conjugate gradients').
     defines: String,
-    /// The widest kept block's columns.
+    /// The widest kept block's columns, and them rounded up to the
+    /// kernels' cap (`KW`).
     kw_max: usize,
+    kw_cap: usize,
+    /// The kept blocks' tile entries: a tile of S once for its row block
+    /// and, off the diagonal, once for its column block.
+    kt_entries: usize,
+    /// Threads a block of the reduced right-hand side's kernel and of the
+    /// residual's.
+    rhs_threads: u32,
+    symv_threads: u32,
     values: Values,
     wide: Wide,
     /// [`GpuSchurParams::f32_reduction`].
@@ -817,8 +862,23 @@ impl<D: Device> GpuSchur<D> {
         let widths = TileWidths { kw_cap: p.kw_cap, ew_cap: p.ew_cap, kw_max: p.kw_max, ew_max: p.ew_max, lanes, elem };
         let set = (params.tile_warps.is_some() && lanes == dev.arch().warp, params.tile_groups.is_some());
         let (tile_warps, tile_groups, tile_shared) = fit_tiles(&widths, (warps, groups), set, dev.arch().shared_bytes)?;
-        let defines = format!("{}#define SCHUR_F32 {}\n{}", values.defines(), params.f32_reduction as u32, defines(&p, lanes, tile_warps, tile_groups));
         let (kt_ptr_words, kt_words) = tiles_by_kept_block(&p);
+        // the warps a kept block takes in the kernels whose lanes are its
+        // rows: the reduced right-hand side over its observers, the
+        // residual over its tile entries
+        let kept_warps = |items: usize, most: u32| {
+            let warps = params.kept_warps.unwrap_or_else(|| kept_warps_for(items, p.nk as usize, p.kw_cap, most));
+            assert!((1..=MAX_KEPT_WARPS).contains(&warps), "{warps} warps a kept block, 1 to {MAX_KEPT_WARPS}");
+            // a block wider than a plane's lanes takes one warp, its lanes over the items
+            if p.kw_cap <= PLANE as usize { warps } else { 1 }
+        };
+        let (rhs_warps, symv_warps) = (kept_warps(p.no as usize, MAX_KEPT_WARPS), kept_warps(kt_words.len(), 8));
+        let defines = format!(
+            "{}#define SCHUR_F32 {}\n#define RWARPS {rhs_warps}u\n#define SWARPS {symv_warps}u\n{}",
+            values.defines(),
+            params.f32_reduction as u32,
+            defines(&p, lanes, tile_warps, tile_groups)
+        );
         let mut words = p.words;
         let blocks = tile_blocks(&words, p.nt as usize, tile_warps as usize, params.split_pairs);
         let tile_blocks = (blocks.len() / (tile_warps as usize + 1)) as u32;
@@ -941,6 +1001,10 @@ impl<D: Device> GpuSchur<D> {
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             defines,
             kw_max: p.kw_max,
+            kw_cap: p.kw_cap,
+            kt_entries: nkt,
+            rhs_threads: rhs_warps * PLANE,
+            symv_threads: symv_warps * PLANE,
             values,
             wide: values.wide(),
             f32_reduction: params.f32_reduction,
@@ -1020,6 +1084,8 @@ impl<D: Device> GpuSchur<D> {
             nk: self.nk,
             nks: self.nks,
             kw_max: self.kw_max,
+            kw_cap: self.kw_cap,
+            kt_entries: self.kt_entries,
         }
     }
 
@@ -1181,7 +1247,7 @@ impl<D: Device> GpuSchur<D> {
         self.run(&self.k.w, (self.no * self.w_rows).div_ceil(THREADS), THREADS, &[plan, hd, w(s.h), w(s.dfac), w(s.w), Arg::U32(self.no)])?;
         let (pairs, kobs) = (Arg::Block(&self.expanded, 0), Arg::Block(&self.expanded, self.kobs_at));
         self.run_shared(&self.k.tiles, self.tile_blocks, self.lanes * self.tile_warps, self.tile_shared, &[plan, hd, pairs, w(s.h), w(s.w), w(s.s)])?;
-        self.run(&self.k.rhs, self.nk, PLANE, &[plan, hd, kobs, w(s.h), w(s.rhs), w(s.z), w(s.rhs_kept)])
+        self.run(&self.k.rhs, self.nk, self.rhs_threads, &[plan, hd, kobs, w(s.h), w(s.rhs), w(s.z), w(s.rhs_kept)])
     }
 
     /// Form S and the reduced right-hand side from the damped Hessian's tile
@@ -1294,7 +1360,7 @@ impl<D: Device> GpuSchur<D> {
         let nks = self.nks as u32;
         self.run(&self.k.copy, nks.div_ceil(THREADS), THREADS, &[gate, w(s.r), w(s.rhs_kept), Arg::U32(nks)])?;
         let (kt_ptr, kt) = (Arg::Block(&self.ints, self.kt_ptr), Arg::Block(&self.expanded, self.kt_at));
-        self.run(&self.k.symv_sub, self.nk, PLANE, &[gate, plan, self.header_arg(), kt_ptr, kt, w(s.s), w(s.x_kept), w(s.r)])
+        self.run(&self.k.symv_sub, self.nk, self.symv_threads, &[gate, plan, self.header_arg(), kt_ptr, kt, w(s.s), w(s.x_kept), w(s.r)])
     }
 
     /// The launches of the back-substitution, the last stage of a damped
@@ -2504,6 +2570,51 @@ mod tests {
         assert!(stalled.rnorm <= reached.rnorm, "{stalled:?} against {reached:?}");
         let res0 = rel_residual(&dense, n, &delta0, &rhs);
         assert!(res0 < 1e-8, "residual {res0} after the undone step");
+    }
+
+    /// The kernels whose lanes are a kept block's rows give the same sums
+    /// over any number of warps a block: the reduced right-hand side is the
+    /// CPU's, and a refined solve (its residuals by `k_symv_sub`) solves
+    /// the system, with 1 warp, with a count that is no power of two, and
+    /// with as many as leave most warps without an item.
+    #[test]
+    fn the_kept_blocks_kernels_sum_the_same_over_any_warps() {
+        let (h, dense, rhs, _, sym, sn) = setup(40, 300, 9);
+        let n = h.symbolic().ncols();
+        let mut s_cpu = sym.alloc_s::<f64>();
+        let mut rhs_cpu = vec![0.0f64; sym.kept_size()];
+        schur_reduce(&sym, &h, &rhs, &mut SchurContext::new(), &mut s_cpu, &mut rhs_cpu).unwrap();
+        let dev = device();
+        let wide = wide(&*dev);
+        for warps in [1u32, 3, 8, 32] {
+            let params = GpuSchurParams { kept_warps: Some(warps), ..Default::default() };
+            let mut g = GpuSchur::with_params(&dev, &sym, h.symbolic(), wide, &params).unwrap();
+            g.reduce(h.vals(), &rhs).unwrap();
+            let er = err_max(&g.download().unwrap().1, &rhs_cpu);
+            assert!(er < 1e-12, "{warps} warps: rhs err/max {er}");
+            let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
+            let mut delta = vec![0.0f64; n];
+            let stats = g.solve(&mut f, h.vals(), &rhs, Some((12, 1e-10)), &mut delta).unwrap();
+            assert!(stats.steps > 0 && !stats.short, "{warps} warps: {stats:?}");
+            let res = rel_residual(&dense, n, &delta, &rhs);
+            assert!(res < 1e-8, "{warps} warps: residual {res}");
+        }
+    }
+
+    /// The warps a kept block takes: about 8 items a group of lanes, a
+    /// power of two from 1 to the most asked.
+    #[test]
+    fn the_kept_blocks_warps_follow_their_items() {
+        // 372 cameras of 9 parameters (two groups a warp): 147 tiles of S
+        // and 550 observers a block
+        assert_eq!(kept_warps_for(54692, 372, 16, 8), 8);
+        assert_eq!(kept_warps_for(550 * 372, 372, 16, 32), 32);
+        assert_eq!(kept_warps_for(394 * 1723, 1723, 16, 32), 16);
+        // a SLAM map's 900 poses of 6 (four groups a warp), 145 observers each
+        assert_eq!(kept_warps_for(130823, 900, 8, 32), 4);
+        assert_eq!(kept_warps_for(40 * 100, 100, 16, 8), 2);
+        assert_eq!(kept_warps_for(5 * 100, 100, 8, 8), 1);
+        assert_eq!(kept_warps_for(0, 0, 4, 8), 1);
     }
 
     /// `h2` and `dense2`: the diagonal of every diagonal tile scaled by 1.5.

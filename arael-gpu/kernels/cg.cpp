@@ -146,9 +146,73 @@ KERNEL_THREADS(THREADS) void k_cg_begin(GLOBAL const W* RESTRICT part, GLOBAL W*
 }
 
 // q = S p over the tiles of S (upper block storage, diagonal tiles
-// upper-only), one block of PLANE threads per kept block k owning rows k of
-// q: the lanes over k's tile entries (k_symv_sub's walk), a warp sum per
-// row, and the block's part of p.q. No two blocks write the same entry.
+// upper-only) and the parts of p.q, a block of threads per kept block k
+// owning rows k of q; no two blocks write the same entry. Each of k's tile
+// entries gives its rows: a tile (k, b) as stored, a tile (a, k) transposed.
+#if KW <= PLANE
+// The lanes over a tile's rows: MWARPS warps a block, each warp MGROUPS
+// groups of KW lanes (schur.h). A group takes every (MWARPS MGROUPS)-th of
+// k's tile entries, its lane `row` the tile's contribution to row `row` of
+// q, so the lanes of a group read neighbouring values of S at every step
+// and the same value of p. The groups' sums are added within the warp, the
+// warps' through shared memory, and warp 0 writes q and the block's part of
+// p.q.
+KERNEL_THREADS(MWARPS * PLANE) void k_cg_matvec(GLOBAL const u32* RESTRICT fl, GLOBAL const u32* RESTRICT kt_ptr, GLOBAL const u32* RESTRICT kt, GLOBAL const u32* RESTRICT kb, GLOBAL const R* RESTRICT s, GLOBAL const R* RESTRICT p, GLOBAL R* RESTRICT q, GLOBAL W* RESTRICT part) {
+#if MWARPS > 1
+    SHARED R sh[MWARPS * KW];
+#endif
+    if (fl[CF_ACTIVE] == 0) return;
+    u32 k = block_x();
+    u32 warp = thread_x() / PLANE;
+    u32 lane = thread_x() % PLANE;
+    u32 row = lane % KW;
+    u32 k_off = kb[KB_REC * k + KB_OFF];
+    u32 wk = kb[KB_REC * k + KB_W];
+    u32 end = kt_ptr[k + 1];
+    R acc = 0.0f;
+    for (u32 e = kt_ptr[k] + warp * MGROUPS + lane / KW; e < end; e += MWARPS * MGROUPS) {
+        u32 val = kt[KT_REC * e + KT_VAL_OFF];
+        u32 dims = kt[KT_REC * e + KT_DIMS];
+        u32 xo = kt[KT_REC * e + KT_X_OFF];
+        u32 wr = KT_WR(dims);
+        if (row < wk) {
+            if (KT_TRANS(dims) == 0) {
+                // row `row` of (k, b): S_kb p_b, a diagonal tile read from its upper triangle
+                u32 wc = KT_WC(dims);
+                u32 diag = KT_DIAG(dims);
+                for (u32 j = 0; j < wc; j++) acc = r_fma(acc, diag && row > j ? s[val + j + row * wr] : s[val + row + j * wr], p[xo + j]);
+            } else {
+                // row `row` of (a, k)^T: S_ak^T p_a
+                for (u32 i2 = 0; i2 < wr; i2++) acc = r_fma(acc, s[val + i2 + row * wr], p[xo + i2]);
+            }
+        }
+    }
+    // a row's sums of the warp's groups: lanes row, row + KW, ...
+#pragma unroll
+    for (u32 m = KW; m < PLANE; m *= 2) acc += shfl_xor(acc, m);
+#if MWARPS > 1
+    // and of the block's warps
+    if (lane < KW) sh[warp * KW + lane] = acc;
+    BARRIER();
+    if (warp != 0) return;
+    if (lane < KW) {
+        acc = sh[lane];
+#pragma unroll
+        for (u32 w = 1; w < MWARPS; w++) acc += sh[w * KW + lane];
+    }
+#endif
+    W dot = 0.0f;
+    if (lane < wk) {
+        q[k_off + lane] = acc;
+        dot = wide_fma(dot, acc, p[k_off + lane]);
+    }
+    dot = warp_sum(dot);
+    if (lane == 0) part[k] = dot;
+}
+#else
+// Kept blocks wider than a plane has lanes: one warp a block, the lanes
+// over k's tile entries (k_symv_sub's walk), each lane all the rows of its
+// tiles, and a warp sum per row.
 KERNEL_THREADS(PLANE) void k_cg_matvec(GLOBAL const u32* RESTRICT fl, GLOBAL const u32* RESTRICT kt_ptr, GLOBAL const u32* RESTRICT kt, GLOBAL const u32* RESTRICT kb, GLOBAL const R* RESTRICT s, GLOBAL const R* RESTRICT p, GLOBAL R* RESTRICT q, GLOBAL W* RESTRICT part) {
     if (fl[CF_ACTIVE] == 0) return;
     u32 k = block_x();
@@ -201,6 +265,7 @@ KERNEL_THREADS(PLANE) void k_cg_matvec(GLOBAL const u32* RESTRICT fl, GLOBAL con
     }
     if (lane == 0) part[k] = dot;
 }
+#endif
 
 // The step length, one block: alpha = rho / p.q from the parts of p.q. A
 // p.q that is not positive (S not positive definite along p, or not a

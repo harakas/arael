@@ -21,6 +21,16 @@ struct SchurHeader {
 // No kept-kept tile of H behind a tile of S.
 #define NONE 0xffffffffu
 
+// A kept block's rows as lanes. The kernels over a kept block's items (its
+// observers, its tiles of S) run a block of warps per kept block, each
+// warp MGROUPS groups of KW lanes: a lane is a row of the block, and a
+// group takes an item at a time, so its lanes read neighbouring values at
+// every step. For kept blocks no wider than a plane has lanes; wider ones
+// keep one warp a block with its lanes over the items.
+#if KW <= PLANE
+#define MGROUPS (PLANE / KW)
+#endif
+
 // R: the scalar the reduction computes in. W itself with SCHUR_F32 0; f32
 // with SCHUR_F32 1, as the CPU's f32 route, for a solve whose factor is f32
 // and that does not refine against S: the inputs (H, the gradient, the kept

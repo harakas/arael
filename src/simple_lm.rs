@@ -7954,8 +7954,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     plan.cg_iterations = Some(self.cg_iters);
                 }
                 let detail = format!(
-                    ", {} iterations in {} round{}, relative residual {:.1e}{}",
+                    ", {} iterations ({} queued) in {} round{}, relative residual {:.1e}{}",
                     st.iters,
+                    st.queued,
                     st.rounds,
                     if st.rounds == 1 { "" } else { "s" },
                     st.relative_residual,

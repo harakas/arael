@@ -9,9 +9,10 @@
 // eliminated block), EW (it rounded up to 4, 8, 16, 32 or 64), KW (the
 // widest kept block, rounded likewise), TILE_LANES (k_schur_tiles' threads
 // per unit: the device's lockstep width, 32 or 64), TILE_WARPS (its units
-// per block), TILE_GROUPS (a unit's lane groups) and ACC (the widest kept
+// per block), TILE_GROUPS (a unit's lane groups), ACC (the widest kept
 // block's square over a group's lanes, rounded up: the entries of a tile of
-// S per lane);
+// S per lane), and RWARPS and SWARPS (the warps a kept block takes in
+// k_schur_rhs and in k_symv_sub);
 // the plan header's slots (SE, SO, ST_*, OBS_KEPT, SK_*, SB_*; SHEADER of
 // them), the words of
 // an eliminated block's record (SE_*, SE_REC of them, in the table at SE),
@@ -411,9 +412,58 @@ KERNEL_THREADS(THREADS) void k_schur_kobs(GLOBAL const u32* RESTRICT plan, TABLE
     ko[KO_REC * q + KO_Z_OFF] = plan[H.w[SE] + SE_REC * plan[ro + SO_E] + SE_Z_OFF];
 }
 
-// Stage 4, one block of PLANE threads per kept block: rhs_kept = b_k - sum
-// over the block's observers of C_o z_e (each observer's expanded record),
-// the lanes over the observers, a warp sum per row.
+// Stage 4, a block of threads per kept block k: rhs_kept = b_k - sum over
+// the block's observers of C_o z_e (each observer's expanded record).
+#if KW <= PLANE
+// The lanes over the block's rows: RWARPS warps a block, each warp MGROUPS
+// groups of KW lanes (schur.h). A group takes every (RWARPS MGROUPS)-th of
+// k's observers, its lane `row` the observer's contribution to row `row`,
+// so the lanes of a group read neighbouring values of the coupling tile at
+// every step and the same value of z.
+KERNEL_THREADS(RWARPS * PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const u32* RESTRICT kobs, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL const R* RESTRICT z, GLOBAL R* RESTRICT out) {
+#if RWARPS > 1
+    SHARED R sh[RWARPS * KW];
+#endif
+    u32 k = block_x();
+    u32 warp = thread_x() / PLANE;
+    u32 lane = thread_x() % PLANE;
+    u32 row = lane % KW;
+    u32 s_off = plan[H.w[SK_S_OFF] + k];
+    u32 orig = plan[H.w[SK_ORIG_OFF] + k];
+    u32 wk = plan[H.w[SK_W] + k];
+    u32 q1 = plan[H.w[SK_OBS_PTR] + k + 1];
+    R acc = 0.0f;
+    for (u32 q = plan[H.w[SK_OBS_PTR] + k] + warp * MGROUPS + lane / KW; q < q1; q += RWARPS * MGROUPS) {
+        // the observer's expanded record (k_schur_kobs): its sizes, its
+        // coupling tile's offset, its eliminated block's z offset
+        u32 ro = KO_REC * q;
+        u32 dims = kobs[ro + KO_DIMS];
+        u32 we = DIMS_WE(dims);
+        u32 ca = kobs[ro + KO_C_OFF];
+        u32 trans = DIMS_TRANS(dims);
+        u32 zoff = kobs[ro + KO_Z_OFF];
+        if (row < wk)
+            for (u32 kk = 0; kk < we; kk++) acc = r_fma(acc, to_r(coupling(h, ca, trans, wk, we, row, kk)), z[zoff + kk]);
+    }
+    // a row's sums of the warp's groups (lanes row, row + KW, ...), then of
+    // the block's warps
+#pragma unroll
+    for (u32 m = KW; m < PLANE; m *= 2) acc += shfl_xor(acc, m);
+#if RWARPS > 1
+    if (lane < KW) sh[warp * KW + lane] = acc;
+    BARRIER();
+    if (warp != 0) return;
+    if (lane < KW) {
+        acc = sh[lane];
+#pragma unroll
+        for (u32 w = 1; w < RWARPS; w++) acc += sh[w * KW + lane];
+    }
+#endif
+    if (lane < wk) out[s_off + lane] = to_r(rhs[orig + lane]) - acc;
+}
+#else
+// Kept blocks wider than a plane has lanes: one warp a block, the lanes
+// over the observers, each lane all the rows, and a warp sum per row.
 KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const u32* RESTRICT kobs, GLOBAL const V* RESTRICT h, GLOBAL const V* RESTRICT rhs, GLOBAL const R* RESTRICT z, GLOBAL R* RESTRICT out) {
     u32 k = block_x();
     u32 lane = thread_x();
@@ -452,6 +502,7 @@ KERNEL_THREADS(PLANE) void k_schur_rhs(GLOBAL const u32* RESTRICT plan, TABLE_PA
         }
     }
 }
+#endif
 
 // The kept blocks of the reduced solution (R) into the full vector (V), one
 // thread per kept block.
@@ -522,12 +573,66 @@ KERNEL_THREADS(THREADS) void k_schur_kt(GLOBAL const u32* RESTRICT plan, TABLE_P
 }
 
 // r -= S x over the tiles of S (upper block storage, diagonal tiles
-// upper-only), one block of PLANE threads per kept block k owning rows k of
-// r: the lanes over k's tile entries (kt_ptr[k]..kt_ptr[k + 1], KT_REC
-// words each: the tile's value offset, its sizes word, the other block's
-// offset in x; a tile whose column block is k transposed gives the rows),
-// a warp sum per row; nothing unless gate[0] is nonzero. No two blocks
-// write the same entry.
+// upper-only), a block of threads per kept block k owning rows k of r, over
+// k's tile entries (kt_ptr[k]..kt_ptr[k + 1], KT_REC words each: the
+// tile's value offset, its sizes word, the other block's offset in x; a
+// tile whose column block is k transposed gives the rows); nothing unless
+// gate[0] is nonzero. No two blocks write the same entry. The sums are in W.
+#if KW <= PLANE
+// The lanes over the block's rows: SWARPS warps a block, each warp MGROUPS
+// groups of KW lanes (schur.h). A group takes every (SWARPS MGROUPS)-th of
+// k's tile entries, its lane `row` the tile's contribution to row `row`,
+// so the lanes of a group read neighbouring values of S at every step and
+// the same value of x.
+KERNEL_THREADS(SWARPS * PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const u32* RESTRICT kt_ptr, GLOBAL const u32* RESTRICT kt, GLOBAL const R* RESTRICT s, GLOBAL const R* RESTRICT x, GLOBAL R* RESTRICT r) {
+#if SWARPS > 1
+    SHARED W sh[SWARPS * KW];
+#endif
+    if (gate[0] == 0) return;
+    u32 k = block_x();
+    u32 warp = thread_x() / PLANE;
+    u32 lane = thread_x() % PLANE;
+    u32 row = lane % KW;
+    u32 k_off = plan[H.w[SK_S_OFF] + k];
+    u32 wk = plan[H.w[SK_W] + k];
+    u32 end = kt_ptr[k + 1];
+    W acc = 0.0f;
+    for (u32 q = kt_ptr[k] + warp * MGROUPS + lane / KW; q < end; q += SWARPS * MGROUPS) {
+        u32 val = kt[KT_REC * q + KT_VAL_OFF];
+        u32 dims = kt[KT_REC * q + KT_DIMS];
+        u32 xo = kt[KT_REC * q + KT_X_OFF];
+        u32 wr = KT_WR(dims);
+        if (row < wk) {
+            if (KT_TRANS(dims) == 0) {
+                // row `row` of (k, b): S_kb x_b, a diagonal tile read from its upper triangle
+                u32 wc = KT_WC(dims);
+                u32 diag = KT_DIAG(dims);
+                for (u32 j = 0; j < wc; j++) acc = wide_fma(acc, W(diag && row > j ? s[val + j + row * wr] : s[val + row + j * wr]), W(x[xo + j]));
+            } else {
+                // row `row` of (a, k)^T: S_ak^T x_a
+                for (u32 i2 = 0; i2 < wr; i2++) acc = wide_fma(acc, W(s[val + i2 + row * wr]), W(x[xo + i2]));
+            }
+        }
+    }
+    // a row's sums of the warp's groups (lanes row, row + KW, ...), then of
+    // the block's warps
+#pragma unroll
+    for (u32 m = KW; m < PLANE; m *= 2) acc += shfl_xor(acc, m);
+#if SWARPS > 1
+    if (lane < KW) sh[warp * KW + lane] = acc;
+    BARRIER();
+    if (warp != 0) return;
+    if (lane < KW) {
+        acc = sh[lane];
+#pragma unroll
+        for (u32 w = 1; w < SWARPS; w++) acc += sh[w * KW + lane];
+    }
+#endif
+    if (lane < wk) r[k_off + lane] = (R)(W(r[k_off + lane]) - acc);
+}
+#else
+// Kept blocks wider than a plane has lanes: one warp a block, the lanes
+// over k's tile entries, each lane all the rows, and a warp sum per row.
 KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, TABLE_PARAM(SchurHeader) H, GLOBAL const u32* RESTRICT kt_ptr, GLOBAL const u32* RESTRICT kt, GLOBAL const R* RESTRICT s, GLOBAL const R* RESTRICT x, GLOBAL R* RESTRICT r) {
     if (gate[0] == 0) return;
     u32 k = block_x();
@@ -575,6 +680,7 @@ KERNEL_THREADS(PLANE) void k_symv_sub(GLOBAL const u32* RESTRICT gate, GLOBAL co
         }
     }
 }
+#endif
 
 // dst = src (R) when gate[0] is nonzero.
 KERNEL_THREADS(THREADS) void k_copy_r(GLOBAL const u32* RESTRICT gate, GLOBAL R* RESTRICT dst, GLOBAL const R* RESTRICT src, u32 n) {

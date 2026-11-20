@@ -653,7 +653,8 @@ impl Route {
                 params,
                 &mut arael::simple_lm::SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
                     .with_policy(arael::simple_lm::SchurPolicy::Force)
-                    .with_iterative_schur(cg_options())),
+                    .with_iterative_schur(cg_options())
+                    .with_gpu(bench_harness::arael::gpu())),
                 path,
                 cfg,
                 ctx,
@@ -670,7 +671,8 @@ impl Route {
                 params,
                 &mut arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
                     .with_policy(arael::simple_lm::SchurPolicy::Force)
-                    .with_iterative_schur(cg_options())),
+                    .with_iterative_schur(cg_options())
+                    .with_gpu(bench_harness::arael::gpu())),
                 path,
                 cfg,
                 ctx,

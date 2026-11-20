@@ -112,7 +112,7 @@ fn a_solve_logs_what_its_gpu_does() {
     assert_eq!(r.gpu.unwrap().solve, Some(arael::simple_lm::GpuSolve::ConjugateGradients));
     assert!(unused(&log).is_empty(), "{log:?}");
     let line = log.iter().find(|(_, m)| m.starts_with("gpu schur (cpu, cg): ")).unwrap_or_else(|| panic!("a solve's line in {log:?}"));
-    assert!(line.1.contains("conjugate gradients") && line.1.contains(" iterations in 1 round"), "{}", line.1);
+    assert!(line.1.contains("conjugate gradients") && line.1.contains(" iterations (") && line.1.contains(" queued) in 1 round"), "{}", line.1);
 
     // mixed precision names a factor's scalar: ignored by conjugate
     // gradients, with a warning, on the device and on the host
