@@ -6197,28 +6197,40 @@ pub struct SchurPlan {
     pub refinement_shortfalls: Option<usize>,
 }
 
-/// The supernodal route's numeric state: the factor, in the matrix's scalar
-/// or in `f32` under [`MixedPrecision`], the kernels' context for each, and
-/// the refinement's scratch and counters.
+/// The supernodal route's numeric state on the host: the factor, in the
+/// matrix's scalar or in `f32` under [`MixedPrecision`], the kernels'
+/// context for each, and the refinement's scratch and counters (the
+/// counters also of a device factor's refinement).
 struct SnNumeric<T> {
     mixed: Option<MixedPrecision>,
-    gpu: Option<GpuDevice>,
     factor: Vec<T>,
     ctx: arael_faer::supernodal::SupernodalContext<T>,
     factor32: Vec<f32>,
     ctx32: arael_faer::supernodal::SupernodalContext<f32>,
-    /// The device factor, when `gpu` is set and its runtime compiled in,
-    /// built for the current symbolic by [`prepare`](Self::prepare); with
-    /// the reduction beside it ([`prepare_schur`](Self::prepare_schur)),
-    /// which keeps S on the device, and the device assembly feeding that
-    /// when the root has one and `gpu_assembly` is on.
-    #[cfg(feature = "gpu")]
-    gpu_solver: Option<Box<dyn crate::gpu_solver::GpuSolver<T>>>,
-    gpu_assembly: bool,
-    /// Whether the device's work is timed (`LmConfig::gather_timing`): a
-    /// device solver made later takes it.
-    timed: bool,
     rf: Refine,
+}
+
+/// The GPU side of a [`SparseFaer`]: the GPU its options give, and the
+/// device solver of the structure being solved.
+///
+/// The device solver exists exactly while the structure's damped solves run
+/// on the device: a structure's setup releases the last one
+/// ([`clear`](Self::clear)) and builds its own when its route is a device
+/// route ([`prepare`](Self::prepare)).
+struct GpuSide<T> {
+    /// [`SparseFaerOptions::with_gpu`].
+    given: Option<GpuDevice>,
+    /// [`SparseFaerOptions::with_gpu_assembly`].
+    assembly: bool,
+    /// The device factor of the structure's symbolic, with the reduction
+    /// beside it ([`prepare_schur`](Self::prepare_schur),
+    /// [`prepare_whole`](Self::prepare_whole)), which keeps S on the
+    /// device, and the device assembly feeding that when the root has one
+    /// and `assembly` is on.
+    #[cfg(feature = "gpu")]
+    solver: Option<Box<dyn crate::gpu_solver::GpuSolver<T>>>,
+    #[cfg(not(feature = "gpu"))]
+    scalar: core::marker::PhantomData<fn() -> T>,
 }
 
 /// The device factor's scalar: the solver's own, or `f32` under
@@ -6349,35 +6361,48 @@ impl<T> SnNumeric<T> {
     fn new() -> Self {
         SnNumeric {
             mixed: None,
-            gpu: None,
             factor: Vec::new(),
             ctx: arael_faer::supernodal::SupernodalContext::new(),
             factor32: Vec::new(),
             ctx32: arael_faer::supernodal::SupernodalContext::new(),
-            #[cfg(feature = "gpu")]
-            gpu_solver: None,
-            gpu_assembly: true,
-            timed: false,
             rf: Refine::default(),
         }
     }
 
-    /// Release every buffer, the device factor with them; the counters stay.
+    /// Release every buffer; the counters stay.
     fn clear(&mut self) {
         self.factor = Vec::new();
         self.factor32 = Vec::new();
-        #[cfg(feature = "gpu")]
-        {
-            self.gpu_solver = None;
-        }
         self.rf.clear();
     }
+}
 
-    /// Whether the reduced system is formed on a GPU.
-    fn gpu_reduces(&self) -> bool {
+impl<T> GpuSide<T> {
+    fn new() -> Self {
+        GpuSide {
+            given: None,
+            assembly: true,
+            #[cfg(feature = "gpu")]
+            solver: None,
+            #[cfg(not(feature = "gpu"))]
+            scalar: core::marker::PhantomData,
+        }
+    }
+
+    /// Release the device solver: its blocks go back to the device's pool,
+    /// for the next structure's to reuse.
+    fn clear(&mut self) {
         #[cfg(feature = "gpu")]
         {
-            self.gpu_solver.as_ref().is_some_and(|g| g.reduces())
+            self.solver = None;
+        }
+    }
+
+    /// Whether the structure has a device solver.
+    fn built(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        {
+            self.solver.is_some()
         }
         #[cfg(not(feature = "gpu"))]
         {
@@ -6385,28 +6410,41 @@ impl<T> SnNumeric<T> {
         }
     }
 
-    /// The device side, which every caller past [`prepare`](Self::prepare)
-    /// with a GPU set finds built.
+    /// Whether the structure's damped solves run on the device: the
+    /// reduced system, or the whole one, is formed and solved there.
+    fn reduces(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        {
+            self.solver.as_ref().is_some_and(|g| g.reduces())
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            false
+        }
+    }
+
+    /// The device solver, which every caller past
+    /// [`prepare`](Self::prepare) with a GPU given finds built.
     #[cfg(feature = "gpu")]
-    fn gpu_mut(&mut self) -> &mut dyn crate::gpu_solver::GpuSolver<T> {
-        self.gpu_solver.as_deref_mut().expect("the device solver is built with the symbolic")
+    fn solver_mut(&mut self) -> &mut dyn crate::gpu_solver::GpuSolver<T> {
+        self.solver.as_deref_mut().expect("the device solver is built with the symbolic")
     }
 
     #[cfg(feature = "gpu")]
-    fn gpu_ref(&self) -> &dyn crate::gpu_solver::GpuSolver<T> {
-        self.gpu_solver.as_deref().expect("the device solver is built with the symbolic")
+    fn solver_ref(&self) -> &dyn crate::gpu_solver::GpuSolver<T> {
+        self.solver.as_deref().expect("the device solver is built with the symbolic")
     }
 
     /// Whether the device assembly and the LM loop's vectors are built.
     #[cfg(feature = "gpu")]
     fn has_route(&self) -> bool {
-        self.gpu_solver.as_ref().is_some_and(|g| g.has_route())
+        self.solver.as_ref().is_some_and(|g| g.has_route())
     }
 
     /// Whether the device holds the last compute's H and gradient.
     #[cfg(feature = "gpu")]
     fn route_live(&self) -> bool {
-        self.gpu_solver.as_ref().is_some_and(|g| g.route_live())
+        self.solver.as_ref().is_some_and(|g| g.route_live())
     }
 }
 
@@ -6434,7 +6472,8 @@ fn gpu_setup_failed(operation: &'static str, e: arael_gpu::GpuError) -> SolveFai
     SolveFailureKind::Device(DeviceFailure { operation, message: e.to_string() })
 }
 
-/// The device factor of `sn` on `dev`'s runtime, its reduction in f32 with
+/// The device factor of `sn` on `dev`'s runtime, its solves refined under
+/// `refine` (`(max_steps, tolerance)`), its reduction in f32 with
 /// `f32_reduction`; [`SetupError::SolverUnavailable`] when that runtime is
 /// not compiled in, [`SolveFailureKind::Device`] when it cannot be set up.
 #[cfg(feature = "gpu")]
@@ -6443,6 +6482,7 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
     precision: arael_gpu::GpuPrecision,
     sn: &arael_faer::supernodal::SupernodalSymbolic,
     asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+    refine: Option<(usize, f64)>,
     f32_reduction: bool,
 ) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SolveFailureKind> {
     #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
@@ -6459,48 +6499,48 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
         #[cfg(feature = "gpu-cuda")]
         GpuBackend::Cuda => {
             let made = device_in(&dev.cuda, || arael_gpu::cuda::CudaDevice::new(dev.index));
-            let solver = solver_on(made, precision, sn, asym, wide, staging, f32_reduction);
+            let solver = solver_on(made, precision, sn, asym, refine, wide, staging, f32_reduction);
             report_kernel_cache();
             Ok(solver.map_err(|e| gpu_setup_failed("setup of the CUDA factor", e))?)
         }
         #[cfg(not(feature = "gpu-cuda"))]
         GpuBackend::Cuda => {
-            let _ = (precision, sn, asym, f32_reduction);
+            let _ = (precision, sn, asym, refine, f32_reduction);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the CUDA runtime is not compiled in (feature gpu-cuda)" }.into())
         }
         #[cfg(feature = "gpu-hip")]
         GpuBackend::Hip => {
             let made = device_in(&dev.hip, || arael_gpu::hip::HipDevice::new(dev.index));
-            let solver = solver_on(made, precision, sn, asym, wide, staging, f32_reduction);
+            let solver = solver_on(made, precision, sn, asym, refine, wide, staging, f32_reduction);
             report_kernel_cache();
             Ok(solver.map_err(|e| gpu_setup_failed("setup of the HIP factor", e))?)
         }
         #[cfg(not(feature = "gpu-hip"))]
         GpuBackend::Hip => {
-            let _ = (precision, sn, asym, f32_reduction);
+            let _ = (precision, sn, asym, refine, f32_reduction);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the HIP runtime is not compiled in (feature gpu-hip)" }.into())
         }
         #[cfg(feature = "gpu-cpu")]
         GpuBackend::Cpu => {
             let made = device_in(&dev.cpu, || arael_gpu::cpu::CpuDevice::new(dev.index));
-            let solver = solver_on(made, precision, sn, asym, wide, staging, f32_reduction);
+            let solver = solver_on(made, precision, sn, asym, refine, wide, staging, f32_reduction);
             report_kernel_cache();
             Ok(solver.map_err(|e| gpu_setup_failed("setup of the CPU device's factor", e))?)
         }
         #[cfg(not(feature = "gpu-cpu"))]
         GpuBackend::Cpu => {
-            let _ = (precision, sn, asym, f32_reduction);
+            let _ = (precision, sn, asym, refine, f32_reduction);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the CPU device is not compiled in (feature gpu-cpu)" }.into())
         }
         #[cfg(gpu_metal)]
         GpuBackend::Metal => {
             let made = device_in(&dev.metal, || arael_gpu::metal::MetalDevice::new(dev.index));
-            let solver = solver_on(made, precision, sn, asym, wide, staging, f32_reduction);
+            let solver = solver_on(made, precision, sn, asym, refine, wide, staging, f32_reduction);
             Ok(solver.map_err(|e| gpu_setup_failed("setup of the Metal factor", e))?)
         }
         #[cfg(not(gpu_metal))]
         GpuBackend::Metal => {
-            let _ = (precision, sn, asym, f32_reduction);
+            let _ = (precision, sn, asym, refine, f32_reduction);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the Metal runtime is not compiled in (feature gpu-metal, on an Apple target)" }.into())
         }
     }
@@ -6517,6 +6557,7 @@ fn solver_on<T, D>(
     precision: arael_gpu::GpuPrecision,
     sn: &arael_faer::supernodal::SupernodalSymbolic,
     asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+    refine: Option<(usize, f64)>,
     wide: arael_gpu::Wide,
     staging: crate::device::Staging,
     f32_reduction: bool,
@@ -6529,9 +6570,9 @@ where
     let dev = made?;
     #[cfg(feature = "gpu-trace")]
     if arael_gpu::trace::active() {
-        return Ok(Box::new(DeviceSolver::new(&arael_gpu::trace::traced(&dev), precision, sn, asym, wide, staging, f32_reduction)?));
+        return Ok(Box::new(DeviceSolver::new(&arael_gpu::trace::traced(&dev), precision, sn, asym, refine, wide, staging, f32_reduction)?));
     }
-    Ok(Box::new(DeviceSolver::new(&dev, precision, sn, asym, wide, staging, f32_reduction)?))
+    Ok(Box::new(DeviceSolver::new(&dev, precision, sn, asym, refine, wide, staging, f32_reduction)?))
 }
 
 /// A kernel cache entry the runtime could not write, logged once.
@@ -6543,87 +6584,87 @@ fn report_kernel_cache() {
     }
 }
 
-impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
-    /// Build the device reduction for a new Schur symbolic when the reduced
-    /// system is factorized on the device (`factorized`: the supernodal
-    /// route, not conjugate gradients); `hsym` is the Hessian's block
-    /// structure. It is on the factor's device and stream, so S is formed
-    /// and consumed there. Otherwise any earlier one is released.
+impl<T: crate::utils::Float + arael_faer::schur::SchurReal> GpuSide<T> {
+    /// Build the device reduction by `schur` beside the device factor,
+    /// when the structure has one; `hsym` is the Hessian's block structure.
+    /// It is on the factor's device and stream, so S is formed and consumed
+    /// there.
     fn prepare_schur(
         &mut self,
         schur: &arael_faer::schur::SchurSymbolic<SparseIndex>,
         hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
-        factorized: bool,
     ) -> Result<(), SolveFailureKind> {
         #[cfg(feature = "gpu")]
-        if let Some(g) = self.gpu_solver.as_mut() {
-            if !factorized {
-                g.drop_reduction();
-                return Ok(());
-            }
+        if let Some(g) = self.solver.as_mut() {
             let built = g.prepare_reduction(Some(schur), hsym);
             report_kernel_cache();
             return built.map_err(|e| gpu_setup_failed("setup of the reduction", e));
         }
-        let _ = (schur, hsym, factorized);
+        let _ = (schur, hsym);
         Ok(())
     }
 
     /// The device reduction with nothing eliminated, for the whole system
     /// factorized on the GPU (the device factor built for `hsym`).
-    #[cfg(feature = "gpu")]
     fn prepare_whole(&mut self, hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), SolveFailureKind> {
-        let Some(g) = self.gpu_solver.as_mut() else { return Ok(()) };
-        let built = g.prepare_reduction(None, hsym);
-        report_kernel_cache();
-        built.map_err(|e| gpu_setup_failed("setup of the reduction", e))
+        #[cfg(feature = "gpu")]
+        if let Some(g) = self.solver.as_mut() {
+            let built = g.prepare_reduction(None, hsym);
+            report_kernel_cache();
+            return built.map_err(|e| gpu_setup_failed("setup of the reduction", e));
+        }
+        let _ = hsym;
+        Ok(())
     }
 
-    /// Build the device factor for a new symbolic when a GPU is asked for:
-    /// `asym` is the block structure the symbolic analysed. Without the
-    /// `gpu` feature, or with a runtime not compiled in, the solve is
-    /// unavailable.
+    /// Build the device factor of the symbolic `sn` when a GPU is given:
+    /// `asym` is the block structure the symbolic analysed, `mixed` the
+    /// solver's mixed precision (an f32 factor, its solves refined), and
+    /// the device's work is timed when `timed`. Without the `gpu` feature,
+    /// or with a runtime not compiled in, the solve is unavailable.
     fn prepare(
         &mut self,
         sn: &arael_faer::supernodal::SupernodalSymbolic,
         asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+        mixed: Option<MixedPrecision>,
+        timed: bool,
     ) -> Result<(), SolveFailureKind> {
-        let Some(dev) = self.gpu.as_ref() else {
+        let Some(dev) = self.given.as_ref() else {
             return Ok(());
         };
         #[cfg(feature = "gpu")]
         {
             // the previous structure's blocks go back to the device's pool
             // first, for the new ones to reuse
-            self.gpu_solver = None;
-            metal_supports::<T>(dev, self.mixed.is_some())?;
-            let precision = device_precision::<T>(self.mixed.is_some());
-            // as the CPU's f32 route, unless the wide values are asked for; a
-            // refinement measures its residuals against S, so not with one
+            self.solver = None;
+            metal_supports::<T>(dev, mixed.is_some())?;
+            let precision = device_precision::<T>(mixed.is_some());
             // an f32 solve forms the system it factorizes in f32, as the
-            // CPU's f32 route; under mixed precision in the wide values
-            let f32_reduction = precision == arael_gpu::GpuPrecision::F32 && self.mixed.is_none();
-            let mut solver = device_solver(dev, precision, sn, asym, f32_reduction)?;
-            solver.set_timing(self.timed);
-            self.gpu_solver = Some(solver);
+            // CPU's f32 route; under mixed precision in the wide values,
+            // which the refinement measures its residuals against
+            let f32_reduction = precision == arael_gpu::GpuPrecision::F32 && mixed.is_none();
+            // The step is handed back in T, so no tolerance below a few of
+            // its epsilons buys anything, as in the CPU refinement.
+            let floor = 8.0 * arael_faer::schur::SchurReal::to_f64(<T as num::Float>::epsilon());
+            let refine = mixed.map(|mp| (mp.max_refinements, mp.tol.max(floor)));
+            let mut solver = device_solver(dev, precision, sn, asym, refine, f32_reduction)?;
+            solver.set_timing(timed);
+            self.solver = Some(solver);
             Ok(())
         }
         #[cfg(not(feature = "gpu"))]
         {
-            let _ = (dev, sn, asym);
+            let _ = (dev, sn, asym, mixed, timed);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "arael built without the `gpu` feature" }.into())
         }
     }
 }
 
 impl<T: crate::utils::Float> SnNumeric<T> {
-    /// Size the factor for a new symbolic: the scalar in use is allocated,
-    /// the other released; nothing on the host when the factor is on a GPU.
+    /// Size the host's factor for a new symbolic: the scalar in use is
+    /// allocated, the other released.
     fn resize(&mut self, count: usize) {
-        if self.gpu.is_some() {
-            self.factor = Vec::new();
-            self.factor32 = Vec::new();
-        } else if self.mixed.is_some() {
+        if self.mixed.is_some() {
             self.factor32.resize(count, 0.0);
             self.factor = Vec::new();
         } else {
@@ -6640,8 +6681,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     ///
     /// On the mixed route the factor is `f32` and the solution is refined
     /// against `a` as [`MixedPrecision`] describes, the counters updated. A
-    /// solver with a device factor does not come here: its damped solves
-    /// run on the device through its reduction
+    /// structure with a device solver does not come here: its damped
+    /// solves run on the device through its reduction
     /// ([`GpuSolver::solve_reduced`](crate::gpu_solver::GpuSolver::solve_reduced),
     /// or the resident loop).
     fn solve(
@@ -6654,8 +6695,6 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         verbose: bool,
     ) -> Result<(), arael_faer::supernodal::SupernodalError> {
         use arael_faer::supernodal::{supernodal_factorize, supernodal_factorize_as, supernodal_solve, supernodal_solve_as};
-        #[cfg(feature = "gpu")]
-        assert!(self.gpu_solver.is_none(), "a device factor solves through its reduction, not from host values");
         // Where the time goes, for the verbose log only: the clock is not
         // read otherwise.
         let mut clock = verbose.then(std::time::Instant::now);
@@ -6885,6 +6924,9 @@ pub struct SparseFaer<T = f64> {
         crate::covariance::CovOrdering,
     )>,
     sn_num: SnNumeric<T>,
+    // The GPU given (with_gpu) and the device solver of the structure, when
+    // its damped solves run there.
+    gpu: GpuSide<T>,
     // Conjugate gradients on the reduced system ([`SchurMethod::Iterative`]).
     // The preconditioner is rebuilt per damped solve -- S changes with every
     // lambda -- while the scratch vectors persist so no iteration allocates.
@@ -6953,6 +6995,7 @@ impl<T> SparseFaer<T> {
             sn_sym: None,
             sn_whole: None,
             sn_num: SnNumeric::new(),
+            gpu: GpuSide::new(),
             schur_solve: SchurMethod::default(),
             cg_work: arael_faer::cg::CgWorkspace::default(),
             cg_iters: 0,
@@ -6978,6 +7021,25 @@ impl<T> SparseFaer<T> {
         }
     }
 
+    /// The supernodal factor of `sn`, the analysis of the block structure
+    /// `asym`, made ready: the device solver built when the solver has a
+    /// GPU (nothing on the host then), else the host's factor sized.
+    fn prepare_factor(
+        &mut self,
+        sn: &arael_faer::supernodal::SupernodalSymbolic,
+        asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+    ) -> Result<(), SolveFailureKind>
+    where
+        T: crate::utils::Float + arael_faer::schur::SchurReal,
+    {
+        if self.gpu.given.is_some() {
+            self.sn_num.clear();
+            return self.gpu.prepare(sn, asym, self.sn_num.mixed, self.measure);
+        }
+        self.sn_num.resize(sn.factor_val_count());
+        Ok(())
+    }
+
     /// The time since the setup's last lap (or its start); zero when the
     /// setup is not timed, and the clock is then not read.
     fn setup_lap(&mut self) -> Duration {
@@ -6997,10 +7059,10 @@ impl<T> SparseFaer<T> {
     /// whether it is integrated, `None` inside when it does not open, which
     /// the solve then reports. `None` without a GPU.
     fn open_gpu(&mut self) -> Option<Option<bool>> {
-        self.sn_num.gpu.as_ref()?;
+        self.gpu.given.as_ref()?;
         let before = self.setup_lap();
         self.setup.ordering += before;
-        let integrated = self.sn_num.gpu.as_ref().map(|gpu| gpu.integrated());
+        let integrated = self.gpu.given.as_ref().map(|gpu| gpu.integrated());
         let opened = self.setup_lap();
         self.setup.gpu_open += opened;
         integrated
@@ -7021,7 +7083,7 @@ impl<T> SparseFaer<T> {
     /// assert_eq!(solver.gpu_report().unwrap().work, GpuWork::Loop);
     /// ```
     pub fn gpu_report(&self) -> Option<GpuReport> {
-        let gpu = self.sn_num.gpu.as_ref()?;
+        let gpu = self.gpu.given.as_ref()?;
         self.plan?;
         #[cfg_attr(not(feature = "gpu"), allow(unused_mut))]
         let mut report = GpuReport {
@@ -7038,7 +7100,7 @@ impl<T> SparseFaer<T> {
             buffers_created: gpu.buffers_created(),
         };
         #[cfg(feature = "gpu")]
-        if let Some(g) = self.sn_num.gpu_solver.as_deref().filter(|g| self.sn_active && g.reduces()) {
+        if let Some(g) = self.gpu.solver.as_deref().filter(|g| g.reduces()) {
             let arch = g.arch();
             report.name = arch.name.clone();
             report.target = arch.target.clone();
@@ -7066,8 +7128,8 @@ impl<T> SparseFaer<T> {
         solver.sn_batch_ratio = opts.block_supernodal_batch;
         solver.sn_memory_lean = opts.block_supernodal_memory_lean;
         solver.sn_num.mixed = opts.mixed_precision;
-        solver.sn_num.gpu = opts.gpu.clone();
-        solver.sn_num.gpu_assembly = opts.gpu_assembly;
+        solver.gpu.given = opts.gpu.clone();
+        solver.gpu.assembly = opts.gpu_assembly;
         solver.schur_solve = opts.schur_solve;
         solver.marginalize = opts.marginalize.clone();
         solver
@@ -7245,13 +7307,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.on_device = false;
         }
         #[cfg(feature = "gpu")]
-        if self.sn_num.gpu_reduces() {
+        if self.gpu.reduces() {
             // why this structure assembles on the host, when it does
-            self.host_assembly = if !self.sn_num.gpu_assembly {
+            self.host_assembly = if !self.gpu.assembly {
                 Some(HostAssembly::Asked)
             } else if problem.device_root().is_none() {
                 Some(HostAssembly::NoDeviceForm(problem.device_unsupported().unwrap_or("no device form").to_string()))
-            } else if core::mem::size_of::<T>() == 8 && !self.sn_num.gpu_ref().arch().has_f64 {
+            } else if core::mem::size_of::<T>() == 8 && !self.gpu.solver_ref().arch().has_f64 {
                 Some(HostAssembly::NoF64)
             } else {
                 None
@@ -7260,13 +7322,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 None => {
                     problem.update_params(params);
                     let root = problem.device_root().expect("a device root");
-                    let built = self.sn_num.gpu_mut().build_route(root, &hsym, &self.bdiag_pos, ctx.threads());
+                    let built = self.gpu.solver_mut().build_route(root, &hsym, &self.bdiag_pos, ctx.threads());
                     report_kernel_cache();
                     built.map_err(|e| gpu_setup_failed("setup of the device assembly", e))?;
                     let layout = self.setup_lap();
                     self.setup.gpu_layout += layout;
                     let t_a = self.measure.then(Instant::now);
-                    let cost = self.sn_num.gpu_mut().route_compute(problem, params, grad)?;
+                    let cost = self.gpu.solver_mut().route_compute(problem, params, grad)?;
                     if let Some(t) = t_a {
                         self.assembly_time = t.elapsed();
                     }
@@ -7612,18 +7674,16 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             )
             .map_err(|_| SetupError::SymbolicFactorization { reduced: false })?,
         };
-        self.sn_num.resize(sn.factor_val_count());
-        self.sn_num.prepare(&sn, &hsym)?;
+        self.prepare_factor(&sn, &hsym)?;
         let factor = self.setup_lap();
         self.setup.factor += factor;
         // On a GPU the whole system takes the device reduction with nothing
         // eliminated: S is H, and an attempt is the reduced route's (one
         // wait, a captured graph, the refinement on the device, and the
         // device assembly with the LM loop there when the model has one).
-        #[cfg(feature = "gpu")]
-        self.sn_num.prepare_whole(&hsym)?;
+        self.gpu.prepare_whole(&hsym)?;
         let planned = self.setup_lap();
-        if self.sn_num.gpu_reduces() {
+        if self.gpu.reduces() {
             self.setup.gpu_plan += planned;
         } else {
             self.setup.factor += planned;
@@ -7788,21 +7848,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     #[cfg(feature = "gpu")]
     fn solve_reduced_gpu(&mut self, h: &arael_faer::bsc::SparseBlockColMat<SparseIndex, T>, grad: &[T], delta: &mut [T]) -> Result<bool, DeviceFailure> {
         let clock = self.verbose.then(Instant::now);
-        let refine = self.gpu_refine();
-        let solved = self.sn_num.gpu_mut().solve_reduced(h.vals(), grad, refine, delta)?;
+        let solved = self.gpu.solver_mut().solve_reduced(h.vals(), grad, delta)?;
         let ok = solved.is_some();
         self.note_gpu_solve(solved, clock, "reduce + factor + solve + back-substitution");
         Ok(ok)
-    }
-
-    /// The device solve's refinement, `(max_steps, tolerance)` under mixed
-    /// precision.
-    #[cfg(feature = "gpu")]
-    fn gpu_refine(&self) -> Option<(usize, f64)> {
-        // The step is handed back in T, so no tolerance below a few of its
-        // epsilons buys anything, as in the CPU refinement.
-        let floor = 8.0 * arael_faer::schur::SchurReal::to_f64(<T as num::Float>::epsilon());
-        self.sn_num.mixed.map(|mp| (mp.max_refinements, mp.tol.max(floor)))
     }
 
     /// A device solve's refinement counted and, verbose, reported (`what`
@@ -7815,7 +7864,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.sn_num.rf.shortfalls += 1;
         }
         if let Some(t) = clock {
-            let gs = self.sn_num.gpu_ref();
+            let gs = self.gpu.solver_ref();
             info!(
                 "gpu schur ({}, {:?}): {} {:.1} ms{}",
                 gs.runtime(),
@@ -7844,39 +7893,38 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 #[cfg(feature = "gpu")]
 impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> ResidentLoop<T> for SparseFaer<T> {
     fn start(&mut self, x: &[T], floor: Option<T>) -> Result<(), DeviceFailure> {
-        self.sn_num.gpu_mut().start(x, floor.map(arael_faer::schur::SchurReal::to_f64))
+        self.gpu.solver_mut().start(x, floor.map(arael_faer::schur::SchurReal::to_f64))
     }
 
     fn linearize(&mut self) -> Result<(), DeviceFailure> {
-        self.sn_num.gpu_mut().linearize()
+        self.gpu.solver_mut().linearize()
     }
 
     fn attempt(&mut self, lambda: T) -> Result<ResidentAttempt, DeviceFailure> {
         let clock = self.verbose.then(Instant::now);
-        let refine = self.gpu_refine();
-        let (stats, attempt) = self.sn_num.gpu_mut().attempt(arael_faer::schur::SchurReal::to_f64(lambda), refine)?;
+        let (stats, attempt) = self.gpu.solver_mut().attempt(arael_faer::schur::SchurReal::to_f64(lambda))?;
         self.note_gpu_solve(stats, clock, "damp + reduce + factor + solve + back-substitution + trial cost");
         Ok(attempt)
     }
 
     fn accept(&mut self) {
-        self.sn_num.gpu_mut().accept();
+        self.gpu.solver_mut().accept();
     }
 
     fn params(&mut self, x: &mut [T]) -> Result<(), DeviceFailure> {
-        self.sn_num.gpu_mut().params(x)
+        self.gpu.solver_mut().params(x)
     }
 
     fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]) -> Result<(), DeviceFailure> {
-        self.sn_num.gpu_mut().vectors(grad, diagonal, step)
+        self.gpu.solver_mut().vectors(grad, diagonal, step)
     }
 
     fn nonfinite(&mut self) -> Result<[usize; 4], DeviceFailure> {
-        self.sn_num.gpu_mut().nonfinite()
+        self.gpu.solver_mut().nonfinite()
     }
 
     fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]) -> Result<(), DeviceFailure> {
-        self.sn_num.gpu_mut().finish(problem, x)
+        self.gpu.solver_mut().finish(problem, x)
     }
 }
 
@@ -7887,7 +7935,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
     #[cfg(feature = "gpu")]
     fn resident(&mut self) -> Option<&mut dyn ResidentLoop<T>> {
-        if self.sn_num.has_route() { Some(self) } else { None }
+        if self.gpu.has_route() { Some(self) } else { None }
     }
 
     /// The host matrix's non-finite values. On the device route the loop
@@ -7934,15 +7982,14 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // The clock is only read when the caller asked for timing, and the
         // device then stamps its queue; its times start from zero.
         self.measure = config.gather_timing;
-        self.sn_num.timed = self.measure;
         #[cfg(feature = "gpu")]
-        if let Some(g) = self.sn_num.gpu_solver.as_mut() {
+        if let Some(g) = self.gpu.solver.as_mut() {
             g.set_timing(self.measure);
         }
         // A solve starts here: the model a session hands it may have other
         // data than the device holds from the last one.
         #[cfg(feature = "gpu")]
-        if let Some(g) = self.sn_num.gpu_solver.as_mut() {
+        if let Some(g) = self.gpu.solver.as_mut() {
             g.mark_stale();
         }
         // The reduction's own threads: 1 without the rayon feature.
@@ -7973,8 +8020,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
     fn gpu_timing(&self) -> Option<GpuTiming> {
         #[cfg(feature = "gpu")]
-        if self.measure && self.sn_active {
-            return self.sn_num.gpu_solver.as_ref().and_then(|g| g.timing());
+        if self.measure {
+            return self.gpu.solver.as_ref().and_then(|g| g.timing());
         }
         None
     }
@@ -8004,8 +8051,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // The device route: H and the gradient assembled where they are
         // factorized.
         #[cfg(feature = "gpu")]
-        if self.on_device && self.sn_num.has_route() {
-            let cost = self.sn_num.gpu_mut().route_compute(problem, params, grad)?;
+        if self.on_device && self.gpu.has_route() {
+            let cost = self.gpu.solver_mut().route_compute(problem, params, grad)?;
             if let Some(t) = t_a {
                 self.assembly_time = t.elapsed();
             }
@@ -8035,6 +8082,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.sn_active = false;
         self.sn_sym = None;
         self.sn_whole = None;
+        // The last structure's device solver goes; this one's route builds
+        // its own when it runs on the device.
+        self.gpu.clear();
         let n = matrix.n;
 
         // Verbose mode narrates the one-time structural work below: what was
@@ -8912,8 +8962,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 )
                 .map_err(|_| SetupError::SymbolicFactorization { reduced: true })?,
             };
-            self.sn_num.resize(sn.factor_val_count());
-            self.sn_num.prepare(&sn, &schur.s)?;
+            self.prepare_factor(&sn, &schur.s)?;
             if vb {
                 info!(
                     "schur: reduced system {} params ({:.0}% dense, half-bandwidth {}), \
@@ -9000,20 +9049,22 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
         self.rhs_kept.resize(nk, T::zero());
         self.x_kept.resize(nk, T::zero());
-        self.sn_num.prepare_schur(&schur, &hsym, self.sn_active && !iterative)?;
+        // The reduction on the device, beside the device factor when the
+        // supernodal route built one.
+        self.gpu.prepare_schur(&schur, &hsym)?;
         // The device route forms S on the device and never reads a host copy.
-        self.s = if self.sn_num.gpu_reduces() { None } else { s };
+        self.s = if self.gpu.reduces() { None } else { s };
         self.schur = Some(schur);
         // the device's plan of the reduction, where a device reduces
         let planned = self.setup_lap();
-        if self.sn_num.gpu_reduces() {
+        if self.gpu.reduces() {
             self.setup.gpu_plan = planned;
         } else {
             self.setup.factor += planned;
         }
 
         // First numeric fill. Everything above it in this call was analysis.
-        if vb && self.sn_num.gpu_reduces() {
+        if vb && self.gpu.reduces() {
             info!("gpu: the reduction's plan {:.1} ms", ms(planned));
         }
         self.first_fill(problem, params, grad, matrix, hsym, ctx, vb)
@@ -9027,8 +9078,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             return;
         }
         #[cfg(feature = "gpu")]
-        if self.sn_num.route_live() {
-            self.sn_num.gpu_ref().route_diagonal(diagonal);
+        if self.gpu.route_live() {
+            self.gpu.solver_ref().route_diagonal(diagonal);
             return;
         }
         // INVARIANT: lm_solve calls compute() (which sets matrix.h) before this.
@@ -9076,7 +9127,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // The device route: H is on the device, damped there.
         #[cfg(feature = "gpu")]
         // H is on the device: the loop runs its attempts there (ResidentLoop)
-        assert!(!self.sn_num.route_live(), "a damped solve on the host with H on the device");
+        assert!(!self.gpu.route_live(), "a damped solve on the host with H on the device");
         // INVARIANT: lm_solve calls compute() (which sets matrix.h) before this.
         let h = matrix.h.as_mut().expect("compute before solve_damped");
         {
@@ -9092,10 +9143,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // symbolic (matrix.h is block form only in these cases).
         if self.schur.is_none() {
             #[cfg(feature = "gpu")]
-            if self.sn_active && self.sn_num.gpu_reduces() {
+            if self.gpu.reduces() {
                 return Ok(self.solve_reduced_gpu(h, grad, delta)?);
             }
             if self.sn_active {
+                assert!(!self.gpu.built(), "a device factor solves through its reduction, not from host values");
                 let sn = self.sn_sym.as_ref().unwrap();
                 let threads = self.ctx.threads();
                 if self.sn_num.solve(sn, h, grad, delta, threads, self.verbose).is_err() {
@@ -9118,7 +9170,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // The device route: S formed, factorized, solved and refined on the
         // GPU, the step recovered there. Only for the factorizing method.
         #[cfg(feature = "gpu")]
-        if self.sn_num.gpu_reduces() {
+        if self.gpu.reduces() {
             return Ok(self.solve_reduced_gpu(h, grad, delta)?);
         }
 
@@ -9209,6 +9261,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         } else if self.sn_active {
             // Supernodal block Cholesky on S: no scalar CSC round trip, the
             // ordering baked into the seed scatter.
+            assert!(!self.gpu.built(), "a device factor solves through its reduction, not from host values");
             let sn = self.sn_sym.as_ref().unwrap();
             let s = self.s.as_ref().unwrap();
             let threads = self.ctx.threads();

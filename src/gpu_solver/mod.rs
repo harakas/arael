@@ -14,7 +14,8 @@ use crate::simple_lm::{DeviceFailure, LmProblemInternals, ResidentAttempt};
 pub(crate) mod solver;
 
 /// The GPU side of the supernodal solver: the device factor of one
-/// symbolic analysis, and two layers built on it:
+/// symbolic analysis, refined as the solver was built to (an f32 factor
+/// under mixed precision), and two layers built on it:
 ///
 /// - with [`prepare_reduction`](Self::prepare_reduction), the reduction,
 ///   of the reduced system or of the whole one with nothing eliminated: a
@@ -60,10 +61,9 @@ pub(crate) trait GpuSolver<T>: Send {
     /// (`GpuSchurParams::f32_reduction`).
     fn f32_reduction(&self) -> bool;
     /// One damped solve on the device from the damped H's tile values and
-    /// the gradient, refined under `refine` (`(max_steps, tolerance)`), the
-    /// step into `delta`; `None` when an eliminated block or S is not
-    /// positive definite.
-    fn solve_reduced(&mut self, hvals: &[T], grad: &[T], refine: Option<(usize, f64)>, delta: &mut [T]) -> Result<Option<RefineStats>, DeviceFailure>;
+    /// the gradient, the step into `delta`, with the refinement's outcome;
+    /// `None` when an eliminated block or S is not positive definite.
+    fn solve_reduced(&mut self, hvals: &[T], grad: &[T], delta: &mut [T]) -> Result<Option<RefineStats>, DeviceFailure>;
 
     /// Lay `root` out for the device assembly against the reduction's
     /// structure `hsym`, whose scalar diagonal is at `bdiag_pos` in its
@@ -89,9 +89,9 @@ pub(crate) trait GpuSolver<T>: Send {
     /// [`ResidentLoop::linearize`](crate::simple_lm::ResidentLoop::linearize).
     fn linearize(&mut self) -> Result<(), DeviceFailure>;
     /// [`ResidentLoop::attempt`](crate::simple_lm::ResidentLoop::attempt)
-    /// at `lambda`, refined under `refine`, with the refinement's outcome
-    /// (`None` for a system that is not positive definite).
-    fn attempt(&mut self, lambda: f64, refine: Option<(usize, f64)>) -> Result<(Option<RefineStats>, ResidentAttempt), DeviceFailure>;
+    /// at `lambda`, with the refinement's outcome (`None` for a system that
+    /// is not positive definite).
+    fn attempt(&mut self, lambda: f64) -> Result<(Option<RefineStats>, ResidentAttempt), DeviceFailure>;
     /// [`ResidentLoop::accept`](crate::simple_lm::ResidentLoop::accept).
     fn accept(&mut self);
     /// [`ResidentLoop::params`](crate::simple_lm::ResidentLoop::params).

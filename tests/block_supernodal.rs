@@ -737,6 +737,110 @@ fn gpu_device_clones_share_their_buffers() {
     }
 }
 
+/// `y = a x + b` fitted to points: a problem built by hand, without blocks,
+/// which the plain sparse route solves on the host.
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+struct Line {
+    pts: Vec<(f64, f64)>,
+}
+
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+impl Line {
+    /// The residual and its Jacobian row at each point.
+    fn rows<'a>(&'a self, p: &'a [f64]) -> impl Iterator<Item = (f64, [f64; 2])> + 'a {
+        self.pts.iter().map(move |&(x, y)| (p[0] * x + p[1] - y, [x, 1.0]))
+    }
+}
+
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+impl arael::simple_lm::LmProblem<f64> for Line {
+    fn calc_cost(&mut self, p: &[f64]) -> f64 {
+        self.rows(p).map(|(r, _)| 0.5 * r * r).sum()
+    }
+
+    fn calc_grad_hessian_dense(&mut self, p: &[f64], grad: &mut [f64], h: &mut [f64]) -> f64 {
+        grad.fill(0.0);
+        h.fill(0.0);
+        for (r, j) in self.rows(p) {
+            for a in 0..2 {
+                grad[a] += j[a] * r;
+                for b in 0..2 {
+                    h[a + b * 2] += j[a] * j[b];
+                }
+            }
+        }
+        self.calc_cost(p)
+    }
+
+    fn calc_grad_hessian_sparse(&mut self, p: &[f64], grad: &mut [f64], coo: &mut arael::simple_lm::CooMatrix<f64>) -> f64 {
+        grad.fill(0.0);
+        for (r, j) in self.rows(p) {
+            for a in 0..2 {
+                grad[a] += j[a] * r;
+                // the upper triangle, as the sparse backends read it
+                for b in a..2 {
+                    coo.push(a as u32, b as u32, j[a] * j[b]);
+                }
+            }
+        }
+        self.calc_cost(p)
+    }
+}
+
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+impl arael::simple_lm::LmProblemInternals<f64> for Line {
+    fn calc_grad_hessian_sparse_indexed(&mut self, p: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &arael::store::PositionStream, _ctx: &mut arael::threads::Context) -> f64 {
+        grad.fill(0.0);
+        vals.fill(0.0);
+        let mut k = 0;
+        for (r, j) in self.rows(p) {
+            for a in 0..2 {
+                grad[a] += j[a] * r;
+                for b in a..2 {
+                    vals[positions[k] as usize] += j[a] * j[b];
+                    k += 1;
+                }
+            }
+        }
+        arael::simple_lm::LmProblem::calc_cost(self, p)
+    }
+}
+
+/// A solver whose next structure does not run on the device releases the
+/// device solver of the structure before: the next problem is solved on
+/// the host (not by the earlier structure's loop on the device), and the
+/// buffers are back in the device's state, where a second solver finds
+/// them while the first one is still alive.
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
+#[test]
+fn a_structure_off_the_device_releases_the_device_solver_before_it() {
+    use arael::simple_lm::{GpuWork, LmSolver};
+    for gpu in gpu_devices(false) {
+        let options = || {
+            arael::simple_lm::SparseFaerOptions::default()
+                .with_envelope_schur(EnvelopeMode::Never)
+                .with_block_supernodal(BlockSupernodalMode::Always)
+                .with_gpu(Some(gpu.clone()))
+        };
+        let mut first = SparseFaer::from_options(&options());
+        let (_, c) = solve(&mut first, 2);
+        assert!(c < 1e-12 && first.gpu_report().unwrap().work != GpuWork::Unused, "{:?}", gpu.backend());
+        let created = gpu.buffers_created();
+        assert!(created > 0);
+        // a problem without blocks: the plain sparse route, on the host
+        first.reset();
+        let mut line = Line { pts: vec![(0.0, 1.0), (1.0, 3.0), (2.0, 5.0)] };
+        let r = lm_solve(&[0.0, 0.0], &mut first, &mut line, &LmConfig { max_iters: 40, ..Default::default() }).unwrap();
+        assert!(r.end_cost < 1e-20, "{}", r.end_cost);
+        assert_eq!(first.gpu_report().unwrap().work, GpuWork::Unused, "{:?}", gpu.backend());
+        let mut second = SparseFaer::from_options(&options());
+        let (_, c) = solve(&mut second, 2);
+        assert!(c < 1e-12 && second.gpu_report().unwrap().work != GpuWork::Unused, "{:?}", gpu.backend());
+        assert_eq!(gpu.buffers_created(), created, "{:?}: the second solver took the first one's buffers", gpu.backend());
+        drop(first);
+    }
+}
+
 /// The GPU takes the factorizing route only: with conjugate gradients on the
 /// reduced system the solve stays on the CPU, and the plan says so.
 #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]

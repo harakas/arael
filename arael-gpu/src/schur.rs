@@ -1080,8 +1080,21 @@ impl<D: Device> GpuSchur<D> {
         Arg::Bytes(bytemuck::cast_slice(&self.header))
     }
 
-    /// Zero the flags and launch the reduction, from the uploaded values.
-    fn launch_reduce(&self) -> Result<(), GpuError> {
+    /// The launches of the reduction, the first stage of a damped solve:
+    /// the flags zeroed, then S and the reduced right-hand side formed from
+    /// the damped Hessian's values and the gradient on the device (at
+    /// [`h_target`](Self::h_target) and [`rhs_target`](Self::rhs_target)).
+    /// [`launch`](Self::launch) runs the three stages with a factor; a
+    /// caller with another solver of the reduced system launches it between
+    /// this and [`launch_backsub`](Self::launch_backsub).
+    ///
+    /// ```ignore
+    /// g.launch_reduce()?;
+    /// g.launch_factored(&factor, None)?;
+    /// g.launch_backsub()?;
+    /// ```
+    pub fn launch_reduce(&self) -> Result<(), GpuError> {
+        let _scope = Scope::new(&*self.dev, "reduce");
         let (s, plan, hd) = (&self.sec, Arg::Block(&self.ints, 0), self.header_arg());
         let w = |at: usize| Arg::Block(&self.work, at);
         self.run(&self.k.zero_u32, 1, PLANE, &[w(self.flag_at(0)), Arg::U32(N_FLAGS as u32)])?;
@@ -1131,11 +1144,26 @@ impl<D: Device> GpuSchur<D> {
     /// back-substitution. The same sequence every time for the same factor
     /// and refinement, which is what makes it a graph.
     fn launch_attempt(&self, factor: &GpuFactor<D>, max_steps: usize, tol_rel: f64) -> Result<(), GpuError> {
+        self.launch_reduce()?;
+        self.launch_solve(factor, max_steps, tol_rel)?;
+        self.launch_backsub()
+    }
+
+    /// The launches that solve the reduced system with `factor`, the stage
+    /// between [`launch_reduce`](Self::launch_reduce) and
+    /// [`launch_backsub`](Self::launch_backsub): S factorized, the kept
+    /// blocks solved for, and the solution refined against S under `refine`
+    /// (`(max_steps, tolerance)`).
+    pub fn launch_factored(&self, factor: &GpuFactor<D>, refine: Option<(usize, f64)>) -> Result<(), GpuError> {
+        assert!(Arc::ptr_eq(&self.dev, factor.device()), "the factor runs on the reduction's device, so S never leaves it");
+        let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));
+        self.launch_solve(factor, max_steps, tol_rel)
+    }
+
+    /// [`launch_factored`](Self::launch_factored) with the refinement's
+    /// steps and tolerance as they are launched.
+    fn launch_solve(&self, factor: &GpuFactor<D>, max_steps: usize, tol_rel: f64) -> Result<(), GpuError> {
         assert!(!(self.f32_reduction && max_steps > 0), "a refinement measures its residuals against S, which GpuSchurParams::f32_reduction forms in f32");
-        {
-            let _scope = Scope::new(&*self.dev, "reduce");
-            self.launch_reduce()?;
-        }
         let (s, plan) = (&self.sec, Arg::Block(&self.ints, 0));
         let w = |at: usize| Arg::Block(&self.work, at);
         {
@@ -1181,9 +1209,16 @@ impl<D: Device> GpuSchur<D> {
             }
             self.run(&self.k.refine_revert, per_entry, THREADS, &[flags, w(s.x_kept), w(s.x_prev), Arg::U32(nks)])?;
         }
-        // the kept blocks into the full vector, then the eliminated ones
+        Ok(())
+    }
+
+    /// The launches of the back-substitution, the last stage of a damped
+    /// solve: the kept blocks' solution into the full step (at
+    /// [`step_view`](Self::step_view)), then the eliminated blocks'.
+    pub fn launch_backsub(&self) -> Result<(), GpuError> {
         let _scope = Scope::new(&*self.dev, "backsub");
-        let hd = self.header_arg();
+        let (s, plan, hd) = (&self.sec, Arg::Block(&self.ints, 0), self.header_arg());
+        let w = |at: usize| Arg::Block(&self.work, at);
         self.run(&self.k.scatter_kept, self.nk.div_ceil(THREADS), THREADS, &[plan, hd, w(s.x_kept), w(s.out), Arg::U32(self.nk)])?;
         self.run(&self.k.backsub, self.ne.div_ceil(THREADS), THREADS, &[plan, hd, w(s.h), w(s.rhs), w(s.dfac), w(s.out), Arg::U32(self.ne)])
     }
@@ -2442,7 +2477,8 @@ mod tests {
 
     /// The launches alone, from values written at the targets, read back
     /// through the views, give what `solve` gives; and a graph the caller
-    /// captures of them replays to the same.
+    /// captures of them replays to the same; so do its three stages
+    /// launched one after another.
     #[test]
     fn the_launches_alone_match_solve() {
         for wide in wides(&*device()) {
@@ -2489,6 +2525,17 @@ mod tests {
         assert!(err_max(&step2, &want) < 1e-12);
         assert_eq!(g.graph_key(&f, refine), g.graph_key(&f, Some((4, 1e-10))));
         assert_ne!(g.graph_key(&f, refine), g.graph_key(&f, Some((3, 1e-10))));
+        // the three stages one after another are the attempt: on fresh
+        // blocks, so nothing of the launches above is read
+        let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+        let f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
+        g.upload(h.vals(), &rhs).unwrap();
+        g.launch_reduce().unwrap();
+        g.launch_factored(&f, refine).unwrap();
+        g.launch_backsub().unwrap();
+        let (step3, got3) = read_result(&g);
+        assert_eq!(got3.steps, stats.steps);
+        assert!(err_max(&step3, &want) < 1e-12, "the stages against solve");
     }
 
     /// Solves, their captures and replays included, allocate nothing: the
