@@ -402,7 +402,10 @@ C++ interface (docs/CXX.md). An f32 solve forms the system it
 factorizes in f32, and under `mixed_precision` in the wide values (with
 `max_refinements` 0: formed wide, not refined). `LmResult.gpu` is what
 the solve did on the device, a `GpuReport` (`None` without a GPU):
-`name`, `target`, `integrated`, `wide`, `f32_factor`, `f32_system`,
+`name`, `target`, `integrated`, `wide`, `solve` (`GpuSolve` NONE /
+FACTOR / FACTOR_F32 / CONJUGATE_GRADIENTS: how the device solves the
+system; with `schur_solve = SchurSolve.ITERATIVE` the conjugate
+gradients run on the device), `f32_system`,
 `work` (`GpuWork` UNUSED / SOLVES / LOOP), `host_assembly` (`HostAssembly`
 NONE / ASKED / NO_DEVICE_FORM / NO_F64) with `no_device_form`,
 `reserved_bytes` and `buffers_created`. Metal has no f64 (`GpuBackend.METAL.has_f64` is false):

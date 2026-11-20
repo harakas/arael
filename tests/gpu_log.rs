@@ -106,9 +106,27 @@ fn a_solve_logs_what_its_gpu_does() {
     let line = log.iter().find(|(l, m)| *l == Level::Info && m.starts_with("gpu: cpu:0 ")).unwrap_or_else(|| panic!("the device's line in {log:?}"));
     assert!(line.1.contains(", wide f64 -- ") && line.1.contains("on the device"), "{}", line.1);
 
+    // conjugate gradients on the formed reduced system run on the device
+    // too: no warning, and under verbose each solve's iterations
+    let (log, r) = solve(reduced().with_iterative_schur(Default::default()).with_gpu(Some(GpuDevice::cpu())), true);
+    assert_eq!(r.gpu.unwrap().solve, Some(arael::simple_lm::GpuSolve::ConjugateGradients));
+    assert!(unused(&log).is_empty(), "{log:?}");
+    let line = log.iter().find(|(_, m)| m.starts_with("gpu schur (cpu, cg): ")).unwrap_or_else(|| panic!("a solve's line in {log:?}"));
+    assert!(line.1.contains("conjugate gradients") && line.1.contains(" iterations in 1 round"), "{}", line.1);
+
+    // mixed precision names a factor's scalar: ignored by conjugate
+    // gradients, with a warning, on the device and on the host
+    let mixed = |log: &[(Level, String)]| log.iter().filter(|(l, m)| *l == Level::Warn && m.starts_with("mixed precision is ignored")).count();
+    assert_eq!(mixed(&log), 0, "{log:?}");
+    for gpu in [None, Some(GpuDevice::cpu())] {
+        let opts = reduced().with_iterative_schur(Default::default()).with_mixed_precision(Some(Default::default())).with_gpu(gpu);
+        let (log, _) = solve(opts, false);
+        assert_eq!(mixed(&log), 1, "{log:?}");
+    }
+
     // given and not used: one warning a solve, naming the route that ran
     let cases = [
-        (supernodal().with_iterative_schur(Default::default()), "the reduced system is solved by conjugate gradients"),
+        (reduced().with_implicit_schur(Default::default()), "the reduced system is solved by conjugate gradients without being formed"),
         (reduced().with_envelope_schur(EnvelopeMode::Always).with_ordering(SolveOrdering::Natural), "the reduced system is factored under its envelope"),
         (reduced().with_envelope_schur(EnvelopeMode::Never).with_block_supernodal(BlockSupernodalMode::Never), "the reduced system is factored by the scalar sparse Cholesky"),
         (SparseFaerOptions::default().with_policy(SchurPolicy::Never).with_block_supernodal(BlockSupernodalMode::Never), "the whole system is factored by the scalar sparse Cholesky"),

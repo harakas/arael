@@ -841,23 +841,43 @@ fn a_structure_off_the_device_releases_the_device_solver_before_it() {
     }
 }
 
-/// The GPU takes the factorizing route only: with conjugate gradients on the
-/// reduced system the solve stays on the CPU, and the plan says so.
+/// Conjugate gradients on the formed reduced system run on the GPU, in
+/// either wide scalar, to the CPU's optimum in the CPU's iterations (within
+/// a few: the sums are taken in another order), and the reports say so; on
+/// a reduced system that is not formed they stay on the CPU.
 #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu"))]
 #[test]
-fn gpu_option_leaves_conjugate_gradients_on_the_cpu() {
-    for device in gpu_devices(false) {
-        let mut cg = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
-            .with_policy(SchurPolicy::Force)
-            .with_iterative_schur(Default::default())
-            .with_gpu(Some(device)));
-        let (_, c) = solve(&mut cg, 2);
-        let plan = cg.plan().expect("a plan");
-        assert!(plan.reduced && plan.cg_iterations.is_some());
-        // conjugate gradients stay on the CPU: the device was given and not used
-        let report = cg.gpu_report().expect("a GPU was given");
-        assert!(report.work == arael::simple_lm::GpuWork::Unused && report.name.is_empty(), "{report:?}");
-        assert!(c < 1e-8, "{}", c);
+fn gpu_option_runs_conjugate_gradients_on_the_device() {
+    use arael::simple_lm::{CgParams, GpuSolve, GpuWork};
+    let cg = CgParams { tol: 1e-12, ..Default::default() };
+    let options = || arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Force).with_iterative_schur(cg);
+    let mut cpu = SparseFaer::from_options(&options());
+    let (x_cpu, c_cpu) = solve(&mut cpu, 2);
+    let cpu_iters = cpu.plan().expect("a plan").cg_iterations.expect("conjugate gradients ran");
+    assert!(c_cpu < 1e-12 && cpu_iters > 0);
+    for device in gpu_devices(true) {
+        let name = format!("{:?} {:?}", device.backend(), device.wide());
+        let mut on_device = SparseFaer::from_options(&options().with_gpu(Some(device.clone())));
+        let (x, c) = solve(&mut on_device, 2);
+        let plan = on_device.plan().expect("a plan");
+        let iters = plan.cg_iterations.expect("conjugate gradients ran");
+        assert!(plan.reduced && !plan.block_supernodal && plan.ordering.is_none(), "{name}: {plan:?}");
+        assert!(iters > 0 && iters.abs_diff(cpu_iters) <= cpu_iters / 10 + 4, "{name}: {iters} iterations against the CPU's {cpu_iters}");
+        let report = on_device.gpu_report().expect("a GPU was given");
+        assert_eq!(report.solve, Some(GpuSolve::ConjugateGradients), "{name}");
+        assert!(report.work != GpuWork::Unused && !report.name.is_empty() && !report.f32_system, "{name}: {report:?}");
+        assert!(c < 1e-12, "{name}: {c}");
+        for (a, b) in x.iter().zip(&x_cpu) {
+            assert!((a - b).abs() < 1e-7, "{name}: {a} against the CPU's {b}");
+        }
+        // the system is not formed: nothing of it on the device
+        let mut implicit = SparseFaer::from_options(
+            &arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Force).with_implicit_schur(cg).with_gpu(Some(device)),
+        );
+        let (_, c) = solve(&mut implicit, 2);
+        let report = implicit.gpu_report().expect("a GPU was given");
+        assert!(report.work == GpuWork::Unused && report.solve.is_none() && report.name.is_empty(), "{name}: {report:?}");
+        assert!(implicit.plan().unwrap().cg_iterations.is_some() && c < 1e-12, "{name}: {c}");
     }
 }
 

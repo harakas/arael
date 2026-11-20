@@ -66,6 +66,7 @@ using arael::SchurSolve;
 using arael::GpuBackend;
 using arael::GpuWide;
 using arael::GpuStaging;
+using arael::GpuSolve;
 using arael::GpuWork;
 using arael::HostAssembly;
 using arael::GpuReport;

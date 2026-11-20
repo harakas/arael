@@ -868,8 +868,9 @@ and its number of parameters -- measure.
 
 ## GPU
 
-With a GPU feature the supernodal block route runs on a GPU: `gpu-cuda`
-(NVIDIA), `gpu-hip` (AMD) or `gpu-metal` (Apple silicon):
+With a GPU feature the supernodal block route, and conjugate gradients on
+the reduced system, run on a GPU: `gpu-cuda` (NVIDIA), `gpu-hip` (AMD) or
+`gpu-metal` (Apple silicon):
 
 ```rust,ignore
 SparseFaer::from_options(&SparseFaerOptions::default()
@@ -877,11 +878,15 @@ SparseFaer::from_options(&SparseFaerOptions::default()
 SparseFaer::from_options(&SparseFaerOptions::default()
     .with_mixed_precision(Some(MixedPrecision::default()))
     .with_gpu(Some(GpuDevice::cuda(0))))                   // an f32 factor there, solves refined to f64
+SparseFaer::from_options(&SparseFaerOptions::default()
+    .with_policy(SchurPolicy::Force)
+    .with_iterative_schur(CgParams::default())
+    .with_gpu(Some(GpuDevice::cuda(0))))                   // no factor: conjugate gradients there
 ```
 
 Metal has no f64 (`GpuDevice::has_f64` is false): its wide values are
-df32 and its factor f32, so an f64 solve on it needs `MixedPrecision`,
-and an f64 root assembles on the CPU.
+df32 and its factor f32, so an f64 solve that factorizes needs
+`MixedPrecision` on it, and an f64 root assembles on the CPU.
 
 `gpu-cpu` runs the same kernels on the CPU, `GpuDevice::cpu()`, for
 testing the GPU route on machines and CI runners without a GPU: the
@@ -933,6 +938,21 @@ attempt each); otherwise those slices are empty there, and
 let cfg = LmConfig::default().with_device_observer_params(true)
     .with_observer(|it: &LmIter<f64>| { draw(it.params); ControlFlow::Continue(()) });
 ```
+
+With `with_iterative_schur` the device solves the reduced system by
+preconditioned conjugate gradients in place of the factor. It forms the
+reduced system as before, factors its diagonal blocks for the
+block-Jacobi preconditioner and iterates there, the scalars and the
+decision to stop kept on the device, under the same `CgParams` and to
+the same stopping rule as on the CPU. The iterations are queued in
+rounds, and the solver waits once a round for their status: usually one
+round a damped solve, sized from the solve before it. Nothing is ordered
+or factorized, so the device holds no factor. The system is in the
+solver's scalar: f32 for an f32 solve, else the wide values.
+`MixedPrecision` names a factor's scalar and is ignored, with a warning.
+The assembly and the LM loop run on the device as with a factor.
+`with_implicit_schur`, which does not form the reduced system, stays on
+the CPU.
 
 A root gets these kernels when its every constraint has a device form: a
 constraint whose rows write into self blocks and cross blocks has one,
@@ -1097,7 +1117,10 @@ fails it with `SolveFailureKind::Device` (see Solve failures). It pays
 where the factor is large: the reduced system
 of a bundle adjustment from a few hundred cameras up, SLAM maps with
 landmarks. A whole system of tens of thousands of tiny supernodes stays
-faster on the CPU, as do pose graphs.
+faster on the CPU, as do pose graphs. Conjugate gradients on the device
+pay where the factor is most of a damped solve, a bundle adjustment of
+many hundred cameras or more, and hold no factor in device memory; their
+step is inexact.
 
 ### What ran on the GPU -- `LmResult::gpu`
 
@@ -1118,8 +1141,8 @@ if let Some(gpu) = &r.gpu {
 | `name`, `target` | the device's name from its driver, and what the kernels were compiled for (`sm_89`, `gfx1036`); empty when the device was not used |
 | `integrated` | the device shares the host's memory: an integrated GPU, or the CPU device |
 | `wide` | the scalar of its wide values, f64 or df32 |
-| `f32_factor` | the factor is f32: an f32 solve, or `MixedPrecision` |
-| `f32_system` | the system the device factorizes (S, or H) is f32: an f32 solve without `MixedPrecision`; otherwise it is in the wide values |
+| `solve` | how the device solves the system: `Some(GpuSolve::Factor { f32 })` (the factor is f32 for an f32 solve, or under `MixedPrecision`), `Some(GpuSolve::ConjugateGradients)`, or `None` when the device was not used |
+| `f32_system` | the system the device forms and solves (S, or H) is f32: an f32 solve without `MixedPrecision`; otherwise it is in the wide values |
 | `work` | how much of the solve ran on the device (`GpuWork`, below) |
 | `reserved_bytes`, `buffers_created` | the device memory the `GpuDevice`'s state holds, and the buffers it has allocated over its life |
 
@@ -1132,17 +1155,18 @@ if let Some(gpu) = &r.gpu {
   `NoDeviceForm(reason)` (the model has none, with
   `device_unsupported`'s reason) or `NoF64` (an f64 root on a device
   without f64).
-- `Unused`: the solve took a route that does not run on a device
-  (conjugate gradients, the envelope, the scalar factorization); the
-  plan says which.
+- `Unused`: the solve took a route that does not run on a device (the
+  envelope, the scalar factorization, conjugate gradients on a reduced
+  system that is not formed); the plan says which.
 
 A solve also logs it: a warning when a GPU was given and not used, with
-the route that ran instead, and under `verbose` the device and what ran
-on it:
+the route that ran instead, and under `verbose` the device, what ran on
+it, and each damped solve:
 
 ```text
-[arael WARN] gpu: cuda:0 was given and is not used -- the reduced system is solved by conjugate gradients, on the CPU. ...
+[arael WARN] gpu: cuda:0 was given and is not used -- the reduced system is factored under its envelope, on the CPU. ...
 [arael INFO] gpu: cuda:0 NVIDIA GeForce RTX 4090 (sm_89), wide f64 -- assembly, damped solves and the LM loop on the device
+[arael INFO] gpu schur (cuda, cg): damp + reduce + conjugate gradients + back-substitution + trial cost 5.6 ms, 46 iterations in 1 round, relative residual 7.9e-4
 ```
 
 `LmResult::report` prints it as a `gpu` block (see Reporting a solve).

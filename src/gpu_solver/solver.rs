@@ -3,29 +3,30 @@
 use std::sync::Arc;
 
 use arael_faer::bsc::SymbolicSparseBlockColMat;
+use arael_faer::cg::CgParams;
 use arael_faer::schur::{SchurReal, SchurSymbolic};
-use arael_faer::supernodal::SupernodalSymbolic;
 use arael_faer::{SparseIndex, ValueIndex};
 use arael_gpu::lm::{N_SCALARS, S_COST_TRY, S_COST_X, Scalars};
-use arael_gpu::schur::{GraphKey, STATUS_BYTES};
-use arael_gpu::{Device, GpuError, GpuFactor, LmVectors, GpuSchur, GpuSchurError, Scope, Values, Wide};
-use arael_gpu::{GpuPrecision, RefineStats};
+use arael_gpu::schur::STATUS_BYTES;
+use arael_gpu::{Device, GpuCg, GpuCgParams, GpuError, GpuFactor, GpuPrecision, GpuSchur, GpuSchurError, LmVectors, Scope, Values, Wide};
 
-use super::{GpuSolver, narrow, resident_attempt};
+use super::{GpuSolver, Method, SolveStats, narrow, resident_attempt};
 use crate::device::DeviceRoot;
 use crate::device::DeviceAssembly;
-use crate::simple_lm::{DeviceFailure, LmProblemInternals, ResidentAttempt};
+use crate::simple_lm::{DeviceFailure, GpuSolve, LmProblemInternals, ResidentAttempt};
 
-/// The factor, the reduction and the route on one [`Device`]; the route
-/// first, so its graphs are dropped before the blocks they record.
+/// What solves the system, the reduction and the route on one [`Device`].
+/// In the order they are dropped: a graph before the blocks it records (the
+/// route's record everything, the conjugate gradients' the reduction's
+/// blocks, the reduction's the factor's).
 pub(crate) struct DeviceSolver<T, D: Device> {
     route: Option<Route<T, D>>,
+    /// Conjugate gradients over the reduction, built with it
+    /// ([`Solve::Cg`]).
+    cg: Option<GpuCg<D>>,
     schur: Option<GpuSchur<D>>,
-    factor: GpuFactor<D>,
+    solve: Solve<D>,
     dev: Arc<D>,
-    /// How a solve is refined against S, `(max_steps, tolerance)`: under
-    /// mixed precision, where the factor is f32.
-    refine: Option<(usize, f64)>,
     /// The route's wide scalar: the cost's and the loop's scalars'
     /// ([`values`](Self::values) for the vectors, H and the gradient).
     wide: Wide,
@@ -40,6 +41,16 @@ pub(crate) struct DeviceSolver<T, D: Device> {
     linearized: bool,
 }
 
+/// What solves the system on the device ([`Method`]).
+enum Solve<D: Device> {
+    /// The factor, its solves refined against S under `refine`
+    /// (`(max_steps, tolerance)`): under mixed precision, where it is f32.
+    Factor { factor: GpuFactor<D>, refine: Option<(usize, f64)> },
+    /// Conjugate gradients under these settings, built over the reduction
+    /// ([`DeviceSolver::cg`]).
+    Cg(CgParams),
+}
+
 /// The stamps ([`Device::stamp`]) around a linearization and around an
 /// attempt.
 const LIN: (usize, usize) = (0, 1);
@@ -48,12 +59,17 @@ const ATTEMPT: (usize, usize) = (2, 3);
 /// The device assembly of the reduced route and the LM loop's vectors
 /// beside it.
 struct Route<T, D: Device> {
-    /// An attempt's launches (damping, solve, trial point, trial cost) and
-    /// an accept's with the linearization after it, captured as graphs,
-    /// with what they were captured against; first, so they are dropped
-    /// before the blocks they record.
-    attempt_graph: Option<((GraphKey, u64), D::Graph)>,
-    step_graph: Option<((GraphKey, u64, u64), D::Graph)>,
+    /// An attempt's launches and an accept's with the linearization after
+    /// it, captured as graphs, with the assembly's generation (and the
+    /// diagonal's floor) they were captured against; first, so they are
+    /// dropped before the blocks they record. With a factor an attempt is
+    /// one graph (damping, solve, trial point, trial cost). With conjugate
+    /// gradients, whose iterations are queued between them, it is two:
+    /// `attempt_graph` up to the iterations' start, `tail_graph` after
+    /// them.
+    attempt_graph: Option<(u64, D::Graph)>,
+    tail_graph: Option<(u64, D::Graph)>,
+    step_graph: Option<((u64, u64), D::Graph)>,
     asm: DeviceAssembly<T, D>,
     vec: LmVectors<D>,
     /// The undamped diagonal of the last compute that read it back.
@@ -80,25 +96,19 @@ fn on_device<V>(r: Result<V, GpuError>, operation: &'static str) -> Result<V, De
 }
 
 impl<T, D: Device> DeviceSolver<T, D> {
-    /// The factor of `sn`, the analysis of the block structure `asym`, in
-    /// `precision`, on `dev`, its solves refined under `refine`
-    /// (`(max_steps, tolerance)`); the reduction and the route built after
-    /// it work in `wide`, the route's image staged in `staging`, the
+    /// A solver by `method` on `dev`: a factor is built here, conjugate
+    /// gradients with the reduction. The reduction and the route built
+    /// after it work in `wide`, the route's image staged in `staging`, the
     /// reduction in f32 with `f32_reduction`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        dev: &Arc<D>,
-        precision: GpuPrecision,
-        sn: &SupernodalSymbolic,
-        asym: &SymbolicSparseBlockColMat<SparseIndex>,
-        refine: Option<(usize, f64)>,
-        wide: Wide,
-        staging: crate::device::Staging,
-        f32_reduction: bool,
-    ) -> Result<Self, GpuError> {
-        let _scope = (Scope::new(&**dev, "setup"), Scope::new(&**dev, "factor"));
-        let factor = GpuFactor::new(dev, precision, sn, asym, &Default::default(), wide)?;
-        Ok(DeviceSolver { route: None, schur: None, factor, dev: dev.clone(), refine, wide, staging, f32_reduction, timed: false, times: Default::default(), linearized: false })
+    pub fn new(dev: &Arc<D>, method: Method<'_>, wide: Wide, staging: crate::device::Staging, f32_reduction: bool) -> Result<Self, GpuError> {
+        let solve = match method {
+            Method::Factor { precision, sn, asym, refine } => {
+                let _scope = (Scope::new(&**dev, "setup"), Scope::new(&**dev, "factor"));
+                Solve::Factor { factor: GpuFactor::new(dev, precision, sn, asym, &Default::default(), wide)?, refine }
+            }
+            Method::Cg(params) => Solve::Cg(params),
+        };
+        Ok(DeviceSolver { route: None, cg: None, schur: None, solve, dev: dev.clone(), wide, staging, f32_reduction, timed: false, times: Default::default(), linearized: false })
     }
 
     /// The scalar of the vectors, H and the gradient: the root's, as the
@@ -213,8 +223,11 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         }
     }
 
-    fn precision(&self) -> GpuPrecision {
-        self.factor.precision()
+    fn solve(&self) -> GpuSolve {
+        match &self.solve {
+            Solve::Factor { factor, .. } => GpuSolve::Factor { f32: factor.precision() == GpuPrecision::F32 },
+            Solve::Cg(_) => GpuSolve::ConjugateGradients,
+        }
     }
 
     fn arch(&self) -> &arael_gpu::Arch {
@@ -246,12 +259,16 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
             None => GpuSchur::whole_with_params(dev, hsym, values, &params)?,
         };
         gs.stamp_solves(self.timed.then_some(ATTEMPT));
+        if let Solve::Cg(params) = &self.solve {
+            self.cg = Some(GpuCg::new(&gs, params, &GpuCgParams::default())?);
+        }
         self.schur = Some(gs);
         Ok(())
     }
 
     fn drop_reduction(&mut self) {
         self.route = None;
+        self.cg = None;
         self.schur = None;
     }
 
@@ -263,11 +280,15 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         self.schur.as_ref().is_some_and(|s| s.f32_reduction())
     }
 
-    fn solve_reduced(&mut self, hvals: &[T], grad: &[T], delta: &mut [T]) -> Result<Option<RefineStats>, DeviceFailure> {
+    fn solve_reduced(&mut self, hvals: &[T], grad: &[T], delta: &mut [T]) -> Result<Option<SolveStats>, DeviceFailure> {
         let dev = self.dev.clone();
         let _scope = Scope::new(&*dev, "solve_reduced");
         let gs = self.schur.as_mut().expect("the device reduction is built with the Schur symbolic");
-        let solved = match gs.solve(&mut self.factor, hvals, grad, self.refine, delta) {
+        let solved = match &mut self.solve {
+            Solve::Factor { factor, refine } => gs.solve(factor, hvals, grad, *refine, delta).map(SolveStats::Refined),
+            Solve::Cg(_) => self.cg.as_mut().expect("conjugate gradients are built with the reduction").solve(gs, hvals, grad, delta).map(SolveStats::Cg),
+        };
+        let solved = match solved {
             Ok(stats) => Some(stats),
             Err(GpuSchurError::Eliminated { .. } | GpuSchurError::Reduced) => None,
             Err(GpuSchurError::Device(e)) => return on_device(Err(e), "reduced solve"),
@@ -286,6 +307,7 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         let asm = DeviceAssembly::new(dev, root, hsym, threads, self.wide, self.staging)?;
         self.route = Some(Route {
             attempt_graph: None,
+            tail_graph: None,
             step_graph: None,
             asm,
             vec: LmVectors::new(dev, bdiag_pos, self.values())?,
@@ -387,7 +409,7 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         r.live = false;
         stamp(&*dev, timed, LIN.0)?;
         let accept = std::mem::take(&mut r.accept_due);
-        let key = (gs.graph_key(&self.factor, None), r.asm.generation(), r.floor.map_or(u64::MAX, f64::to_bits));
+        let key = (r.asm.generation(), r.floor.map_or(u64::MAX, f64::to_bits));
         let (asm, vec, nh, floor) = (&r.asm, &r.vec, r.nh, r.floor);
         let (g, h) = (gs.rhs_target(), gs.h_target());
         let launches = || {
@@ -408,36 +430,65 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         Ok(())
     }
 
-    fn attempt(&mut self, lambda: f64) -> Result<(Option<RefineStats>, ResidentAttempt), DeviceFailure> {
+    /// With a factor, one captured graph and one wait. With conjugate
+    /// gradients, a graph up to the iterations' start, the iterations (a
+    /// wait a round, [`GpuCg::run`]), a graph after them, and the wait for
+    /// the result.
+    fn attempt(&mut self, lambda: f64) -> Result<(Option<SolveStats>, ResidentAttempt), DeviceFailure> {
         let dev = self.dev.clone();
         let _scope = Scope::new(&*dev, "attempt");
-        let (timed, refine) = (self.timed, self.refine);
+        let timed = self.timed;
         let gs = self.schur.as_ref().expect("a device route has its reduction");
-        let gf = &self.factor;
         let r = self.route.as_mut().expect("a resident solve has its device route");
         stamp(&*dev, timed, ATTEMPT.0)?;
         on_device(r.vec.set_lambda(lambda), "upload of the damping")?;
-        let key = (gs.graph_key(gf, refine), r.asm.generation());
+        let key = r.asm.generation();
         let (asm, vec) = (&r.asm, &r.vec);
-        let launches = || {
-            {
-                let _scope = Scope::new(&**asm.device(), "damp");
-                vec.damp(gs.h_target())?;
-            }
-            gs.launch(gf, refine)?;
+        let damp = || {
+            let _scope = Scope::new(&**asm.device(), "damp");
+            vec.damp(gs.h_target())
+        };
+        // the trial point from the step, and its cost
+        let trial = || {
             {
                 let _scope = Scope::new(&**asm.device(), "step");
                 vec.step(gs.step_view(), gs.rhs_target())?;
             }
             asm.cost_at(vec.x_try(), vec.slot(S_COST_TRY))
         };
-        on_device(run_graph(&**asm.device(), &mut r.attempt_graph, key, launches), "attempt")?;
+        let (refine, iterated) = match &self.solve {
+            Solve::Factor { factor, refine } => {
+                let launches = || {
+                    damp()?;
+                    gs.launch(factor, *refine)?;
+                    trial()
+                };
+                on_device(run_graph(&**asm.device(), &mut r.attempt_graph, key, launches), "attempt")?;
+                (*refine, None)
+            }
+            Solve::Cg(_) => {
+                let cg = self.cg.as_mut().expect("conjugate gradients are built with the reduction");
+                let head = || {
+                    damp()?;
+                    gs.launch_reduce()?;
+                    cg.launch_start(gs)
+                };
+                on_device(run_graph(&**asm.device(), &mut r.attempt_graph, key, head), "attempt")?;
+                let stats = on_device(cg.run(gs), "conjugate gradients")?;
+                let tail = || {
+                    gs.launch_backsub()?;
+                    trial()
+                };
+                on_device(run_graph(&**asm.device(), &mut r.tail_graph, key, tail), "attempt")?;
+                (None, Some(stats))
+            }
+        };
         stamp(&*dev, timed, ATTEMPT.1)?;
         let (mut status, mut scalars) = ([0u8; STATUS_BYTES], [0u8; 8 * N_SCALARS]);
         let (st, sc) = (gs.status_view(), vec.scalars());
         on_device(asm.device().read_many(&mut [(st.0, st.1, &mut status[..]), (sc.0, sc.1, &mut scalars[..])]), "read of the attempt")?;
         let solved = match gs.outcome(&status, refine) {
-            Ok(stats) => Some(stats),
+            Ok(stats) => Some(iterated.map_or(SolveStats::Refined(stats), SolveStats::Cg)),
             Err(GpuSchurError::Eliminated { .. } | GpuSchurError::Reduced) => None,
             Err(GpuSchurError::Device(e)) => return on_device(Err(e), "attempt"),
         };

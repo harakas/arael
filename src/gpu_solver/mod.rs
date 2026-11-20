@@ -1,27 +1,55 @@
-//! The GPU side of the supernodal solver ([`SparseFaer`](crate::simple_lm::SparseFaer)):
+//! The GPU side of [`SparseFaer`](crate::simple_lm::SparseFaer):
 //! [`GpuSolver`], implemented by [`solver::DeviceSolver`] for every
 //! [`Device`](arael_gpu::Device).
 
 use arael_faer::bsc::SymbolicSparseBlockColMat;
+use arael_faer::cg::CgParams;
 use arael_faer::schur::SchurSymbolic;
+use arael_faer::supernodal::SupernodalSymbolic;
 use arael_faer::{SparseIndex, ValueIndex};
 use arael_gpu::GpuError;
-use arael_gpu::{GpuPrecision, RefineStats};
+use arael_gpu::{GpuCgStats, GpuPrecision, RefineStats};
 
 use crate::device::DeviceRoot;
-use crate::simple_lm::{DeviceFailure, LmProblemInternals, ResidentAttempt};
+use crate::simple_lm::{DeviceFailure, GpuSolve, LmProblemInternals, ResidentAttempt};
 
 pub(crate) mod solver;
 
-/// The GPU side of the supernodal solver: the device factor of one
-/// symbolic analysis, refined as the solver was built to (an f32 factor
-/// under mixed precision), and two layers built on it:
+/// How a device solver solves its system (the reduced one, or the whole
+/// one with nothing eliminated), chosen when it is built.
+pub(crate) enum Method<'a> {
+    /// The block supernodal Cholesky factor of the symbolic `sn`, the
+    /// analysis of the block structure `asym`, in `precision`, its solves
+    /// refined against the system under `refine` (`(max_steps,
+    /// tolerance)`: an f32 factor under mixed precision).
+    Factor {
+        precision: GpuPrecision,
+        sn: &'a SupernodalSymbolic,
+        asym: &'a SymbolicSparseBlockColMat<SparseIndex>,
+        refine: Option<(usize, f64)>,
+    },
+    /// Preconditioned conjugate gradients.
+    Cg(CgParams),
+}
+
+/// What a damped solve on the device took.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SolveStats {
+    /// A factor's solve: its refinement (no step without one).
+    Refined(RefineStats),
+    /// Conjugate gradients.
+    Cg(GpuCgStats),
+}
+
+/// The GPU side of the solver: what solves the system on one device (a
+/// factor or conjugate gradients, [`Method`]), and two layers built on it:
 ///
 /// - with [`prepare_reduction`](Self::prepare_reduction), the reduction,
 ///   of the reduced system or of the whole one with nothing eliminated: a
 ///   damped solve ([`solve_reduced`](Self::solve_reduced)) forms S from
-///   the damped H, factorizes, solves, refines and back-substitutes on the
-///   device, waiting once;
+///   the damped H, solves it (a factor: factorizes, solves, refines,
+///   waiting once; conjugate gradients: a wait a round of iterations) and
+///   back-substitutes on the device;
 /// - with [`build_route`](Self::build_route), the device assembly and the
 ///   LM loop's vectors: from the first linearization on, the loop runs on
 ///   the device ([`ResidentLoop`](crate::simple_lm::ResidentLoop)), the
@@ -35,8 +63,8 @@ pub(crate) trait GpuSolver<T>: Send {
     /// The device's runtime and the wide scalar, for the verbose log:
     /// `cuda`, `cuda df32`, `hip`, `hip df32`.
     fn runtime(&self) -> String;
-    /// The factor's scalar.
-    fn precision(&self) -> GpuPrecision;
+    /// How the system is solved, as the report says it.
+    fn solve(&self) -> GpuSolve;
     /// The device: its name, its compile target, whether it computes in
     /// f64 (Metal does not: an f64 root assembles on the CPU there).
     fn arch(&self) -> &arael_gpu::Arch;
@@ -50,8 +78,9 @@ pub(crate) trait GpuSolver<T>: Send {
 
     /// Build the reduction by `schur` of matrices with the structure
     /// `hsym`, or with `None` the whole system (nothing eliminated), on the
-    /// factor's device; the factor is the reduced system's. Replaces any
-    /// earlier reduction and route.
+    /// solver's device; a factor is the reduced system's, and conjugate
+    /// gradients are built over the reduction. Replaces any earlier
+    /// reduction and route.
     fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), GpuError>;
     /// Release the reduction and the route.
     fn drop_reduction(&mut self);
@@ -61,9 +90,9 @@ pub(crate) trait GpuSolver<T>: Send {
     /// (`GpuSchurParams::f32_reduction`).
     fn f32_reduction(&self) -> bool;
     /// One damped solve on the device from the damped H's tile values and
-    /// the gradient, the step into `delta`, with the refinement's outcome;
-    /// `None` when an eliminated block or S is not positive definite.
-    fn solve_reduced(&mut self, hvals: &[T], grad: &[T], delta: &mut [T]) -> Result<Option<RefineStats>, DeviceFailure>;
+    /// the gradient, the step into `delta`, with what it took; `None` when
+    /// an eliminated block or S is not positive definite.
+    fn solve_reduced(&mut self, hvals: &[T], grad: &[T], delta: &mut [T]) -> Result<Option<SolveStats>, DeviceFailure>;
 
     /// Lay `root` out for the device assembly against the reduction's
     /// structure `hsym`, whose scalar diagonal is at `bdiag_pos` in its
@@ -89,9 +118,9 @@ pub(crate) trait GpuSolver<T>: Send {
     /// [`ResidentLoop::linearize`](crate::simple_lm::ResidentLoop::linearize).
     fn linearize(&mut self) -> Result<(), DeviceFailure>;
     /// [`ResidentLoop::attempt`](crate::simple_lm::ResidentLoop::attempt)
-    /// at `lambda`, with the refinement's outcome (`None` for a system that
-    /// is not positive definite).
-    fn attempt(&mut self, lambda: f64) -> Result<(Option<RefineStats>, ResidentAttempt), DeviceFailure>;
+    /// at `lambda`, with what the damped solve took (`None` for a system
+    /// that is not positive definite).
+    fn attempt(&mut self, lambda: f64) -> Result<(Option<SolveStats>, ResidentAttempt), DeviceFailure>;
     /// [`ResidentLoop::accept`](crate::simple_lm::ResidentLoop::accept).
     fn accept(&mut self);
     /// [`ResidentLoop::params`](crate::simple_lm::ResidentLoop::params).

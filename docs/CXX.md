@@ -277,7 +277,9 @@ views are named by their container's nature: `PathPosesDeque`,
   defaults; the one-argument `solve_sparse(cfg)` uses them.
 - **GPU**: `SparseOptions::gpu` (`GpuBackend` None / Cuda / Hip / Cpu /
   Metal; Cpu is the CPU running the GPU kernels, for tests without a
-  GPU) and `gpu_index` run the block supernodal route on that device, the
+  GPU) and `gpu_index` run the block supernodal route, or with
+  `schur_solve = SchurSolve::Iterative` conjugate gradients on the
+  reduced system, on that device, the
   process's shared state of it, so repeated solves reuse its buffers;
   `gpu_assembly` (on by default) also assembles there and keeps the LM
   loop on the device when the model has a device form; `gpu_wide`
@@ -295,7 +297,9 @@ views are named by their container's nature: `PathPosesDeque`,
   forms it in the wide values (with `max_refinements` 0: formed wide,
   not refined). `LmResult::gpu()` returns what the solve did on the
   device, an `option<GpuReport>` (empty without a GPU): the device's
-  `name` and compile `target`, `wide`, `f32_factor`, `f32_system`,
+  `name` and compile `target`, `wide`, `solve` (`GpuSolve` None /
+  Factor / FactorF32 / ConjugateGradients: how the device solves the
+  system), `f32_system`,
   `work` (`GpuWork` Unused / Solves / Loop: nothing, the damped solves,
   or the assembly, the solves and the LM loop), `host_assembly`
   (`HostAssembly` None / Asked / NoDeviceForm / NoF64: why the assembly

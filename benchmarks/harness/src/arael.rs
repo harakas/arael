@@ -93,7 +93,8 @@ pub fn mixed_precision() -> Option<arael::simple_lm::MixedPrecision> {
     Some(mp)
 }
 
-/// ARAEL_GPU puts the supernodal block route on a GPU: `cuda`, `hip` or
+/// ARAEL_GPU puts the supernodal block route, and a row's conjugate
+/// gradients on the formed reduced system, on a GPU: `cuda`, `hip` or
 /// `metal`, or any with a device index (`cuda:1`); `cpu` is the CPU device
 /// (feature `gpu-cpu`), which runs the GPU route's kernels on the CPU. With ARAEL_F32_FACTOR
 /// the factor is f32 there, refined the same way (Metal needs it for an

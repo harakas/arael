@@ -842,7 +842,7 @@ fn report_is_ascii_and_has_no_escapes() {
 /// stayed on the CPU when it did, and a device that was given and not used.
 #[test]
 fn the_report_says_what_ran_on_the_gpu() {
-    use arael::simple_lm::{HostAssembly, GpuBackend, GpuReport, GpuWide, GpuWork};
+    use arael::simple_lm::{HostAssembly, GpuBackend, GpuReport, GpuSolve, GpuWide, GpuWork};
     let gpu = GpuReport {
         backend: GpuBackend::Cuda,
         index: 1,
@@ -850,7 +850,7 @@ fn the_report_says_what_ran_on_the_gpu() {
         target: "sm_89".into(),
         integrated: false,
         wide: GpuWide::Df32,
-        f32_factor: true,
+        solve: Some(GpuSolve::Factor { f32: true }),
         f32_system: false,
         work: GpuWork::Loop,
         reserved_bytes: 412_300_000,
@@ -875,7 +875,7 @@ fn the_report_says_what_ran_on_the_gpu() {
         backend: GpuBackend::Hip,
         integrated: true,
         wide: GpuWide::F64,
-        f32_factor: false,
+        solve: Some(GpuSolve::Factor { f32: false }),
         f32_system: true,
         work: GpuWork::Solves(HostAssembly::NoDeviceForm("`Apart` writes `coo` pairs".into())),
         ..gpu.clone()
@@ -883,12 +883,17 @@ fn the_report_says_what_ran_on_the_gpu() {
     let s = r.report();
     assert!(s.contains("hip:1 NVIDIA GeForce RTX 4090 (sm_89, integrated), wide f64"), "{s}");
     assert!(s.contains("damped solves on the device, assembly on the host (`Apart` writes `coo` pairs), f64 factor, system in f32"), "{s}");
+    // conjugate gradients have no factor to name
+    r.gpu = Some(GpuReport { solve: Some(GpuSolve::ConjugateGradients), ..gpu.clone() });
+    let s = r.report();
+    assert!(s.contains("the LM loop on the device, conjugate gradients, system in df32, 412.3 MB"), "{s}");
+    assert!(!s.contains("factor"), "{s}");
     r.gpu = Some(GpuReport { work: GpuWork::Solves(HostAssembly::Asked), ..gpu.clone() });
     assert!(r.report().contains("assembly on the host (as asked)"));
     assert!(r.report().contains("    linear solve ") && r.report().contains("    cost eval "), "the host assembles: its rows keep their names");
     r.gpu = Some(GpuReport { work: GpuWork::Solves(HostAssembly::NoF64), ..gpu.clone() });
     assert!(r.report().contains("assembly on the host (the device has no f64, which the root's scalar is)"));
-    r.gpu = Some(GpuReport { name: String::new(), target: String::new(), work: GpuWork::Unused, ..gpu });
+    r.gpu = Some(GpuReport { name: String::new(), target: String::new(), solve: None, work: GpuWork::Unused, ..gpu });
     let s = r.report();
     assert!(s.contains("  gpu       cuda:1 not used: the solve took a route that does not run on a device\n"), "{s}");
 }

@@ -78,8 +78,9 @@
 //!   sweeps and the linear solve run on as many threads as `num_threads`
 //!   says (see [Threads](#threads))
 //! - **GPU solve** -- with the `gpu-cuda`, `gpu-hip` or `gpu-metal`
-//!   feature the assembly, the Schur reduction, the factorization and the
-//!   LM loop run on an NVIDIA, AMD or Apple silicon GPU (see
+//!   feature the assembly, the Schur reduction, the factorization (or
+//!   conjugate gradients in its place) and the LM loop run on an NVIDIA,
+//!   AMD or Apple silicon GPU (see
 //!   [docs/SOLVERS.md](https://github.com/harakas/arael/blob/master/docs/SOLVERS.md#gpu))
 //! - **f32 and f64 precision** -- `#[arael(root)]` for f64,
 //!   `#[arael(root, f32)]` for f32 throughout

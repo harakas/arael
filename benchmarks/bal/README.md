@@ -433,7 +433,7 @@ produced it.
 | `BAL_ORDERING` | `nd` (default), `auto`, `amd` or `natural` -- elimination ordering of the reduced camera system: nested dissection, arael's own rule (on the CPU the natural order where S is dense or banded, AMD otherwise; on a GPU the device's, see docs/SOLVERS.md), AMD always, the natural order always. A typo is an error |
 | `BAL_SCHUR_POLICY=auto` | let the fill analysis decide the reduction instead of forcing it |
 | `ARAEL_F32_FACTOR`, `ARAEL_REFINE_TOL` | the f32 factor under the f64 rows: refinement steps at most, and the relative residual to refine to (defaults 4 and 1e-10) |
-| `ARAEL_GPU` | `cuda`, `hip`, or either with a device index (`cuda:1`): the supernodal block factorization and its solve of the `sparse` and `schur` rows on that device, the factor f32 there under `ARAEL_F32_FACTOR`. Needs the binary built with `--features gpu-cuda` (or `gpu-hip`) |
+| `ARAEL_GPU` | `cuda`, `hip`, or either with a device index (`cuda:1`): the supernodal block factorization and its solve of the `sparse` and `schur` rows on that device, the factor f32 there under `ARAEL_F32_FACTOR`, and the conjugate gradients of the `schur-cg` rows (the `schur-cg-implicit` rows stay on the CPU). Needs the binary built with `--features gpu-cuda` (or `gpu-hip`) |
 | `BAL_GUARD_Z` | the near-plane guard: an observation whose point is closer than this depth to the camera's focal plane, or behind it, is dropped by the arael models and by the reference cost. 1e-2 lets f32 reach the f64 optimum on every Ladybug file; 1e-3 makes both precisions thrash on the points at the cut. Off by default |
 | `VERBOSE` | arael's per-iteration solver trace |
 

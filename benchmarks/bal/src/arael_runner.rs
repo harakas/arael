@@ -326,7 +326,8 @@ fn solve64_schur_cg(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmCon
     let mut solver = arael::simple_lm::SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
-        .with_iterative_schur(cg_options()));
+        .with_iterative_schur(cg_options())
+        .with_gpu(bench_harness::arael::gpu()));
     let r = arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
@@ -363,7 +364,8 @@ fn solve32_schur_cg(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmCo
     let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
-        .with_iterative_schur(cg_options()));
+        .with_iterative_schur(cg_options())
+        .with_gpu(bench_harness::arael::gpu()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 

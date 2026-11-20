@@ -1059,7 +1059,9 @@ pub struct CGpuReport {
     pub integrated: bool,
     /// GpuWide: 0 f64, 1 df32.
     pub wide: u32,
-    pub f32_factor: bool,
+    /// GpuSolve, how the device solves the system: 0 not at all (work 0),
+    /// 1 an f64 factor, 2 an f32 factor, 3 conjugate gradients.
+    pub solve: u32,
     pub f32_system: bool,
     /// GpuWork: 0 unused, 1 the damped solves, 2 the assembly, the damped
     /// solves and the LM loop.
@@ -1270,7 +1272,7 @@ pub unsafe extern "C" fn path_result_plan(d: *const ResultDetail, out: *mut CSch
 /// with `out` untouched for a solve without a GPU.
 #[no_mangle]
 pub unsafe extern "C" fn path_result_gpu(d: *const ResultDetail, out: *mut CGpuReport) -> bool {
-    use arael::simple_lm::{HostAssembly, GpuBackend, GpuWide, GpuWork};
+    use arael::simple_lm::{HostAssembly, GpuBackend, GpuSolve, GpuWide, GpuWork};
     let dd = &*d;
     let Some(g) = &dd.result.gpu else { return false };
     *out = CGpuReport {
@@ -1288,7 +1290,12 @@ pub unsafe extern "C" fn path_result_gpu(d: *const ResultDetail, out: *mut CGpuR
             GpuWide::F64 => 0,
             GpuWide::Df32 => 1,
         },
-        f32_factor: g.f32_factor,
+        solve: match g.solve {
+            None => 0,
+            Some(GpuSolve::Factor { f32: false }) => 1,
+            Some(GpuSolve::Factor { f32: true }) => 2,
+            Some(GpuSolve::ConjugateGradients) => 3,
+        },
         f32_system: g.f32_system,
         work: match &g.work {
             GpuWork::Unused => 0,

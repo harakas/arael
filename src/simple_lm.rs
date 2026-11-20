@@ -2083,13 +2083,14 @@ fn log_gpu(gpu: Option<GpuReport>, plan: Option<SolverReport>, verbose: bool) {
             }
         }
         None => {
-            // which route ran instead
+            // which route ran instead: of the conjugate gradients, only
+            // those on a reduced system that is not formed stay on the CPU
             let route = match plan {
                 Some(SolverReport::Schur(p)) => format!(
                     "the {} system is {}",
                     if p.reduced { "reduced" } else { "whole" },
                     if p.cg_iterations.is_some() {
-                        "solved by conjugate gradients"
+                        "solved by conjugate gradients without being formed"
                     } else if p.envelope {
                         "factored under its envelope"
                     } else {
@@ -2099,9 +2100,10 @@ fn log_gpu(gpu: Option<GpuReport>, plan: Option<SolverReport>, verbose: bool) {
                 None => "the solver took another route".to_string(),
             };
             warn!(
-                "gpu: {} was given and is not used -- {route}, on the CPU. Only the block supernodal \
-                 Cholesky runs on a device (SparseFaerOptions::with_block_supernodal, with_envelope_schur \
-                 and with_schur_solve choose the route)",
+                "gpu: {} was given and is not used -- {route}, on the CPU. The block supernodal Cholesky \
+                 and conjugate gradients on the formed reduced system run on a device \
+                 (SparseFaerOptions::with_block_supernodal, with_envelope_schur and with_schur_solve \
+                 choose the route)",
                 gpu_label(&g)
             );
         }
@@ -2129,9 +2131,15 @@ fn render_gpu(g: &GpuReport, style: Style) -> String {
         g.target,
         if g.integrated { ", integrated" } else { "" }
     );
+    let solve = match g.solve {
+        Some(GpuSolve::Factor { f32: true }) => "f32 factor",
+        Some(GpuSolve::Factor { f32: false }) => "f64 factor",
+        Some(GpuSolve::ConjugateGradients) => "conjugate gradients",
+        None => "no solve",
+    };
     let notes = [
         work,
-        format!("{} factor", if g.f32_factor { "f32" } else { "f64" }),
+        solve.to_string(),
         format!("system in {}", if g.f32_system { "f32" } else { wide }),
         format!("{:.1} MB reserved in {} buffers", g.reserved_bytes as f64 / 1e6, g.buffers_created),
     ];
@@ -5225,7 +5233,8 @@ pub enum SchurMethod {
     ///
     /// Worth it when factorizing the reduced system dominates the iteration,
     /// which is a question of how much fill it takes: on a bundle problem
-    /// that share grows with the camera count.
+    /// that share grows with the camera count. Runs on a GPU when the
+    /// solver has one ([`SparseFaerOptions::with_gpu`]).
     Iterative(arael_faer::cg::CgParams),
     /// The same conjugate gradients, on a reduced system that is never built:
     /// each product applies `B x - E C^-1 (E^T x)` by walking the Hessian.
@@ -5233,7 +5242,7 @@ pub enum SchurMethod {
     /// Trades one reduction for one product per CG iteration, so it pays only
     /// where a solve takes few products -- which is a property of the problem,
     /// not its size. Nothing picks between this and [`Self::Iterative`]; the
-    /// caller does.
+    /// caller does. On the CPU only.
     IterativeImplicit(arael_faer::cg::CgParams),
 }
 
@@ -5568,11 +5577,12 @@ pub struct GpuReport {
     pub integrated: bool,
     /// The scalar of the device's wide values ([`GpuDevice::with_wide`]).
     pub wide: GpuWide,
-    /// Whether the factor is `f32`: an f32 solve, or [`MixedPrecision`].
-    pub f32_factor: bool,
-    /// Whether the system the device forms and factorizes (the reduced
-    /// one, or the whole system) is `f32`, as the CPU's f32 route forms it:
-    /// an f32 solve without [`MixedPrecision`]. Otherwise it is in the wide
+    /// How the device solves the system. `None` when the solve did not use
+    /// the device.
+    pub solve: Option<GpuSolve>,
+    /// Whether the system the device forms and solves (the reduced one, or
+    /// the whole system) is `f32`, as the CPU's f32 route forms it: an f32
+    /// solve without [`MixedPrecision`]. Otherwise it is in the wide
     /// values.
     pub f32_system: bool,
     /// How much of the solve ran on the device.
@@ -5585,12 +5595,36 @@ pub struct GpuReport {
     pub buffers_created: usize,
 }
 
+/// How a GPU solve solves its system on the device, the reduced one or the
+/// whole one ([`GpuReport::solve`]).
+///
+/// ```ignore
+/// let opts = SparseFaerOptions::default()
+///     .with_policy(SchurPolicy::Force)
+///     .with_iterative_schur(CgParams::default())
+///     .with_gpu(Some(GpuDevice::cuda(0)));
+/// let r = model.solve_with(&mut SparseFaer::from_options(&opts), &cfg)?;
+/// assert_eq!(r.gpu.unwrap().solve, Some(GpuSolve::ConjugateGradients));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuSolve {
+    /// The block supernodal Cholesky factor.
+    Factor {
+        /// Whether the factor is `f32`: an f32 solve, or
+        /// [`MixedPrecision`].
+        f32: bool,
+    },
+    /// Preconditioned conjugate gradients on the reduced system
+    /// ([`SchurMethod::Iterative`]).
+    ConjugateGradients,
+}
+
 /// How much of a solve ran on its GPU ([`GpuReport::work`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GpuWork {
     /// Nothing: the solve took a route that does not run on a device
-    /// (conjugate gradients, the envelope, the scalar factorization;
-    /// [`SchurPlan`] says which).
+    /// (the envelope, the scalar factorization, conjugate gradients on a
+    /// reduced system that is not formed; [`SchurPlan`] says which).
     Unused,
     /// The damped solves. The gradient and the Hessian were assembled on
     /// the host, for the reason given, and the Hessian's values uploaded
@@ -5714,13 +5748,16 @@ impl SparseFaerOptions {
     /// of factorizing it ([`SchurMethod::Iterative`]). Pair with
     /// [`SchurPolicy::Force`]: without a reduction there is nothing for it to
     /// solve, and the solve fails rather than silently taking another route.
+    /// With [`Self::with_gpu`] the reduction and the conjugate gradients
+    /// run on the device.
     pub fn with_iterative_schur(mut self, cg: arael_faer::cg::CgParams) -> Self {
         self.schur_solve = SchurMethod::Iterative(cg);
         self
     }
 
     /// As [`Self::with_iterative_schur`], but never forming the reduced
-    /// system ([`SchurMethod::IterativeImplicit`]).
+    /// system ([`SchurMethod::IterativeImplicit`]). On the CPU, also when
+    /// a GPU is given.
     pub fn with_implicit_schur(mut self, cg: arael_faer::cg::CgParams) -> Self {
         self.schur_solve = SchurMethod::IterativeImplicit(cg);
         self
@@ -5888,27 +5925,36 @@ impl SparseFaerOptions {
         self
     }
 
-    /// The GPU the supernodal block route runs on (features `gpu-cuda`,
-    /// `gpu-hip`, `gpu-metal`, `gpu-cpu`); `None`, the default, is the CPU.
+    /// The GPU the supernodal block route, or conjugate gradients on the
+    /// reduced system, run on (features `gpu-cuda`, `gpu-hip`, `gpu-metal`,
+    /// `gpu-cpu`); `None`, the default, is the CPU.
     ///
-    /// The device does the whole damped solve: it forms the system it
-    /// factorizes (the reduced one, or the whole system with nothing
-    /// eliminated), factorizes it in the solver's scalar or in `f32` under
-    /// [`Self::with_mixed_precision`], solves, refines and recovers the
-    /// eliminated blocks. It also assembles the gradient, the Hessian and
-    /// the trial costs when the model's constraints all have a device form
+    /// The device does the whole damped solve: it forms the system (the
+    /// reduced one, or the whole system with nothing eliminated), solves
+    /// it and recovers the eliminated blocks. It solves by the supernodal
+    /// factor, in the solver's scalar or in `f32` under
+    /// [`Self::with_mixed_precision`] with its solves refined, or with
+    /// [`Self::with_iterative_schur`] by conjugate gradients, without a
+    /// factor. It also assembles the gradient, the Hessian and the trial
+    /// costs when the model's constraints all have a device form
     /// ([`Self::with_gpu_assembly`]), and the LM loop's vectors then stay
     /// on the device; otherwise the Hessian's values are uploaded for every
     /// damped solve. The symbolic analysis stays on the CPU.
     ///
     /// Solvers given clones of one [`GpuDevice`] share its stream and
-    /// buffers. Not used unless the supernodal block route runs (conjugate
-    /// gradients stay on the CPU): the solve then warns, and its
-    /// [`GpuReport::work`] is [`GpuWork::Unused`]. A device whose runtime is
-    /// not compiled in fails the solve with [`SetupError::SolverUnavailable`].
+    /// buffers. Not used on the other routes (the envelope, the scalar
+    /// factorization, [`Self::with_implicit_schur`]): the solve then warns,
+    /// and its [`GpuReport::work`] is [`GpuWork::Unused`]. A device whose
+    /// runtime is not compiled in fails the solve with
+    /// [`SetupError::SolverUnavailable`].
     ///
     /// ```ignore
     /// let opts = SparseFaerOptions::default().with_gpu(Some(GpuDevice::cuda(0)));
+    /// // conjugate gradients on the reduced system, on the device
+    /// let opts = SparseFaerOptions::default()
+    ///     .with_policy(SchurPolicy::Force)
+    ///     .with_iterative_schur(CgParams::default())
+    ///     .with_gpu(Some(GpuDevice::cuda(0)));
     /// ```
     pub fn with_gpu(mut self, gpu: Option<GpuDevice>) -> Self {
         self.gpu = gpu;
@@ -6241,17 +6287,17 @@ fn device_precision<T>(mixed: bool) -> arael_gpu::GpuPrecision {
 }
 
 /// [`SetupError::SolverUnavailable`] for what Metal, without f64, cannot
-/// run: f64 wide values, and an f64 solve without [`MixedPrecision`]
-/// (`mixed`), whose factor would be f64. Other devices run both.
+/// run: f64 wide values, and an f64 factor (`f64_factor`: an f64 solve
+/// that factorizes without [`MixedPrecision`]). Other devices run both.
 #[cfg(feature = "gpu")]
-fn metal_supports<T>(dev: &GpuDevice, mixed: bool) -> Result<(), SolveFailureKind> {
+fn metal_supports(dev: &GpuDevice, f64_factor: bool) -> Result<(), SolveFailureKind> {
     if dev.has_f64() {
         return Ok(());
     }
     if dev.wide() == GpuWide::F64 {
         return Err(SetupError::SolverUnavailable { solver: "gpu", reason: "Metal has no f64: its wide values are GpuWide::Df32" }.into());
     }
-    if core::mem::size_of::<T>() == 8 && !mixed {
+    if f64_factor {
         return Err(SetupError::SolverUnavailable {
             solver: "gpu",
             reason: "Metal factors in f32: an f64 solve on it needs MixedPrecision (SparseFaerOptions::with_mixed_precision), which refines the steps",
@@ -6472,17 +6518,14 @@ fn gpu_setup_failed(operation: &'static str, e: arael_gpu::GpuError) -> SolveFai
     SolveFailureKind::Device(DeviceFailure { operation, message: e.to_string() })
 }
 
-/// The device factor of `sn` on `dev`'s runtime, its solves refined under
-/// `refine` (`(max_steps, tolerance)`), its reduction in f32 with
-/// `f32_reduction`; [`SetupError::SolverUnavailable`] when that runtime is
-/// not compiled in, [`SolveFailureKind::Device`] when it cannot be set up.
+/// The device solver by `method` on `dev`'s runtime, its reduction in f32
+/// with `f32_reduction`; [`SetupError::SolverUnavailable`] when that
+/// runtime is not compiled in, [`SolveFailureKind::Device`] when it cannot
+/// be set up.
 #[cfg(feature = "gpu")]
 fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
     dev: &GpuDevice,
-    precision: arael_gpu::GpuPrecision,
-    sn: &arael_faer::supernodal::SupernodalSymbolic,
-    asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
-    refine: Option<(usize, f64)>,
+    method: crate::gpu_solver::Method<'_>,
     f32_reduction: bool,
 ) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SolveFailureKind> {
     #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
@@ -6499,48 +6542,48 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
         #[cfg(feature = "gpu-cuda")]
         GpuBackend::Cuda => {
             let made = device_in(&dev.cuda, || arael_gpu::cuda::CudaDevice::new(dev.index));
-            let solver = solver_on(made, precision, sn, asym, refine, wide, staging, f32_reduction);
+            let solver = solver_on(made, method, wide, staging, f32_reduction);
             report_kernel_cache();
-            Ok(solver.map_err(|e| gpu_setup_failed("setup of the CUDA factor", e))?)
+            Ok(solver.map_err(|e| gpu_setup_failed("setup of the CUDA solver", e))?)
         }
         #[cfg(not(feature = "gpu-cuda"))]
         GpuBackend::Cuda => {
-            let _ = (precision, sn, asym, refine, f32_reduction);
+            let _ = (method, f32_reduction);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the CUDA runtime is not compiled in (feature gpu-cuda)" }.into())
         }
         #[cfg(feature = "gpu-hip")]
         GpuBackend::Hip => {
             let made = device_in(&dev.hip, || arael_gpu::hip::HipDevice::new(dev.index));
-            let solver = solver_on(made, precision, sn, asym, refine, wide, staging, f32_reduction);
+            let solver = solver_on(made, method, wide, staging, f32_reduction);
             report_kernel_cache();
-            Ok(solver.map_err(|e| gpu_setup_failed("setup of the HIP factor", e))?)
+            Ok(solver.map_err(|e| gpu_setup_failed("setup of the HIP solver", e))?)
         }
         #[cfg(not(feature = "gpu-hip"))]
         GpuBackend::Hip => {
-            let _ = (precision, sn, asym, refine, f32_reduction);
+            let _ = (method, f32_reduction);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the HIP runtime is not compiled in (feature gpu-hip)" }.into())
         }
         #[cfg(feature = "gpu-cpu")]
         GpuBackend::Cpu => {
             let made = device_in(&dev.cpu, || arael_gpu::cpu::CpuDevice::new(dev.index));
-            let solver = solver_on(made, precision, sn, asym, refine, wide, staging, f32_reduction);
+            let solver = solver_on(made, method, wide, staging, f32_reduction);
             report_kernel_cache();
-            Ok(solver.map_err(|e| gpu_setup_failed("setup of the CPU device's factor", e))?)
+            Ok(solver.map_err(|e| gpu_setup_failed("setup of the CPU device's solver", e))?)
         }
         #[cfg(not(feature = "gpu-cpu"))]
         GpuBackend::Cpu => {
-            let _ = (precision, sn, asym, refine, f32_reduction);
+            let _ = (method, f32_reduction);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the CPU device is not compiled in (feature gpu-cpu)" }.into())
         }
         #[cfg(gpu_metal)]
         GpuBackend::Metal => {
             let made = device_in(&dev.metal, || arael_gpu::metal::MetalDevice::new(dev.index));
-            let solver = solver_on(made, precision, sn, asym, refine, wide, staging, f32_reduction);
-            Ok(solver.map_err(|e| gpu_setup_failed("setup of the Metal factor", e))?)
+            let solver = solver_on(made, method, wide, staging, f32_reduction);
+            Ok(solver.map_err(|e| gpu_setup_failed("setup of the Metal solver", e))?)
         }
         #[cfg(not(gpu_metal))]
         GpuBackend::Metal => {
-            let _ = (precision, sn, asym, refine, f32_reduction);
+            let _ = (method, f32_reduction);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the Metal runtime is not compiled in (feature gpu-metal, on an Apple target)" }.into())
         }
     }
@@ -6551,13 +6594,9 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
 /// its traced twin, which writes every device operation of the solve into
 /// the trace (tools/devmap reads it).
 #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
-#[allow(clippy::too_many_arguments)]
 fn solver_on<T, D>(
     made: Result<std::sync::Arc<D>, arael_gpu::GpuError>,
-    precision: arael_gpu::GpuPrecision,
-    sn: &arael_faer::supernodal::SupernodalSymbolic,
-    asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
-    refine: Option<(usize, f64)>,
+    method: crate::gpu_solver::Method<'_>,
     wide: arael_gpu::Wide,
     staging: crate::device::Staging,
     f32_reduction: bool,
@@ -6570,9 +6609,9 @@ where
     let dev = made?;
     #[cfg(feature = "gpu-trace")]
     if arael_gpu::trace::active() {
-        return Ok(Box::new(DeviceSolver::new(&arael_gpu::trace::traced(&dev), precision, sn, asym, refine, wide, staging, f32_reduction)?));
+        return Ok(Box::new(DeviceSolver::new(&arael_gpu::trace::traced(&dev), method, wide, staging, f32_reduction)?));
     }
-    Ok(Box::new(DeviceSolver::new(&dev, precision, sn, asym, refine, wide, staging, f32_reduction)?))
+    Ok(Box::new(DeviceSolver::new(&dev, method, wide, staging, f32_reduction)?))
 }
 
 /// A kernel cache entry the runtime could not write, logged once.
@@ -6637,8 +6676,8 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> GpuSide<T> {
             // the previous structure's blocks go back to the device's pool
             // first, for the new ones to reuse
             self.solver = None;
-            metal_supports::<T>(dev, mixed.is_some())?;
             let precision = device_precision::<T>(mixed.is_some());
+            metal_supports(dev, precision == arael_gpu::GpuPrecision::F64)?;
             // an f32 solve forms the system it factorizes in f32, as the
             // CPU's f32 route; under mixed precision in the wide values,
             // which the refinement measures its residuals against
@@ -6647,7 +6686,8 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> GpuSide<T> {
             // its epsilons buys anything, as in the CPU refinement.
             let floor = 8.0 * arael_faer::schur::SchurReal::to_f64(<T as num::Float>::epsilon());
             let refine = mixed.map(|mp| (mp.max_refinements, mp.tol.max(floor)));
-            let mut solver = device_solver(dev, precision, sn, asym, refine, f32_reduction)?;
+            let method = crate::gpu_solver::Method::Factor { precision, sn, asym, refine };
+            let mut solver = device_solver(dev, method, f32_reduction)?;
             solver.set_timing(timed);
             self.solver = Some(solver);
             Ok(())
@@ -6655,6 +6695,33 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> GpuSide<T> {
         #[cfg(not(feature = "gpu"))]
         {
             let _ = (dev, sn, asym, mixed, timed);
+            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "arael built without the `gpu` feature" }.into())
+        }
+    }
+
+    /// Build the device solver that solves the reduced system by conjugate
+    /// gradients under `cg`, when a GPU is given; the reduction it runs on
+    /// follows ([`prepare_schur`](Self::prepare_schur)). The system is in
+    /// the solver's scalar: f32 for an f32 solve, else the wide values. The
+    /// device's work is timed when `timed`. Without the `gpu` feature, or
+    /// with a runtime not compiled in, the solve is unavailable.
+    fn prepare_cg(&mut self, cg: arael_faer::cg::CgParams, timed: bool) -> Result<(), SolveFailureKind> {
+        let Some(dev) = self.given.as_ref() else {
+            return Ok(());
+        };
+        #[cfg(feature = "gpu")]
+        {
+            self.solver = None;
+            metal_supports(dev, false)?;
+            let f32_reduction = core::mem::size_of::<T>() == 4;
+            let mut solver = device_solver(dev, crate::gpu_solver::Method::Cg(cg), f32_reduction)?;
+            solver.set_timing(timed);
+            self.solver = Some(solver);
+            Ok(())
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = (dev, cg, timed);
             Err(SetupError::SolverUnavailable { solver: "gpu", reason: "arael built without the `gpu` feature" }.into())
         }
     }
@@ -7093,7 +7160,7 @@ impl<T> SparseFaer<T> {
             target: String::new(),
             integrated: false,
             wide: gpu.wide(),
-            f32_factor: false,
+            solve: None,
             f32_system: false,
             work: GpuWork::Unused,
             reserved_bytes: gpu.reserved_bytes(),
@@ -7105,7 +7172,7 @@ impl<T> SparseFaer<T> {
             report.name = arch.name.clone();
             report.target = arch.target.clone();
             report.integrated = arch.integrated;
-            report.f32_factor = g.precision() == arael_gpu::GpuPrecision::F32;
+            report.solve = Some(g.solve());
             report.f32_system = g.f32_reduction();
             report.work = match &self.host_assembly {
                 Some(why) => GpuWork::Solves(why.clone()),
@@ -7850,40 +7917,63 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let clock = self.verbose.then(Instant::now);
         let solved = self.gpu.solver_mut().solve_reduced(h.vals(), grad, delta)?;
         let ok = solved.is_some();
-        self.note_gpu_solve(solved, clock, "reduce + factor + solve + back-substitution");
+        self.note_gpu_solve(solved, clock, false);
         Ok(ok)
     }
 
-    /// A device solve's refinement counted and, verbose, reported (`what`
-    /// it did, timed from `clock`); `None` for a failed one.
+    /// A device solve counted (a factor's refinement steps, the conjugate
+    /// gradients' iterations) and, verbose, reported, timed from `clock`;
+    /// `looped` for an attempt of the loop on the device, which damps and
+    /// takes the trial cost there too. `None` for a failed one.
     #[cfg(feature = "gpu")]
-    fn note_gpu_solve(&mut self, stats: Option<arael_gpu::RefineStats>, clock: Option<Instant>, what: &str) {
+    fn note_gpu_solve(&mut self, stats: Option<crate::gpu_solver::SolveStats>, clock: Option<Instant>, looped: bool) {
+        use crate::gpu_solver::SolveStats;
         let Some(stats) = stats else { return };
-        self.sn_num.rf.steps += stats.steps;
-        if stats.short {
-            self.sn_num.rf.shortfalls += 1;
-        }
-        if let Some(t) = clock {
-            let gs = self.gpu.solver_ref();
-            info!(
-                "gpu schur ({}, {:?}): {} {:.1} ms{}",
-                gs.runtime(),
-                gs.precision(),
-                what,
-                t.elapsed().as_secs_f64() * 1e3,
-                if self.sn_num.mixed.is_some() {
+        let (scalar, solve, detail) = match stats {
+            SolveStats::Refined(st) => {
+                self.sn_num.rf.steps += st.steps;
+                if st.short {
+                    self.sn_num.rf.shortfalls += 1;
+                }
+                self.sn_num.report_into(&mut self.plan);
+                let detail = if self.sn_num.mixed.is_some() {
                     format!(
                         ", {} refinement steps, relative residual {:.1e}{}",
-                        stats.steps,
-                        if stats.bnorm > 0.0 { stats.rnorm / stats.bnorm } else { 0.0 },
-                        if stats.short { " -- short of tolerance" } else { "" }
+                        st.steps,
+                        if st.bnorm > 0.0 { st.rnorm / st.bnorm } else { 0.0 },
+                        if st.short { " -- short of tolerance" } else { "" }
                     )
                 } else {
                     String::new()
+                };
+                (if self.gpu.solver_ref().solve() == (GpuSolve::Factor { f32: true }) { "F32" } else { "F64" }, "factor + solve", detail)
+            }
+            SolveStats::Cg(st) => {
+                self.cg_iters += st.iters;
+                if let Some(plan) = self.plan.as_mut() {
+                    plan.cg_iterations = Some(self.cg_iters);
                 }
-            );
+                let detail = format!(
+                    ", {} iterations in {} round{}, relative residual {:.1e}{}",
+                    st.iters,
+                    st.rounds,
+                    if st.rounds == 1 { "" } else { "s" },
+                    st.relative_residual,
+                    if st.converged {
+                        ""
+                    } else if st.breakdown {
+                        " -- stopped on a direction without positive curvature"
+                    } else {
+                        " -- at the iteration cap"
+                    }
+                );
+                ("cg", "conjugate gradients", detail)
+            }
+        };
+        if let Some(t) = clock {
+            let what = if looped { format!("damp + reduce + {solve} + back-substitution + trial cost") } else { format!("reduce + {solve} + back-substitution") };
+            info!("gpu schur ({}, {scalar}): {what} {:.1} ms{detail}", self.gpu.solver_ref().runtime(), t.elapsed().as_secs_f64() * 1e3);
         }
-        self.sn_num.report_into(&mut self.plan);
     }
 }
 
@@ -7903,7 +7993,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     fn attempt(&mut self, lambda: T) -> Result<ResidentAttempt, DeviceFailure> {
         let clock = self.verbose.then(Instant::now);
         let (stats, attempt) = self.gpu.solver_mut().attempt(arael_faer::schur::SchurReal::to_f64(lambda))?;
-        self.note_gpu_solve(stats, clock, "damp + reduce + factor + solve + back-substitution + trial cost");
+        self.note_gpu_solve(stats, clock, true);
         Ok(attempt)
     }
 
@@ -8323,10 +8413,16 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // Nothing is factorized on the iterative route, so there is no fill to
         // reduce, no device factor, and nested dissection is not worth computing.
         let iterative = self.schur_solve.cg().is_some();
+        // The implicit route never forms S.
+        let implicit = self.schur_solve.implicit();
         let band = if eliminated.is_empty() { 0 } else { schur.kept_bandwidth() };
+        // The solver's GPU is opened here when the route runs on it: the
+        // supernodal factor, or conjugate gradients on the formed S.
+        let on_gpu = if iterative { !implicit } else { self.sn_take() };
+        let opened = if on_gpu { self.open_gpu() } else { None };
         // The device that factors it, as integrated or not; one that does
         // not open is taken for a discrete one, and the solve reports it.
-        let device = if !iterative && self.sn_take() { self.open_gpu().map(|integrated| integrated.unwrap_or(false)) } else { None };
+        let device = if iterative { None } else { opened.map(|integrated| integrated.unwrap_or(false)) };
         let (mut ord, mut ordered_by, pricing) = match reduced_ordering_for(self.ordering, device, schur.s.val_count(), schur.s.nrows(), band) {
             (ReducedOrdering::NestedDissection, ..) if iterative => (ordering_for(schur.s.val_count(), schur.s.nrows(), band), OrderedBy::Rule, DevicePricing::None),
             choice => choice,
@@ -8872,7 +8968,6 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
         // The implicit route never forms S, so it is not allocated either --
         // that storage is the memory the route exists to avoid.
-        let implicit = self.schur_solve.implicit();
         let s = (!implicit).then(|| schur.alloc_s::<T>());
         if iterative {
             // Conjugate gradients reads S in block form and never factorizes
@@ -8892,6 +8987,18 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.factor_mem = Vec::new();
             self.solve_mem = Vec::new();
             self.sn_num.clear();
+            // With a GPU, conjugate gradients on the formed S run on the
+            // device, on the reduction built below; the implicit route
+            // stays on the CPU.
+            if let (false, Some(cg)) = (implicit, self.schur_solve.cg()) {
+                self.gpu.prepare_cg(cg, self.measure)?;
+            }
+            if self.sn_num.mixed.is_some() {
+                warn!(
+                    "mixed precision is ignored: it names the scalar of a factor, and conjugate gradients \
+                     (SparseFaerOptions::with_iterative_schur, with_implicit_schur) have none"
+                );
+            }
             // the plan names the route from here on: no iteration yet
             if let Some(plan) = self.plan.as_mut() {
                 plan.cg_iterations = Some(self.cg_iters);

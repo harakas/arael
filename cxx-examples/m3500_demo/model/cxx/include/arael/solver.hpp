@@ -576,10 +576,25 @@ struct SchurPlan {
     option<uint32_t> refinement_shortfalls;
 };
 
+/// How a GPU solve solves its system on the device, the reduced one or the
+/// whole one (GpuReport::solve).
+enum class GpuSolve : uint32_t {
+    /// Not at all: the solve did not use the device.
+    None = 0,
+    /// The block supernodal Cholesky factor, in f64.
+    Factor = 1,
+    /// The same in f32: an f32 solve, or mixed_precision.
+    FactorF32 = 2,
+    /// Preconditioned conjugate gradients on the reduced system
+    /// (SchurSolve::Iterative).
+    ConjugateGradients = 3,
+};
+
 /// How much of a solve ran on its GPU (GpuReport::work).
 enum class GpuWork : uint32_t {
-    /// Nothing: the solve took a route that does not run on a device
-    /// (conjugate gradients, the envelope, the scalar factorization).
+    /// Nothing: the solve took a route that does not run on a device (the
+    /// envelope, the scalar factorization, conjugate gradients on a
+    /// reduced system that is not formed).
     Unused = 0,
     /// The damped solves; the assembly ran on the host
     /// (GpuReport::host_assembly says why) and the Hessian's values were
@@ -621,9 +636,9 @@ struct GpuReport {
     bool integrated;
     /// The scalar of the device's wide values: F64 or Df32.
     GpuWide wide;
-    /// The factor is f32: an f32 solve, or mixed_precision.
-    bool f32_factor;
-    /// The system the device forms and factorizes is f32: an f32 solve
+    /// How the device solves the system: a factor or conjugate gradients.
+    GpuSolve solve;
+    /// The system the device forms and solves is f32: an f32 solve
     /// without mixed_precision. Otherwise it is in the wide values.
     bool f32_system;
     /// How much of the solve ran on the device, and when the assembly ran

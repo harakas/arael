@@ -31,7 +31,7 @@ static SolveResult solve(GpuBackend gpu, bool assembly) {
 static void show(const char* tag, const GpuReport& g) {
     std::printf("%s_backend %u\n%s_index %u\n%s_named %d\n%s_wide %u\n", tag, unsigned(g.backend), tag, g.index,
         tag, (std::strlen(g.name) > 0 && std::strlen(g.target) > 0) ? 1 : 0, tag, unsigned(g.wide));
-    std::printf("%s_f32_factor %d\n%s_f32_system %d\n%s_work %u\n%s_host_assembly %u\n%s_why %zu\n", tag, g.f32_factor ? 1 : 0,
+    std::printf("%s_solve %u\n%s_f32_system %d\n%s_work %u\n%s_host_assembly %u\n%s_why %zu\n", tag, unsigned(g.solve),
         tag, g.f32_system ? 1 : 0, tag, unsigned(g.work), tag, unsigned(g.host_assembly), tag, std::strlen(g.no_device_form));
     std::printf("%s_reserved %d\n%s_buffers %d\n", tag, g.reserved_bytes > 0 ? 1 : 0, tag, g.buffers_created > 0 ? 1 : 0);
 }
@@ -66,5 +66,33 @@ int main() {
     timing("on", on.value());
     std::printf("on_report %d\n", std::strstr(on->report(), "  gpu       cpu:0 ") ? 1 : 0);
     show("off", off->gpu().value());
+
+    // Conjugate gradients on the reduced system, on the device: with
+    // items, which the reduction eliminates.
+    LmConfig cfg;
+    cfg.max_iters = 50;
+    Fit fit;
+    fill(fit);
+    fit.items().reserve(3);
+    const double t[3] = {1.5, -0.3, 0.7};
+    const double w[3] = {1.0, 2.0, 0.5};
+    for (int i = 0; i < 3; i++) {
+        auto n = fit.items().push();
+        n.set_t(t[i]);
+        n.set_w(w[i]);
+    }
+    SparseOptions so;
+    so.schur = SchurPolicy::Force;
+    so.schur_solve = SchurSolve::Iterative;
+    so.gpu = GpuBackend::Cpu;
+    SolveResult cg = fit.solve_sparse(cfg, so);
+    if (cg.is_err()) {
+        std::fprintf(stderr, "the conjugate gradients' solve failed: %s\n", cg.error().message);
+        return 1;
+    }
+    GpuReport g = cg->gpu().value();
+    SchurPlan p = cg->plan().value();
+    std::printf("cg_solve %u\ncg_is_cg %d\ncg_work %u\ncg_iters %d\n", unsigned(g.solve), g.solve == GpuSolve::ConjugateGradients ? 1 : 0,
+        unsigned(g.work), (p.cg_iterations && *p.cg_iterations > 0) ? 1 : 0);
     return 0;
 }

@@ -406,6 +406,66 @@ fn an_f32_solve_through_the_device_assembly_reaches_the_optimum() {
     }
 }
 
+/// Conjugate gradients on the reduced system, on each runtime: with the
+/// loop on the device and with the assembly on the host, an f64 solve
+/// reaches the optimum as the CPU's conjugate gradients do, and the report
+/// says what ran; an f32 solve, its system in f32, lands on the f64 model's
+/// optimum to 1e-4. A timed solve reports the device's time for its
+/// attempts.
+#[test]
+fn conjugate_gradients_on_the_device_reach_the_optimum() {
+    use arael::simple_lm::{CgParams, GpuSolve, SparseFaer};
+    let cg = CgParams { tol: 1e-10, ..Default::default() };
+    let optimum = consistent_optimum();
+    let off = |c: f64| (c - optimum).abs() / optimum;
+    // to the optimum, or a few iterations (`short`)
+    let run = |gpu: Option<&GpuDevice>, assembly: bool, short: bool| {
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let mut solver = SparseFaer::<f64>::from_options(&options(gpu, assembly).with_iterative_schur(cg));
+        let cfg = arael::simple_lm::LmConfig::<f64> { gather_timing: true, max_iters: if short { 12 } else { 1000 }, ..to_the_optimum() };
+        let r = s.solve_with(&mut solver, &cfg).unwrap();
+        let plan = solver.plan().expect("a plan");
+        assert!(plan.reduced && !plan.block_supernodal && plan.cg_iterations.is_some_and(|n| n > 0), "{plan:?}");
+        r
+    };
+    let cpu = run(None, false, false);
+    assert!(cpu.gpu.is_none() && off(cpu.end_cost) <= 1e-6, "the CPU's conjugate gradients: {} against the optimum {optimum}", cpu.end_cost);
+    let cpu_short = run(None, false, true).end_cost;
+    for d in devices() {
+        for assembly in [false, true] {
+            // the assembly on the host: the first iterations, near the
+            // CPU's. Not closer: on this small system (54 kept parameters)
+            // most solves stop at the iteration cap, so the steps are
+            // inexact and move with the rounding.
+            let r = run(Some(&d), assembly, !assembly);
+            let g = r.gpu.as_ref().expect("a GPU was given");
+            assert_eq!(g.solve, Some(GpuSolve::ConjugateGradients), "{}", label(&d));
+            assert_eq!(g.work == GpuWork::Loop, assembly, "{}: {g:?}", label(&d));
+            assert!(g.work != GpuWork::Unused && !g.f32_system, "{}: {g:?}", label(&d));
+            if assembly {
+                assert!(off(r.end_cost) <= 1e-6, "{}: {} against the optimum {optimum}", label(&d), r.end_cost);
+            } else {
+                assert!((r.end_cost - cpu_short).abs() <= 1e-3 * cpu_short, "{}: {} after 12 iterations against the CPU's {cpu_short}", label(&d), r.end_cost);
+            }
+            let t = r.timing.as_ref().unwrap().gpu.unwrap_or_else(|| panic!("{}: a timed device solve", label(&d)));
+            assert_eq!(t.attempt_count, r.iterations, "{}: every attempt timed", label(&d));
+            assert!(!t.attempts.is_zero() && t.assembly.is_zero() != assembly, "{}: {t:?}", label(&d));
+            let text = r.report();
+            assert!(text.contains(", conjugate gradients, system in ") && text.contains("solved by conjugate gradients ("), "{}:\n{text}", label(&d));
+        }
+    }
+    for d in f32_devices() {
+        let (cameras, points, observations) = consistent_scene::<f32>();
+        let mut s = SceneF { cameras, points, observations };
+        let mut solver = SparseFaer::<f32>::from_options(&options(Some(&d), true).with_iterative_schur(cg));
+        let c = s.solve_with(&mut solver, &to_the_optimum()).unwrap().end_cost as f64;
+        let g = solver.gpu_report().expect("a GPU was given");
+        assert!(g.solve == Some(GpuSolve::ConjugateGradients) && g.work == GpuWork::Loop && g.f32_system, "{}: {g:?}", label(&d));
+        assert!(off(c) <= 1e-4, "{}: {c} against the optimum {optimum}", label(&d));
+    }
+}
+
 /// `MixedPrecision` with no refinement steps: an f32 solve under it forms
 /// the system it factorizes in the wide values and refines nothing.
 fn wide_system() -> Option<arael::simple_lm::MixedPrecision> {
@@ -442,7 +502,8 @@ fn an_f32_solve_reaches_the_optimum_with_s_in_f32_or_in_the_wide_values() {
         let c = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &to_the_optimum()).unwrap().end_cost;
         assert!((c - optimum).abs() <= 1e-9 * optimum, "{}, refined: {c} against the optimum {optimum}", label(&d));
         let report = solver.gpu_report().unwrap();
-        assert!(report.work == GpuWork::Loop && report.f32_factor && !report.f32_system, "{}: a refined solve's S is wide", label(&d));
+        let f32_factor = report.solve == Some(arael::simple_lm::GpuSolve::Factor { f32: true });
+        assert!(report.work == GpuWork::Loop && f32_factor && !report.f32_system, "{}: a refined solve's S is wide", label(&d));
     }
 }
 
@@ -4833,7 +4894,7 @@ fn a_solve_reports_what_ran_on_its_gpu() {
         assert_eq!((g.backend, g.index, g.wide), (d.backend(), d.index(), d.wide()), "{}", label(&d));
         assert!(!g.name.is_empty() && !g.target.is_empty(), "{}: {g:?}", label(&d));
         assert_eq!(g.work, GpuWork::Loop, "{}", label(&d));
-        assert!(!g.f32_factor && !g.f32_system, "{}: an f64 solve", label(&d));
+        assert!(g.solve == Some(arael::simple_lm::GpuSolve::Factor { f32: false }) && !g.f32_system, "{}: an f64 solve", label(&d));
         assert!(g.reserved_bytes > 0 && g.buffers_created > 0, "{}: {g:?}", label(&d));
         assert_eq!(g.reserved_bytes, d.reserved_bytes(), "{}", label(&d));
 

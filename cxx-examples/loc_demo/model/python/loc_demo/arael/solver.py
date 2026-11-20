@@ -430,6 +430,18 @@ class SchurPlan(ctypes.Structure):
     refinement_shortfalls = _plan_opt("_refinement_shortfalls", int)
 
 
+class GpuSolve(enum.IntEnum):
+    """How a GPU solve solves its system on the device (GpuReport.solve):
+    not at all (the solve did not use the device), by the block
+    supernodal Cholesky factor in f64 or in f32 (an f32 solve, or
+    mixed_precision), or by preconditioned conjugate gradients on the
+    reduced system (SchurSolve.ITERATIVE)."""
+    NONE = 0
+    FACTOR = 1
+    FACTOR_F32 = 2
+    CONJUGATE_GRADIENTS = 3
+
+
 class GpuWork(enum.IntEnum):
     """How much of a solve ran on its GPU (GpuReport.work): nothing (the
     solve took a route that does not run on a device), the damped solves
@@ -460,7 +472,7 @@ class GpuReportRaw(ctypes.Structure):
         ("target", ctypes.c_char_p),
         ("integrated", ctypes.c_bool),
         ("wide", ctypes.c_uint32),
-        ("f32_factor", ctypes.c_bool),
+        ("solve", ctypes.c_uint32),
         ("f32_system", ctypes.c_bool),
         ("work", ctypes.c_uint32),
         ("host_assembly", ctypes.c_uint32),
@@ -481,17 +493,18 @@ class GpuReport:
     `backend` (GpuBackend) and `index` name the device; `name` is its
     driver's name and `target` what the kernels were compiled for (both
     empty when `work` is UNUSED); `integrated` that it shares the host's
-    memory; `wide` (GpuWide) the scalar of its wide values; `f32_factor`
-    that the factor is f32; `f32_system` that the system the device
-    factorizes is f32 (an f32 solve without mixed_precision; otherwise it
-    is in the wide values); `work` (GpuWork) how much of the solve ran
+    memory; `wide` (GpuWide) the scalar of its wide values; `solve`
+    (GpuSolve) how the device solves the system, a factor or conjugate
+    gradients; `f32_system` that the system the device forms and solves
+    is f32 (an f32 solve without mixed_precision; otherwise it is in the
+    wide values); `work` (GpuWork) how much of the solve ran
     there, with `host_assembly` (HostAssembly) and `no_device_form` why the
     assembly ran on the host when it did; `reserved_bytes` the device
     memory its state holds and `buffers_created` the device buffers it
     has allocated over its life."""
 
     __slots__ = ("backend", "index", "name", "target", "integrated", "wide",
-                 "f32_factor", "f32_system", "work", "host_assembly",
+                 "solve", "f32_system", "work", "host_assembly",
                  "no_device_form", "reserved_bytes", "buffers_created")
 
     def __init__(self, raw):
@@ -501,7 +514,7 @@ class GpuReport:
         self.target = (raw.target or b"").decode()
         self.integrated = raw.integrated
         self.wide = GpuWide(raw.wide)
-        self.f32_factor = raw.f32_factor
+        self.solve = GpuSolve(raw.solve)
         self.f32_system = raw.f32_system
         self.work = GpuWork(raw.work)
         self.host_assembly = HostAssembly(raw.host_assembly)

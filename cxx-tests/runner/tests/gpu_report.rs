@@ -16,8 +16,9 @@ pub fn verify(text: &str) {
     for tag in ["on", "off"] {
         let v = |n: &str| g(&format!("{tag}_{n}"));
         // GpuBackend::Cpu, device 0, named, f64 wide values, an f64 solve
+        // by an f64 factor (GpuSolve::Factor)
         assert_eq!((v("backend"), v("index"), v("named"), v("wide")), (3.0, 0.0, 1.0, 0.0), "{tag}:\n{text}");
-        assert_eq!((v("f32_factor"), v("f32_system")), (0.0, 0.0), "{tag}:\n{text}");
+        assert_eq!((v("solve"), v("f32_system")), (1.0, 0.0), "{tag}:\n{text}");
         assert_eq!((v("reserved"), v("buffers")), (1.0, 1.0), "{tag}:\n{text}");
         // GpuWork::Solves: the fixture has no device form (its `Rig` reads
         // a cache computed from data), so the damped solves alone run on
@@ -40,4 +41,7 @@ pub fn verify(text: &str) {
     // CPU assembles the fixture); none without a device
     assert_eq!(g("none_gpu_time"), 0.0, "{text}");
     assert_eq!((g("on_gpu_time"), g("on_attempts_timed"), g("on_assembly_timed")), (1.0, 1.0, 0.0), "{text}");
+    // conjugate gradients on the reduced system: GpuSolve::ConjugateGradients,
+    // the damped solves on the device (GpuWork::Solves), iterations counted
+    assert_eq!((g("cg_solve"), g("cg_is_cg"), g("cg_work"), g("cg_iters")), (3.0, 1.0, 1.0, 1.0), "{text}");
 }
