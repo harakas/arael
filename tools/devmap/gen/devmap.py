@@ -523,6 +523,8 @@ def build_case(args):
             name, file = "assembly:" + root.group(1), "generated + arael-gpu/kernels/assembly.cpp"
         elif any(e.startswith("k_schur") for e in u["entries"]):
             name, file = "schur", "arael-gpu/kernels/schur.cpp"
+        elif any(e.startswith("k_cg") for e in u["entries"]):
+            name, file = "cg", "arael-gpu/kernels/cg.cpp"
         elif "k_lin_pass" in u["entries"]:
             name, file = "lm", "arael-gpu/kernels/lm.cpp"
         elif "k_potf2" in u["entries"] or "k_seed_f32" in u["entries"]:

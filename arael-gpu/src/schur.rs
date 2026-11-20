@@ -566,13 +566,20 @@ impl SchurPlan {
     }
 }
 
+/// What the kernels over a reduction's plan share: the plan's header, the
+/// reduction's scalar, the records' sizes words. Compiled before
+/// [`SOURCE`], and before the conjugate gradients' kernels.
+pub(crate) const SHARED: &str = include_str!("../kernels/schur.h");
 /// The kernels, compiled per block-width class.
 const SOURCE: &str = include_str!("../kernels/schur.cpp");
 
 /// Threads per block of the kernels over entries and blocks.
-const THREADS: u32 = 256;
+pub(crate) const THREADS: u32 = 256;
 /// Threads per block of the kernels over the tiles of S and the kept blocks.
-const PLANE: u32 = 32;
+pub(crate) const PLANE: u32 = 32;
+
+/// The next reduction's identity ([`GpuSchur::id`]).
+static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Why a [`GpuSchur`] solve failed.
 #[derive(Clone, Debug)]
@@ -652,6 +659,39 @@ struct Sections {
     bytes: usize,
 }
 
+/// The reduced system of a [`GpuSchur`] on its device, for a solver of it
+/// that is not a factor: where S, the right-hand side and the solution
+/// are, and the kept blocks' records. Offsets are bytes into their block.
+pub(crate) struct ReducedSystem<'a, D: Device> {
+    /// The reduction's kernels' #defines: the plan's and the records'
+    /// words, the block-width caps, the scalars.
+    pub defines: &'a str,
+    /// The plan's words, and its header as the kernels take it.
+    pub plan: &'a D::Block,
+    pub header: &'a [u32; SHEADER],
+    /// In `plan`, per kept block: where its tile entries start.
+    pub kt_ptr: usize,
+    /// The expanded records, the kept blocks' tile entries ([`KT_REC`]
+    /// words each) from `kt` on.
+    pub expanded: &'a D::Block,
+    pub kt: usize,
+    /// The work block: S's tile values, the reduced right-hand side, the
+    /// kept blocks' solution (what the back-substitution reads) and a
+    /// residual vector, all in the reduction's scalar; the solve's flags
+    /// ([`N_FLAGS`] words).
+    pub work: &'a D::Block,
+    pub s: usize,
+    pub b: usize,
+    pub x: usize,
+    pub r: usize,
+    pub flags: usize,
+    /// Kept blocks, the reduced system's scalar dimension, the widest kept
+    /// block's columns.
+    pub nk: u32,
+    pub nks: usize,
+    pub kw_max: usize,
+}
+
 /// The device plan of a [`SchurSymbolic`] and the device state of one
 /// reduction on a [`Device`]: the Hessian's values and gradient as
 /// uploaded, the eliminated blocks' Cholesky factors, W, S and the reduced
@@ -665,6 +705,13 @@ pub struct GpuSchur<D: Device> {
     graphs: bool,
     replayed: bool,
     dev: Arc<D>,
+    /// [`id`](Self::id).
+    id: u64,
+    /// The kernels' #defines, for another unit over the same plan (the
+    /// conjugate gradients').
+    defines: String,
+    /// The widest kept block's columns.
+    kw_max: usize,
     values: Values,
     wide: Wide,
     /// [`GpuSchurParams::f32_reduction`].
@@ -812,7 +859,7 @@ impl<D: Device> GpuSchur<D> {
             bytes: l.bytes(),
         };
         let work = dev.alloc(sec.bytes)?;
-        let source = format!("{WIDE}\n{SOURCE}");
+        let source = format!("{WIDE}\n{SHARED}\n{SOURCE}");
         let entries = ["k_zero_u32", "k_schur_elim", "k_schur_w", "k_schur_tiles", "k_schur_rhs", "k_scatter_kept", "k_schur_backsub", "k_symv_sub", "k_copy_r", "k_refine_start", "k_refine_apply", "k_refine_judge", "k_refine_revert", "k_schur_pairs", "k_schur_kobs", "k_schur_kt"];
         let [zero_u32, elim, w, tiles, rhs, scatter_kept, backsub, symv_sub, copy, refine_start, refine_apply, refine_judge, refine_revert, pairs, kobs, kt]: [D::Kernel; 16] =
             dev.compile_many(&source, &defines, &entries)?.try_into().ok().expect("a kernel per entry point");
@@ -891,6 +938,9 @@ impl<D: Device> GpuSchur<D> {
             graphs: true,
             replayed: false,
             dev: dev.clone(),
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            defines,
+            kw_max: p.kw_max,
             values,
             wide: values.wide(),
             f32_reduction: params.f32_reduction,
@@ -943,6 +993,34 @@ impl<D: Device> GpuSchur<D> {
     /// The device the reduction runs on; its factor runs there too.
     pub fn device(&self) -> &Arc<D> {
         &self.dev
+    }
+
+    /// The reduction's identity, unique in the process: what was built
+    /// over this reduction's blocks (a graph, the conjugate gradients)
+    /// runs only with it.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The reduced system as a solver of it other than a factor reads it.
+    pub(crate) fn reduced_system(&self) -> ReducedSystem<'_, D> {
+        ReducedSystem {
+            defines: &self.defines,
+            plan: &self.ints,
+            header: &self.header,
+            kt_ptr: self.kt_ptr,
+            expanded: &self.expanded,
+            kt: self.kt_at,
+            work: &self.work,
+            s: self.sec.s,
+            b: self.sec.rhs_kept,
+            x: self.sec.x_kept,
+            r: self.sec.r,
+            flags: self.flag_at(0),
+            nk: self.nk,
+            nks: self.nks,
+            kw_max: self.kw_max,
+        }
     }
 
     /// The Hessian's scalar dimension.
@@ -1164,7 +1242,7 @@ impl<D: Device> GpuSchur<D> {
     /// steps and tolerance as they are launched.
     fn launch_solve(&self, factor: &GpuFactor<D>, max_steps: usize, tol_rel: f64) -> Result<(), GpuError> {
         assert!(!(self.f32_reduction && max_steps > 0), "a refinement measures its residuals against S, which GpuSchurParams::f32_reduction forms in f32");
-        let (s, plan) = (&self.sec, Arg::Block(&self.ints, 0));
+        let s = &self.sec;
         let w = |at: usize| Arg::Block(&self.work, at);
         {
             let _scope = Scope::new(&*self.dev, "factorize");
@@ -1182,12 +1260,7 @@ impl<D: Device> GpuSchur<D> {
         let gate = w(self.flag_at(F_ACTIVE));
         let state = w(s.out + self.status_at);
         let copy = |gate, dst: usize, src: usize| self.run(&self.k.copy, per_entry, THREADS, &[gate, w(dst), w(src), Arg::U32(nks)]);
-        // r = b - S x
-        let residual = |gate| {
-            copy(gate, s.r, s.rhs_kept)?;
-            let (kt_ptr, kt) = (Arg::Block(&self.ints, self.kt_ptr), Arg::Block(&self.expanded, self.kt_at));
-            self.run(&self.k.symv_sub, self.nk, PLANE, &[gate, plan, self.header_arg(), kt_ptr, kt, w(s.s), w(s.x_kept), w(s.r)])
-        };
+        let residual = |gate| self.launch_residual(gate);
         {
             let _scope = Scope::new(&*self.dev, "solve");
             copy(on, s.x_kept, s.rhs_kept)?;
@@ -1210,6 +1283,18 @@ impl<D: Device> GpuSchur<D> {
             self.run(&self.k.refine_revert, per_entry, THREADS, &[flags, w(s.x_kept), w(s.x_prev), Arg::U32(nks)])?;
         }
         Ok(())
+    }
+
+    /// The launches of the residual of the kept blocks' solution, `r = b -
+    /// S x` (the reduced right-hand side, S, the solution and `r` in the
+    /// work block), when `gate[0]` is nonzero.
+    pub(crate) fn launch_residual(&self, gate: Arg<'_, D::Block>) -> Result<(), GpuError> {
+        let (s, plan) = (&self.sec, Arg::Block(&self.ints, 0));
+        let w = |at: usize| Arg::Block(&self.work, at);
+        let nks = self.nks as u32;
+        self.run(&self.k.copy, nks.div_ceil(THREADS), THREADS, &[gate, w(s.r), w(s.rhs_kept), Arg::U32(nks)])?;
+        let (kt_ptr, kt) = (Arg::Block(&self.ints, self.kt_ptr), Arg::Block(&self.expanded, self.kt_at));
+        self.run(&self.k.symv_sub, self.nk, PLANE, &[gate, plan, self.header_arg(), kt_ptr, kt, w(s.s), w(s.x_kept), w(s.r)])
     }
 
     /// The launches of the back-substitution, the last stage of a damped
@@ -1261,12 +1346,27 @@ impl<D: Device> GpuSchur<D> {
         refine: Option<(usize, f64)>,
         delta: &mut [M],
     ) -> Result<RefineStats, GpuSchurError> {
-        assert_eq!(delta.len(), self.n);
+        self.start_solve(hvals, rhs)?;
+        self.enqueue(factor, refine)?;
+        self.finish_solve(refine, delta)
+    }
+
+    /// The start of a damped solve from host values: the stamp before it
+    /// ([`stamp_solves`](Self::stamp_solves)) and the upload of the
+    /// Hessian's tile values and the gradient; the solve's launches follow.
+    pub(crate) fn start_solve<M: SchurReal + 'static>(&mut self, hvals: &[M], rhs: &[M]) -> Result<(), GpuError> {
         if let Some((before, _)) = self.stamps {
             self.dev.stamp(before)?;
         }
-        self.upload(hvals, rhs)?;
-        self.enqueue(factor, refine)?;
+        self.upload(hvals, rhs)
+    }
+
+    /// The end of a damped solve, after its launches: the stamp after it,
+    /// one read of the step and the status (the wait for the solve), the
+    /// outcome under the refinement `refine`, and the step into `delta`
+    /// (left as it was by a failed solve).
+    pub(crate) fn finish_solve<M: SchurReal + 'static>(&mut self, refine: Option<(usize, f64)>, delta: &mut [M]) -> Result<RefineStats, GpuSchurError> {
+        assert_eq!(delta.len(), self.n);
         if let Some((_, after)) = self.stamps {
             self.dev.stamp(after)?;
         }

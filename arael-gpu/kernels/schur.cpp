@@ -1,9 +1,10 @@
 // schur.cpp: the Schur reduction on the device and the refinement of its
 // reduced solve (docs/dev/GPU.md, E2 and E9), launched by
-// arael-gpu/src/schur.rs over its plan.
+// arael-gpu/src/schur.rs over its plan. Compiled after schur.h, which
+// declares the plan's header, R and the functions shared with cg.cpp.
 //
 // H, the gradient and the step are in V, the route's values (wide.h); the
-// reduction computes in R (below) and keeps its vectors in R; the
+// reduction computes in R (schur.h) and keeps its vectors in R; the
 // refinement's norms and state are in W, the route's wide scalar. Compiled per EWX (the widest
 // eliminated block), EW (it rounded up to 4, 8, 16, 32 or 64), KW (the
 // widest kept block, rounded likewise), TILE_LANES (k_schur_tiles' threads
@@ -26,106 +27,9 @@
 // the loops run to EW or KW and skip what is past the block's width, so the
 // arrays stay in registers (arael_gpu.h's rule, from k_trsm).
 
-// The plan header: the word offset of each of the plan's arrays, a slot
-// each, a launch's parameter (TABLE_PARAM(SchurHeader) H, read from the
-// launch's parameters, not from the plan) in every kernel that takes the
-// plan.
-struct SchurHeader {
-    u32 w[SHEADER];
-};
-
-// One plane: the threads of the tile, rhs and symv kernels.
-#define PLANE 32u
-#if PLANE != WARP
-#error "schur.cpp: the rhs and symv kernels sum over a plane with warp_sum"
-#endif
-// No kept-kept tile of H behind a tile of S.
-#define NONE 0xffffffffu
-
-// R: the scalar the reduction computes in. W itself with SCHUR_F32 0; f32
-// with SCHUR_F32 1, as the CPU's f32 route, for a solve whose factor is f32
-// and that does not refine against S: the inputs (H, the gradient, the kept
-// blocks' solution) are rounded to f32 as read (an f32 root's H and
-// gradient already are), and the eliminated blocks' factors, z, W, S, the
-// reduced right-hand side and the kept blocks' solution are kept in f32.
-#if SCHUR_F32
-typedef float R;
-#define R_DF32 0
-DEVICE R r_fma(R acc, R x, R y) {
-    return fma(x, y, acc);
-}
-#else
-typedef W R;
-#define R_DF32 ARAEL_WIDE_DF32
-DEVICE R r_fma(R acc, R x, R y) {
-    return wide_fma(acc, x, y);
-}
-#endif
-// v in R: a value of H or the gradient (V), or of a vector (W).
-template <typename T> DEVICE R to_r(T v) {
-    return (R)v;
-}
-
 KERNEL_THREADS(PLANE) void k_zero_u32(GLOBAL u32* RESTRICT buf, u32 n) {
     u32 i = global_x();
     if (i < n) buf[i] = 0;
-}
-
-// An observer's sizes word (SO_DIMS; schur.rs, so_dims): the width of its
-// kept block, of its eliminated block, and whether its coupling tile is
-// stored (eliminated, kept).
-#define DIMS_WO(d) ((d) & 0xffu)
-#define DIMS_WE(d) (((d) >> 8) & 0xffu)
-#define DIMS_TRANS(d) ((d) >> 16)
-
-// A kept block's tile entry's sizes word (KT_DIMS; schur.rs, kt_dims): the
-// tile's rows and columns (at most 64), whether the block is its column
-// block, whether it is a diagonal tile.
-#define KT_PACK(wr, wc, trans, diag) ((wr) | (wc) << 8 | (trans) << 16 | (diag) << 17)
-#define KT_WR(d) ((d) & 0xffu)
-#define KT_WC(d) (((d) >> 8) & 0xffu)
-#define KT_TRANS(d) (((d) >> 16) & 1u)
-#define KT_DIAG(d) ((d) >> 17)
-
-// C[i][k] of an observer's coupling tile at `ca`, wo x we, in either storage
-// orientation.
-DEVICE V coupling(GLOBAL const V* h, u32 ca, u32 trans, u32 wo, u32 we, u32 i, u32 k) {
-    return trans != 0 ? h[ca + k + i * we] : h[ca + i + k * wo];
-}
-
-// v = D^-1 v in place (w <= EW entries) by two triangular solves with D's
-// factor at `f`, column-major w x w: D = U P U^T, U unit lower (D's
-// Cholesky factor L with each column divided by its diagonal entry) below
-// the diagonal, P = diag(L_jj^2) as its reciprocals on the diagonal. The
-// CPU's llt_solve_panel up to rounding, at one product a term: solves keep
-// S the reduction of a nearby positive definite system where multiplying
-// by D's rounded inverse does not (its error grows with D's condition
-// number, high for a point seen along nearly parallel rays). wide_fma's
-// rounding, relative to its terms, keeps the solves backward stable.
-DEVICE void ldlt_solve(GLOBAL const R* f, u32 w, THREAD R* v) {
-#pragma unroll
-    for (u32 k = 0; k < EW; k++) {
-        if (k < w) {
-            R s = v[k];
-#pragma unroll
-            for (u32 j = 0; j < k; j++) s = r_fma(s, -f[k + j * w], v[j]);
-            v[k] = s;
-        }
-    }
-#pragma unroll
-    for (u32 k = 0; k < EW; k++)
-        if (k < w) v[k] = v[k] * f[k + k * w];
-#pragma unroll
-    for (u32 kk = 0; kk < EW; kk++) {
-        u32 k = EW - 1 - kk;
-        if (k < w) {
-            R s = v[k];
-#pragma unroll
-            for (u32 j = k + 1; j < EW; j++)
-                if (j < w) s = r_fma(s, -f[j + k * w], v[j]);
-            v[k] = s;
-        }
-    }
 }
 
 // Stage 1, one thread per eliminated block: the factor of its damped

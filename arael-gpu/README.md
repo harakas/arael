@@ -20,6 +20,10 @@ On a device:
   eliminated block is applied through its Cholesky factor, as on the CPU,
   not through an explicit inverse, which loses digits on ill-conditioned
   blocks (points seen along nearly parallel rays);
+- `GpuCg`: preconditioned conjugate gradients on a `GpuSchur`'s reduced
+  system, in the factor's place: block-Jacobi preconditioned, the
+  scalars and the decision to stop on the device, the iterations queued
+  in rounds with one wait a round;
 - `LmVectors`: the LM loop's vector passes (the trial point, the norms,
   the damping, the predicted reduction).
 
@@ -27,13 +31,16 @@ The symbolic analysis stays on the CPU in arael-faer. Each solver object
 is built once per sparsity structure.
 
 ```rust,ignore
-use arael_gpu::{cuda::CudaDevice, GpuFactor, GpuPrecision, GpuSchur, Wide};
+use arael_gpu::{cuda::CudaDevice, CgParams, GpuCg, GpuFactor, GpuPrecision, GpuSchur, Wide};
 
 let dev = Arc::new(CudaDevice::new(0)?);
 let mut g = GpuSchur::new(&dev, &schur_sym, h.symbolic(), Wide::F64)?;
 let mut f = GpuFactor::new(&dev, GpuPrecision::F32, &sn_of_s, &schur_sym.s, &Default::default(), Wide::F64)?;
 // the full step; Err when an eliminated block or the reduced system is not definite
 let stats = g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut delta)?;
+// the same by conjugate gradients, without a factor
+let mut cg = GpuCg::new(&g, &CgParams::default(), &Default::default())?;
+let stats = cg.solve(&mut g, h.vals(), &rhs, &mut delta)?;
 ```
 
 `Wide` is the scalar the device keeps and sums the cost and the

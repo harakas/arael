@@ -9,8 +9,9 @@
 //!
 //! On a device: [`GpuSupernodal`] (the block supernodal Cholesky and its
 //! level-set solve), [`GpuSchur`] (the Schur reduction, the refinement and
-//! the back-substitution around a [`GpuFactor`]) and [`LmVectors`] (the
-//! LM loop's vector passes). H, the gradient, the step and the LM vectors
+//! the back-substitution around a [`GpuFactor`]), [`GpuCg`] (conjugate
+//! gradients on a reduction's reduced system, in a factor's place) and
+//! [`LmVectors`] (the LM loop's vector passes). H, the gradient, the step and the LM vectors
 //! are in the route's [`Values`] (f32 for an f32 root), the cost and the
 //! reduction in its [`Wide`] scalar. The symbolic analysis stays on the
 //! CPU in arael-faer. A sequence of launches records as a graph with
@@ -43,6 +44,7 @@ mod hip_sys;
 pub mod cpu;
 #[cfg(feature = "cpu")]
 mod cpu_probe;
+pub mod cg;
 #[doc(hidden)]
 pub mod fault;
 pub mod lm;
@@ -61,6 +63,9 @@ pub mod test_util;
 /// bytemuck, whose `Pod` bounds this crate's uploads take.
 pub use bytemuck;
 pub use cache::{KernelCache, kernel_cache, set_kernel_cache};
+/// The settings of a conjugate gradient solve ([`GpuCg`]), arael-faer's.
+pub use arael_faer::cg::CgParams;
+pub use cg::{CgStatus, GpuCg, GpuCgParams, GpuCgStats};
 #[cfg(any(feature = "cuda", feature = "hip", feature = "cpu"))]
 pub use disk::take_cache_failure;
 pub use lm::{LmVectors, Scalars};
