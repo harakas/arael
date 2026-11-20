@@ -25,3 +25,10 @@ if(ARAEL_GPU STREQUAL "metal")
   add_executable(smoke_metal metal.cpp)
   target_link_libraries(smoke_metal PRIVATE arael::cxx_fit)
 endif()
+
+# The interface built with the CPU device (-DARAEL_GPU=cpu): the result's
+# GPU report.
+if(ARAEL_GPU STREQUAL "cpu")
+  add_executable(smoke_gpu gpu.cpp)
+  target_link_libraries(smoke_gpu PRIVATE arael::cxx_fit)
+endif()

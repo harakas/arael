@@ -24,9 +24,9 @@ cmake --build cxx/build
 
 ```
 BAL problem: 49 cameras, 7776 points, 31843 observations
-gpu      1143.2 ms  22 iterations (22 accepted)  cost 1701824.9214 -> 26689.4532  RMS 7.3106 -> 0.9155 px  [reduced, GPU factor, GPU assembly and loop]
-cpu       260.0 ms  22 iterations (22 accepted)  cost 1701824.9214 -> 26689.4532  RMS 7.3106 -> 0.9155 px  [reduced]
-final cost relative difference: 6.45e-14
+gpu       708.9 ms  22 iterations (22 accepted)  cost 1701824.9214 -> 26689.4532  RMS 7.3106 -> 0.9155 px  [reduced, GPU assembly, solves and loop on NVIDIA GeForce RTX 4090 (sm_89)]
+cpu       278.6 ms  22 iterations (22 accepted)  cost 1701824.9214 -> 26689.4532  RMS 7.3106 -> 0.9155 px  [reduced]
+final cost relative difference: 1.80e-14
 ```
 
 The first GPU solve of a process includes compiling the kernels;

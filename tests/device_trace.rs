@@ -163,7 +163,7 @@ fn a_traced_solve_names_its_phases_blocks_and_accesses() {
     let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&options);
     let cfg = arael::simple_lm::LmConfig::<f32> { max_iters: 5, ..Default::default() };
     let r = s.solve_with(&mut solver, &cfg).unwrap();
-    assert!(solver.plan().unwrap().gpu_assembly && r.iterations > 1);
+    assert!(solver.gpu_report().unwrap().work == arael::simple_lm::GpuWork::Loop && r.iterations > 1);
     arael::__gpu::trace::stop();
     let text = std::fs::read_to_string(&path).unwrap();
     let _ = std::fs::remove_file(&path);

@@ -8,7 +8,7 @@ use arael::df32;
 use arael::angle::AngleParam;
 use arael::model::{CrossBlock, MixedEulerAngleParam, Param, QuaternionParam, SelfBlock, SimpleEulerAngleParam, VarSelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{GpuDevice, LmProblem, LmProblemInternals, RootProblem};
+use arael::simple_lm::{GpuDevice, GpuReport, GpuWork, LmProblem, LmProblemInternals, RootProblem};
 use arael::utils::Float;
 use arael::vect::{vect2, vect3};
 
@@ -280,7 +280,7 @@ fn f32_devices() -> Vec<GpuDevice> {
 
 /// A device's runtime and wide scalar, as the verbose log names them.
 fn label(d: &GpuDevice) -> String {
-    let runtime = match d.backend {
+    let runtime = match d.backend() {
         arael::simple_lm::GpuBackend::Cuda => "cuda",
         arael::simple_lm::GpuBackend::Hip => "hip",
         arael::simple_lm::GpuBackend::Cpu => "cpu",
@@ -297,13 +297,23 @@ fn label(d: &GpuDevice) -> String {
 fn a_device_says_whether_it_has_f64() {
     use arael::simple_lm::GpuWide;
     for d in [GpuDevice::cuda(0), GpuDevice::hip(0), GpuDevice::cpu()] {
-        assert!(d.has_f64() && d.backend.has_f64(), "{}", label(&d));
+        assert!(d.has_f64() && d.backend().has_f64(), "{}", label(&d));
         assert_eq!(d.wide(), GpuWide::F64, "{}", label(&d));
     }
     let metal = GpuDevice::metal(0);
-    assert!(!metal.has_f64() && !metal.backend.has_f64());
+    assert!(!metal.has_f64() && !metal.backend().has_f64());
     assert_eq!(metal.wide(), GpuWide::Df32);
     assert!(devices().iter().all(|d| d.has_f64()));
+}
+
+/// Whether the solve assembled and kept its loop on the device.
+fn looped(report: Option<GpuReport>) -> bool {
+    report.is_some_and(|g| g.work == GpuWork::Loop)
+}
+
+/// Whether the solve's damped solves ran on the device.
+fn solves_on_device(report: Option<GpuReport>) -> bool {
+    report.is_some_and(|g| g.work != GpuWork::Unused)
 }
 
 /// The reduced supernodal route, on `gpu` when it is given.
@@ -331,8 +341,8 @@ fn a_solve_through_the_device_assembly_reaches_the_cpu_optimum() {
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
         let plan = solver.plan().expect("a plan");
-        assert!(plan.reduced && plan.gpu_factor == gpu.is_some());
-        assert_eq!(plan.gpu_assembly, gpu.is_some() && assembly);
+        assert!(plan.reduced && solves_on_device(solver.gpu_report()) == gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some() && assembly);
         (r.start_cost, r.end_cost, r.iterations)
     };
     let (start, cpu, _) = run(None, false);
@@ -383,7 +393,7 @@ fn an_f32_solve_through_the_device_assembly_reaches_the_optimum() {
         s.serialize(&mut x);
         let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&options(gpu, true));
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &to_the_optimum()).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         r.end_cost as f64
     };
     let optimum = consistent_optimum();
@@ -396,36 +406,43 @@ fn an_f32_solve_through_the_device_assembly_reaches_the_optimum() {
     }
 }
 
+/// `MixedPrecision` with no refinement steps: an f32 solve under it forms
+/// the system it factorizes in the wide values and refines nothing.
+fn wide_system() -> Option<arael::simple_lm::MixedPrecision> {
+    Some(arael::simple_lm::MixedPrecision { max_refinements: 0, ..Default::default() })
+}
+
 /// An f32 solve forms its reduced system in f32, as the CPU's f32 route,
-/// or in the wide values with `GpuDevice::with_wide_schur`: either lands on
-/// the f64 model's optimum to 1e-4. An f64 solve with `MixedPrecision`,
-/// whose refinement measures its residuals against S, forms it in the wide
-/// values whatever the option.
+/// or under `MixedPrecision` in the wide values: either lands on the f64
+/// model's optimum to 1e-4. An f64 solve with `MixedPrecision`, whose
+/// refinement measures its residuals against S, forms it in the wide
+/// values too.
 #[test]
 fn an_f32_solve_reaches_the_optimum_with_s_in_f32_or_in_the_wide_values() {
     let optimum = consistent_optimum();
     for d in f32_devices() {
-        for wide_schur in [false, true] {
-            let gpu = d.clone().with_wide_schur(wide_schur);
+        for wide in [false, true] {
             let (cameras, points, observations) = consistent_scene::<f32>();
             let mut s = SceneF { cameras, points, observations };
             let mut x = Vec::new();
             s.serialize(&mut x);
-            let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&options(Some(&gpu), true));
+            let opts = options(Some(&d), true).with_mixed_precision(if wide { wide_system() } else { None });
+            let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&opts);
             let c = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &to_the_optimum()).unwrap().end_cost as f64;
-            assert!((c - optimum).abs() <= 1e-4 * optimum, "{}, wide S {wide_schur}: {c} against the optimum {optimum}", label(&d));
-            assert_eq!(solver.plan().unwrap().gpu_f32_reduction, !wide_schur, "{}", label(&d));
-            let (cameras, points, observations) = consistent_scene::<f64>();
-            let mut s = Scene { cameras, points, observations };
-            let mut x = Vec::new();
-            s.serialize(&mut x);
-            let refined = options(Some(&gpu), true).with_mixed_precision(Some(arael::simple_lm::MixedPrecision::default()));
-            let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&refined);
-            let c = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &to_the_optimum()).unwrap().end_cost;
-            assert!((c - optimum).abs() <= 1e-9 * optimum, "{}, wide S {wide_schur}, refined: {c} against the optimum {optimum}", label(&d));
-            let plan = solver.plan().unwrap();
-            assert!(plan.gpu_factor && !plan.gpu_f32_reduction, "{}: a refined solve's S is wide", label(&d));
+            assert!((c - optimum).abs() <= 1e-4 * optimum, "{}, wide S {wide}: {c} against the optimum {optimum}", label(&d));
+            assert_eq!(solver.gpu_report().unwrap().f32_system, !wide, "{}", label(&d));
+            assert_eq!(solver.plan().unwrap().refinements, wide.then_some(0), "{}: no refinement step", label(&d));
         }
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let refined = options(Some(&d), true).with_mixed_precision(Some(arael::simple_lm::MixedPrecision::default()));
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&refined);
+        let c = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &to_the_optimum()).unwrap().end_cost;
+        assert!((c - optimum).abs() <= 1e-9 * optimum, "{}, refined: {c} against the optimum {optimum}", label(&d));
+        let report = solver.gpu_report().unwrap();
+        assert!(report.work == GpuWork::Loop && report.f32_factor && !report.f32_system, "{}: a refined solve's S is wide", label(&d));
     }
 }
 
@@ -571,7 +588,7 @@ fn a_quaternion_scene_assembles_and_solves_on_the_device_as_on_the_cpu() {
         let mut s = quaternion_scene();
         let mut solver = SparseFaer::<f64>::from_options(&options(gpu, true));
         let r = s.solve_with(&mut solver, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         (r.end_cost, r.iterations, quaternion_state(&s))
     };
     let (cpu, iters, cpu_state) = run(None);
@@ -715,7 +732,7 @@ fn an_euler_scene_assembles_and_solves_on_the_device_as_on_the_cpu() {
         let mut s = euler_scene();
         let mut solver = SparseFaer::<f64>::from_options(&options(gpu, true));
         let r = s.solve_with(&mut solver, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         (r.end_cost, r.iterations, euler_state(&s))
     };
     let (cpu, iters, cpu_state) = run(None);
@@ -805,7 +822,7 @@ fn a_df32_wide_root_solves_on_the_device_as_on_the_cpu() {
         let start = angles(&s);
         let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&options(gpu, true));
         let r = s.solve_with(&mut solver, &to_the_optimum()).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         let moved = angles(&s).iter().zip(&start).fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
         assert!(moved > 1e-3, "{name}: the solved rotations back in the model: moved by {moved}");
         let mut x = Vec::new();
@@ -863,7 +880,7 @@ fn a_device_solve_writes_the_model_back_and_a_warm_one_reads_it_again() {
         let (cpu_cost, cpu_state) = cpu(&s);
         let mut session = LmSession::new(SparseFaer::<f64>::from_options(&options(Some(&d), true)));
         let r = session.solve(&mut s, &cfg).unwrap();
-        assert!(session.solver().plan().unwrap().gpu_assembly);
+        assert!(looped(session.solver().gpu_report()));
         assert!((r.end_cost - cpu_cost).abs() <= 1e-9 * cpu_cost, "{name}: {} against the CPU's {cpu_cost}", r.end_cost);
         assert_close(&state(&s), &cpu_state, 1e-7, &format!("{name}: the solved model"));
         // other data: an observation, a camera's rotation, a point
@@ -904,7 +921,7 @@ fn an_f32_device_solve_writes_the_model_back_and_a_warm_one_reads_it_again() {
         let mut s = SceneF { cameras, points, observations };
         let mut session = LmSession::new(SparseFaer::<f32>::from_options(&options(Some(&d), true)));
         let r = session.solve(&mut s, &to_the_optimum()).unwrap();
-        assert!(session.solver().plan().unwrap().gpu_assembly);
+        assert!(looped(session.solver().gpu_report()));
         assert!((r.end_cost as f64 - optimum).abs() <= 1e-4 * optimum, "{name}: {} against the optimum {optimum}", r.end_cost);
         left_behind_costs(&mut s, &r, &format!("{name}: the solved model"));
         change_scene(&mut s.cameras, &mut s.points, &mut s.observations);
@@ -1137,7 +1154,7 @@ fn the_device_gradient_test_stops_where_the_host_one_does() {
         let cfg = LmConfig::<f64> { max_iters: 100, gradient_tolerance: Some(1e-3), abs_precision: 0.0, rel_precision: 0.0, ..Default::default() };
         let mut solver = SparseFaer::<f64>::from_options(&options(Some(d), assembly));
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, assembly);
+        assert_eq!(looped(solver.gpu_report()), assembly);
         (r.status, r.iterations, r.accepted_iterations)
     };
     for d in devices() {
@@ -1161,7 +1178,7 @@ fn an_f32_device_gradient_test_stops_the_solve() {
         let cfg = LmConfig::<f32> { max_iters: 100, gradient_tolerance: Some(1e-3), abs_precision: 0.0, rel_precision: 0.0, ..Default::default() };
         let mut solver = SparseFaer::<f32>::from_options(&options(Some(d), assembly));
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, assembly);
+        assert_eq!(looped(solver.gpu_report()), assembly);
         (r.status, r.accepted_iterations)
     };
     for d in f32_devices() {
@@ -1254,7 +1271,7 @@ fn a_bad_diagonal_on_the_device_ends_the_solve_as_on_the_host() {
         s.serialize(&mut x);
         let mut solver = SparseFaer::<f64>::from_options(&options(gpu, true));
         let e = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &LmConfig::<f64>::default()).unwrap_err();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         let p = e.partial.expect("a partial state");
         (e.kind, p.iterations, p.accepted_iterations, p.x)
     };
@@ -1283,7 +1300,7 @@ fn an_f32_bad_diagonal_on_the_device_ends_the_solve_as_on_the_host() {
         s.serialize(&mut x);
         let mut solver = SparseFaer::<f32>::from_options(&options(gpu, true));
         let e = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &LmConfig::<f32>::default()).unwrap_err();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         let p = e.partial.expect("a partial state");
         (e.kind, p.iterations, p.accepted_iterations, p.x.iter().map(|&v| v as f64).collect::<Vec<f64>>())
     };
@@ -1307,15 +1324,15 @@ fn a_shared_device_is_one_state_per_process() {
     use arael::simple_lm::{LmConfig, SparseFaer};
     let mut backends = Vec::new();
     for d in f32_devices() {
-        if backends.contains(&d.backend) {
+        if backends.contains(&d.backend()) {
             continue;
         }
-        backends.push(d.backend);
+        backends.push(d.backend());
         let (cameras, points, observations) = consistent_scene::<f32>();
         let mut s = SceneF { cameras, points, observations };
-        let opts = options(Some(&GpuDevice::shared(d.backend, 0)), true);
+        let opts = options(Some(&GpuDevice::shared(d.backend(), 0)), true);
         s.solve_with(&mut SparseFaer::<f32>::from_options(&opts), &LmConfig::<f32>::default()).unwrap();
-        assert!(GpuDevice::shared(d.backend, 0).reserved_bytes() > 0, "{}", label(&d));
+        assert!(GpuDevice::shared(d.backend(), 0).reserved_bytes() > 0, "{}", label(&d));
         assert_eq!(d.reserved_bytes(), 0, "{}", label(&d));
     }
 }
@@ -1532,7 +1549,7 @@ fn f32_solves_reach<P: LmProblemInternals<f32> + RootProblem<f32>>(
         s.serialize(&mut x);
         let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&opts(gpu));
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &to_the_optimum()).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some(), "{what}");
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some(), "{what}");
         (r.start_cost as f64, r.end_cost as f64)
     };
     let (start, cpu) = run(None);
@@ -1925,8 +1942,8 @@ fn a_pose_graph_solves_through_the_device_assembly_as_on_the_cpu() {
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
         let plan = solver.plan().expect("a plan");
-        assert!(!plan.reduced && plan.gpu_factor == gpu.is_some());
-        assert_eq!(plan.gpu_assembly, gpu.is_some());
+        assert!(!plan.reduced && solves_on_device(solver.gpu_report()) == gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         (r.start_cost, r.end_cost)
     };
     let (start, cpu) = run(None);
@@ -2075,7 +2092,7 @@ fn an_angle_pose_graph_assembles_and_solves_on_the_device_as_on_the_cpu() {
         let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         r.end_cost
     };
     let cpu = run(None);
@@ -2218,7 +2235,7 @@ fn a_var_self_block_pose_graph_assembles_and_solves_on_the_device_as_on_the_cpu(
         let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         r.end_cost
     };
     let cpu = run(None);
@@ -2385,7 +2402,7 @@ fn a_3d_pose_graph_assembles_and_solves_on_the_device_as_on_the_cpu() {
         let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         s.deserialize(&r.x);
         (r.start_cost, r.end_cost, state(&s))
     };
@@ -2399,22 +2416,22 @@ fn a_3d_pose_graph_assembles_and_solves_on_the_device_as_on_the_cpu() {
 }
 
 /// An f32 solve of the whole system forms it on the device in f32, as the
-/// reduced route forms S, or in the wide values with
-/// `GpuDevice::with_wide_schur`, and the plan says which.
+/// reduced route forms S, or under `MixedPrecision` in the wide values,
+/// and the GPU report says which.
 #[test]
 fn an_f32_whole_system_solve_reports_its_systems_scalar() {
     for d in f32_devices() {
-        for wide_schur in [false, true] {
-            let gpu = d.clone().with_wide_schur(wide_schur);
+        for wide in [false, true] {
             let (poses, edges, prior) = pose_graph::<f32>(40, 3);
             let mut s = Graph2DF { poses, edges, prior };
             let mut x = Vec::new();
             s.serialize(&mut x);
-            let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&whole_options(Some(&gpu)));
+            let opts = whole_options(Some(&d)).with_mixed_precision(if wide { wide_system() } else { None });
+            let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&opts);
             arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &to_the_optimum()).unwrap();
-            let plan = solver.plan().unwrap();
-            assert!(plan.gpu_factor && !plan.reduced, "{}", label(&d));
-            assert_eq!(plan.gpu_f32_reduction, !wide_schur, "{}, wide {wide_schur}", label(&d));
+            let report = solver.gpu_report().unwrap();
+            assert!(report.work == GpuWork::Loop && !solver.plan().unwrap().reduced, "{}", label(&d));
+            assert_eq!(report.f32_system, !wide, "{}, wide {wide}", label(&d));
         }
     }
 }
@@ -2582,7 +2599,7 @@ fn guards_on_every_form_keep_on_the_device_what_they_keep_on_the_cpu() {
         let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         r.end_cost
     };
     let cpu = run(None);
@@ -2809,7 +2826,7 @@ fn losses_on_every_form_assemble_and_solve_on_the_device_as_on_the_cpu() {
         let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         s.deserialize(&r.x);
         let st: Vec<f64> = s.poses.iter().flat_map(|p| [p.pos.value.x, p.pos.value.y, p.th.value]).collect();
         (r.start_cost, r.end_cost, st)
@@ -2926,7 +2943,7 @@ fn a_robust_bundle_adjustment_assembles_and_solves_on_the_device_as_on_the_cpu()
         let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&options(gpu, true));
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         (r.start_cost, r.end_cost)
     };
     let (start, cpu) = run(None);
@@ -3177,7 +3194,7 @@ fn a_multi_cross_constraint_assembles_and_solves_on_the_device_as_on_the_cpu() {
         let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         (r.start_cost, r.end_cost, r.x.iter().copied().collect::<Vec<f64>>())
     };
     let (start, cpu, cpu_x) = run(None);
@@ -3473,7 +3490,7 @@ fn assembles_and_solves_as_on_the_cpu<P: LmProblemInternals<f64> + RootProblem<f
         let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some(), "{what}");
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some(), "{what}");
         (r.start_cost, r.end_cost, r.x.to_vec())
     };
     let (start, cpu, cpu_x) = run(None);
@@ -4323,7 +4340,7 @@ fn a_warm_solve_reads_the_stored_values_the_last_one_wrote() {
             let (cpu_cost, cpu_model) = cpu(&s);
             let before = drift_state(&s);
             let r = session.solve(&mut s, &cfg).unwrap();
-            assert!(session.solver().plan().unwrap().gpu_assembly, "{name}: {solve}");
+            assert!(looped(session.solver().gpu_report()), "{name}: {solve}");
             assert!((r.end_cost - cpu_cost).abs() <= 1e-9 * cpu_cost, "{name}: {solve}: {} against the CPU's {cpu_cost}", r.end_cost);
             assert_close(&drift_state(&s), &drift_state(&cpu_model), 1e-7, &format!("{name}: {solve}'s model"));
             assert!(drift_state(&s).iter().zip(&before).any(|(a, b)| (a - b).abs() > 1e-3), "{name}: {solve} moves the model");
@@ -4359,7 +4376,7 @@ fn an_f32_warm_solve_reads_the_stored_values_the_last_one_wrote() {
             let cpu = cpu_model.solve_with(&mut SparseFaer::<f32>::from_options(&whole_options(None)), &to_the_optimum()).unwrap();
             let before = state(&s);
             let r = session.solve(&mut s, &to_the_optimum()).unwrap();
-            assert!(session.solver().plan().unwrap().gpu_assembly, "{name}: {solve}");
+            assert!(looped(session.solver().gpu_report()), "{name}: {solve}");
             let (end, cpu_end) = (r.end_cost as f64, cpu.end_cost as f64);
             assert!((end - cpu_end).abs() <= 1e-5 * cpu_end + 1e-7 * r.start_cost as f64, "{name}: {solve}: {end} against the CPU's {cpu_end}");
             assert_close(&state(&s), &state(&cpu_model), 1e-4, &format!("{name}: {solve}'s model"));
@@ -4792,6 +4809,49 @@ fn a_user_function_of_rust_code_has_no_device_form() {
     let s = OpaqueRoot { items: refs::Vec::new() };
     let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a Rust-coded user function has no device form");
     assert!(why.contains("OpaqueE") && why.contains("opaque_dev_eval") && why.contains("no C++ form"), "{why}");
+}
+
+/// A solve's GPU report ([`LmResult::gpu`], the solver's `gpu_report`): no
+/// report without a GPU; the device named, with the loop on it and memory
+/// reserved; the assembly on the CPU as asked; and on the CPU because the
+/// root has no device form, with the reason.
+#[test]
+fn a_solve_reports_what_ran_on_its_gpu() {
+    use arael::simple_lm::{CpuAssembly, SparseFaer};
+    let solve = |opts: &arael::simple_lm::SparseFaerOptions| {
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let mut solver = SparseFaer::<f64>::from_options(opts);
+        assert_eq!(solver.gpu_report(), None, "nothing before the first compute");
+        let r = s.solve_with(&mut solver, &arael::simple_lm::LmConfig::<f64> { max_iters: 5, ..Default::default() }).unwrap();
+        assert_eq!(r.gpu, solver.gpu_report(), "the result carries the solver's report");
+        r.gpu
+    };
+    assert_eq!(solve(&options(None, true)), None);
+    for d in devices() {
+        let g = solve(&options(Some(&d), true)).expect("a GPU was given");
+        assert_eq!((g.backend, g.index, g.wide), (d.backend(), d.index(), d.wide()), "{}", label(&d));
+        assert!(!g.name.is_empty() && !g.target.is_empty(), "{}: {g:?}", label(&d));
+        assert_eq!(g.work, GpuWork::Loop, "{}", label(&d));
+        assert!(!g.f32_factor && !g.f32_system, "{}: an f64 solve", label(&d));
+        assert!(g.reserved_bytes > 0 && g.buffers_created > 0, "{}: {g:?}", label(&d));
+        assert_eq!(g.reserved_bytes, d.reserved_bytes(), "{}", label(&d));
+
+        let g = solve(&options(Some(&d), false)).unwrap();
+        assert_eq!(g.work, GpuWork::Solves(CpuAssembly::Asked), "{}", label(&d));
+
+        let mut items = refs::Vec::new();
+        for k in 0..4 {
+            items.push(OpaqueE { x: Param::new(0.25 * k as f64), hb: SelfBlock::new() });
+        }
+        let mut s = OpaqueRoot { items };
+        let mut solver = SparseFaer::<f64>::from_options(&whole_options(Some(&d)));
+        let r = s.solve_with(&mut solver, &arael::simple_lm::LmConfig::<f64> { max_iters: 5, ..Default::default() }).unwrap();
+        let GpuWork::Solves(CpuAssembly::NoDeviceForm(why)) = r.gpu.expect("a GPU was given").work else {
+            panic!("{}: a root without a device form assembles on the CPU", label(&d));
+        };
+        assert!(why.contains("opaque_dev_eval"), "{}: {why}", label(&d));
+    }
 }
 
 /// Data fields whose paths look alike once spelled as record fields:
@@ -5525,7 +5585,7 @@ fn a_plane_world_assembles_and_solves_on_the_device_as_on_the_cpu() {
         let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         s.deserialize(&r.x);
         (r.start_cost, r.end_cost, r.iterations, state(&s))
     };
@@ -5573,7 +5633,7 @@ fn an_image_staged_in_pageable_memory_solves_as_a_pinned_one() {
         for round in 0..2 {
             let (cpu_cost, cpu_state) = cpu(&s);
             let r = session.solve(&mut s, &cfg).unwrap();
-            assert!(session.solver().plan().unwrap().gpu_assembly);
+            assert!(looped(session.solver().gpu_report()));
             assert!((r.end_cost - cpu_cost).abs() <= 1e-9 * cpu_cost, "{name}, solve {round}: {} against the CPU's {cpu_cost}", r.end_cost);
             assert_close(&state(&s), &cpu_state, 1e-7, &format!("{name}, solve {round}: the solved model"));
             s.observations[5].xy.x += 3.0;
@@ -5598,7 +5658,7 @@ fn an_f32_image_staged_in_pageable_memory_solves_to_the_optimum() {
         for round in 0..2 {
             let opt = optimum(&s64);
             let r = session.solve(&mut s, &to_the_optimum()).unwrap();
-            assert!(session.solver().plan().unwrap().gpu_assembly);
+            assert!(looped(session.solver().gpu_report()));
             assert!((r.end_cost as f64 - opt).abs() <= 1e-4 * opt, "{name}, solve {round}: {} against the optimum {opt}", r.end_cost);
             left_behind_costs(&mut s, &r, &format!("{name}, solve {round}"));
             s.observations[5].xy.x += 3.0;
@@ -5620,7 +5680,7 @@ fn a_covariance_after_a_device_solve_reuses_its_analysis() {
         let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, covariance: Some(CovMode::PerQuery), ..Default::default() };
         let r = s.solve_with(&mut solver, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         let cov = r.covariance.as_ref().expect("the covariance");
         assert!(cov.took_block_route());
         assert_eq!(cov.plan().symbolics_built, 0, "the covariance factors under the solve's analysis");
@@ -5657,7 +5717,7 @@ fn an_f32_covariance_after_a_device_solve_reuses_its_analysis() {
         let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&whole_options(Some(&d)));
         let cfg = arael::simple_lm::LmConfig::<f32> { covariance: Some(CovMode::PerQuery), ..to_the_optimum() };
         let r = s.solve_with(&mut solver, &cfg).unwrap();
-        assert!(solver.plan().unwrap().gpu_assembly, "{}", label(&d));
+        assert!(looped(solver.gpu_report()), "{}", label(&d));
         let cov = r.covariance.as_ref().expect("the covariance");
         assert!(cov.took_block_route());
         assert_eq!(cov.plan().symbolics_built, 0, "{}: the covariance factors under the solve's analysis", label(&d));
@@ -5930,7 +5990,7 @@ fn a_slam_path_assembles_and_solves_on_the_device_as_on_the_cpu() {
         let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         (r.start_cost, r.end_cost)
     };
     let (start, cpu) = run(None);

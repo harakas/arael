@@ -363,17 +363,20 @@ struct SparseOptionsT {
     /// Factor in single precision on that route and refine each solve
     /// against the double-precision matrix (Rust's MixedPrecision), by
     /// at most max_refinements steps or until the relative residual is
-    /// under refine_tol. Off by default.
+    /// under refine_tol. Off by default. An f32 solve on a GPU forms the
+    /// system it factorizes in f32, and under mixed_precision in the GPU's
+    /// wide values (with max_refinements 0: formed wide, not refined).
     bool mixed_precision;
     uint32_t max_refinements;
     double refine_tol;
     /// The GPU the block supernodal route runs on (Rust's `gpu`): device
     /// gpu_index of that runtime, the process's shared state of it, so
-    /// repeated solves reuse its buffers. On the reduced route the device
-    /// also reduces, and with gpu_assembly (on by default) assembles and
-    /// runs the LM loop when the model has a device form. Needs the
-    /// interface built with the matching feature (the CMake cache variable
-    /// ARAEL_GPU); without it the solve fails with SolverUnavailable.
+    /// repeated solves reuse its buffers. The device does the damped
+    /// solves, and with gpu_assembly (on by default) assembles and runs
+    /// the LM loop when the model has a device form; LmResult::gpu() says
+    /// what ran there. Needs the interface built with the matching feature
+    /// (the CMake cache variable ARAEL_GPU); without it the solve fails
+    /// with SolverUnavailable.
     GpuBackend gpu;
     uint32_t gpu_index;
     bool gpu_assembly;
@@ -383,10 +386,6 @@ struct SparseOptionsT {
     /// Where the device assembly's image is staged (Rust's
     /// GpuDevice::with_staging).
     GpuStaging gpu_staging;
-    /// An f32 solve's reduced system in the GPU's wide values instead of
-    /// f32, as the CPU's f32 route forms it (Rust's
-    /// GpuDevice::with_wide_schur). Off by default.
-    bool gpu_wide_schur;
 };
 
 /// Per-phase wall-clock seconds plus call counts, gathered when
@@ -526,13 +525,69 @@ struct SchurPlan {
     /// single-precision factor.
     option<uint32_t> refinements;
     option<uint32_t> refinement_shortfalls;
-    /// The factorization ran on the GPU (SparseOptions::gpu), and the
-    /// assembly too (SparseOptions::gpu_assembly).
-    bool gpu_factor;
-    bool gpu_assembly;
-    /// The GPU formed the reduced system in f32 (an f32 solve without
-    /// SparseOptions::mixed_precision, unless SparseOptions::gpu_wide_schur).
-    bool gpu_f32_reduction;
+};
+
+/// How much of a solve ran on its GPU (GpuReport::work).
+enum class GpuWork : uint32_t {
+    /// Nothing: the solve took a route that does not run on a device
+    /// (conjugate gradients, the envelope, the scalar factorization).
+    Unused = 0,
+    /// The damped solves; the assembly ran on the CPU
+    /// (GpuReport::cpu_assembly says why) and the Hessian's values were
+    /// uploaded for each.
+    Solves = 1,
+    /// The assembly, the damped solves and the LM loop's vectors.
+    Loop = 2,
+};
+
+/// Why a GPU solve assembled on the CPU (GpuReport::cpu_assembly).
+enum class CpuAssembly : uint32_t {
+    /// It did not: the device assembled, or was not used.
+    None = 0,
+    /// SparseOptions::gpu_assembly was off.
+    Asked = 1,
+    /// The model has no device form; GpuReport::no_device_form says why.
+    NoDeviceForm = 2,
+    /// The model is f64 and the device has no f64 (Metal).
+    NoF64 = 3,
+};
+
+/// What a solve did on the GPU it was given (mirrors arael's GpuReport);
+/// read it with LmResult::gpu(). The strings belong to the result and live
+/// as long as it does. Layout is part of the C ABI -- field order matters.
+///
+///     if (auto g = result.gpu())
+///         printf("%s (%s): %s\n", g->name, g->target,
+///                g->work == arael::GpuWork::Loop ? "on the device" : "partly");
+struct GpuReport {
+    /// The runtime and the device, as SparseOptions::gpu and gpu_index.
+    GpuBackend backend;
+    uint32_t index;
+    /// The device's name, as its driver reports it, and what the kernels
+    /// were compiled for (sm_89, gfx1036); empty when work is Unused.
+    const char* name;
+    const char* target;
+    /// The device shares the host's memory: an integrated GPU, or the CPU
+    /// device.
+    bool integrated;
+    /// The scalar of the device's wide values: F64 or Df32.
+    GpuWide wide;
+    /// The factor is f32: an f32 solve, or mixed_precision.
+    bool f32_factor;
+    /// The system the device forms and factorizes is f32: an f32 solve
+    /// without mixed_precision. Otherwise it is in the wide values.
+    bool f32_system;
+    /// How much of the solve ran on the device, and when the assembly ran
+    /// on the CPU, why (the reason a model has no device form in
+    /// no_device_form, empty otherwise).
+    GpuWork work;
+    CpuAssembly cpu_assembly;
+    const char* no_device_form;
+    /// Device memory the device's state holds after the solve, in use or
+    /// free, in bytes, and the device buffers it has allocated over its
+    /// life.
+    uint64_t reserved_bytes;
+    uint64_t buffers_created;
 };
 
 /// One form's share of a sweep phase, summed over its calls (mirrors

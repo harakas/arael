@@ -418,14 +418,14 @@ fn a_device_orders_a_large_reduced_system_by_its_own_rule() {
     assert_eq!((cpu.kept_params, dev.kept_params), (1800, 1800), "the cameras are kept");
     assert_eq!(cpu.ordering, Some(ReducedOrdering::NaturalDense));
     assert_eq!(dev.ordering, Some(ReducedOrdering::Amd), "a dense reduced system AMD factors cheaper, on a device");
-    assert!(dev.gpu_factor && !dev.envelope, "the device factors the reordered system");
+    assert!(dev.block_supernodal && !dev.envelope, "the device factors the reordered system");
 
     let cpu = decide_bal_seen(cameras, points, sparse, &on_cpu);
     let dev = decide_bal_seen(cameras, points, sparse, &on_device);
     assert_eq!(cpu.ordering, Some(ReducedOrdering::Amd));
     // sparse: nested dissection priced against AMD, the cheaper factor's order
     assert!(matches!(dev.ordering, Some(ReducedOrdering::Amd | ReducedOrdering::NestedDissection)), "a sparse reduced system on a device: {:?}", dev.ordering);
-    assert!(dev.gpu_factor && !dev.envelope);
+    assert!(dev.block_supernodal && !dev.envelope);
 
     // named: the device takes it
     let named = decide_bal_seen(cameras, points, dense, &on_device.clone().with_ordering(SolveOrdering::Natural));

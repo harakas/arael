@@ -623,7 +623,7 @@ fn gpu_factor_reaches_the_f64_optimum() {
                     .with_gpu(Some(device.clone())));
                 let (x_g, c_g) = solve(&mut g, 2);
                 let plan = g.plan().expect("a plan");
-                assert!(plan.block_supernodal && plan.gpu_factor, "the plan reports the device factor");
+                assert!(plan.block_supernodal && g.gpu_report().unwrap().work != arael::simple_lm::GpuWork::Unused, "the reports say the device factored");
                 assert_eq!(plan.reduced, reduced);
                 assert_eq!(plan.f32_factor, mixed.is_some());
                 if mixed.is_some() {
@@ -631,9 +631,9 @@ fn gpu_factor_reaches_the_f64_optimum() {
                 } else {
                     assert_eq!(plan.refinements, None);
                 }
-                assert!(c_g < 1e-12, "{:?}: {} (reduced {}, mixed {})", device.backend, c_g, reduced, mixed.is_some());
+                assert!(c_g < 1e-12, "{:?}: {} (reduced {}, mixed {})", device.backend(), c_g, reduced, mixed.is_some());
                 for (a, b) in std::iter::zip(&x_c, &x_g) {
-                    assert!((a - b).abs() < 1e-9, "{:?}: the GPU changed the answer: {} vs {}", device.backend, a, b);
+                    assert!((a - b).abs() < 1e-9, "{:?}: the GPU changed the answer: {} vs {}", device.backend(), a, b);
                 }
             }
         }
@@ -660,15 +660,15 @@ fn gpu_reduced_route_on_an_f32_solver() {
         let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
         let plan = solver.plan().expect("a plan");
         assert!(plan.reduced && plan.block_supernodal);
-        assert_eq!(plan.gpu_factor, gpu.is_some());
+        assert_eq!(solver.gpu_report().is_some_and(|g| g.work != arael::simple_lm::GpuWork::Unused), gpu.is_some());
         (r.end_cost, r.x)
     };
     let (c_cpu, x_cpu) = run(None);
     for device in gpu_devices(true) {
         let (c_gpu, x_gpu) = run(Some(&device));
-        assert!(c_cpu < 1e-6 && c_gpu < 1e-6, "{:?}: {} {}", device.backend, c_cpu, c_gpu);
+        assert!(c_cpu < 1e-6 && c_gpu < 1e-6, "{:?}: {} {}", device.backend(), c_cpu, c_gpu);
         for (a, b) in x_cpu.iter().zip(&x_gpu) {
-            assert!((a - b).abs() <= 1e-3 * (1.0 + a.abs()), "{:?}: the device moved an f32 parameter: {} vs {}", device.backend, a, b);
+            assert!((a - b).abs() <= 1e-3 * (1.0 + a.abs()), "{:?}: the device moved an f32 parameter: {} vs {}", device.backend(), a, b);
         }
     }
 }
@@ -690,7 +690,7 @@ fn a_runtime_not_compiled_in_is_unavailable() {
         let mut w = build(0.1, 2);
         let mut params = Vec::new();
         RootProblem::serialize(&mut w, &mut params);
-        let backend = device.backend;
+        let backend = device.backend();
         let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_policy(SchurPolicy::Force)
             .with_envelope_schur(EnvelopeMode::Never)
@@ -713,7 +713,7 @@ fn a_runtime_not_compiled_in_is_unavailable() {
 #[test]
 fn gpu_device_clones_share_their_buffers() {
     for gpu in gpu_devices(false) {
-        let fresh = || gpu_devices(false).into_iter().find(|d| d.backend == gpu.backend).unwrap();
+        let fresh = || gpu_devices(false).into_iter().find(|d| d.backend() == gpu.backend()).unwrap();
         assert_eq!(gpu.buffers_created(), 0);
         let run = |policy: SchurPolicy| {
             let mut s = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
@@ -723,7 +723,7 @@ fn gpu_device_clones_share_their_buffers() {
                 .with_mixed_precision(Some(MixedPrecision::default()))
                 .with_gpu(Some(gpu.clone())));
             let (_, c) = solve(&mut s, 2);
-            assert!(c < 1e-12 && s.plan().unwrap().gpu_factor);
+            assert!(c < 1e-12 && s.gpu_report().unwrap().work != arael::simple_lm::GpuWork::Unused);
         };
         run(SchurPolicy::Never);
         run(SchurPolicy::Force);
@@ -731,7 +731,7 @@ fn gpu_device_clones_share_their_buffers() {
         assert!(created > 0 && gpu.reserved_bytes() > 0);
         run(SchurPolicy::Never);
         run(SchurPolicy::Force);
-        assert_eq!(gpu.buffers_created(), created, "{:?}: the repeated solves took every buffer from the shared state", gpu.backend);
+        assert_eq!(gpu.buffers_created(), created, "{:?}: the repeated solves took every buffer from the shared state", gpu.backend());
         // a separately created device has a state of its own
         assert_eq!(fresh().buffers_created(), 0);
     }
@@ -749,7 +749,10 @@ fn gpu_option_leaves_conjugate_gradients_on_the_cpu() {
             .with_gpu(Some(device)));
         let (_, c) = solve(&mut cg, 2);
         let plan = cg.plan().expect("a plan");
-        assert!(plan.reduced && !plan.gpu_factor && plan.cg_iterations.is_some());
+        assert!(plan.reduced && plan.cg_iterations.is_some());
+        // conjugate gradients stay on the CPU: the device was given and not used
+        let report = cg.gpu_report().expect("a GPU was given");
+        assert!(report.work == arael::simple_lm::GpuWork::Unused && report.name.is_empty(), "{report:?}");
         assert!(c < 1e-8, "{}", c);
     }
 }

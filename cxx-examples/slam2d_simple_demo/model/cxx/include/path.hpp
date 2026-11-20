@@ -64,6 +64,9 @@ using arael::SchurSolve;
 using arael::GpuBackend;
 using arael::GpuWide;
 using arael::GpuStaging;
+using arael::GpuWork;
+using arael::CpuAssembly;
+using arael::GpuReport;
 using arael::SparseOptionsT;
 using arael::LogLevel;
 using arael::PanicError;
@@ -234,6 +237,7 @@ int32_t path_solve_dense(Path*, const LmConfig*, LmResultT<float>*);
 int32_t path_solve_sparse(Path*, const LmConfig*, const SparseOptions*, LmResultT<float>*);
 const char* path_result_report(void*, bool);
 bool path_result_plan(const void*, SchurPlan*);
+bool path_result_gpu(const void*, GpuReport*);
 uint64_t path_result_steps(const void*, LmStep*, uint64_t);
 void path_result_threads(const void*, ThreadReport*);
 uint64_t path_result_threads_held(const void*, StoreFootprint*, uint64_t);
@@ -284,8 +288,9 @@ class Covariance;
 /// full Rust result behind them. report()/pretty_report() render the
 /// Rust-side text (status, cost, the timing breakdown and the
 /// backend's plan when gathered); plan() returns the sparse backend's
-/// SchurPlan as data, steps() the per-attempt timeline, threads() what
-/// the threads did, covariance() the covariance the config asked for.
+/// SchurPlan as data, gpu() what the solve did on its GPU, steps() the
+/// per-attempt timeline, threads() what the threads did, covariance()
+/// the covariance the config asked for.
 /// Copies share ownership of the Rust result.
 class LmResult : public LmResultT<float> {
 public:
@@ -308,6 +313,15 @@ public:
         SchurPlan p;
         if (detail && ffi::path_result_plan(detail, &p))
             return p;
+        return {};
+    }
+    /// What the solve did on the GPU it was given (SparseOptions::gpu);
+    /// empty for a solve without one. Its strings are valid until the
+    /// destruction of this result's last copy.
+    option<GpuReport> gpu() const {
+        GpuReport g;
+        if (detail && ffi::path_result_gpu(detail, &g))
+            return g;
         return {};
     }
     /// The per-attempt timeline (Rust's LmTiming::steps); empty

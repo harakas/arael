@@ -38,9 +38,11 @@ int main() {
         return 1;
     }
     SchurPlan p = rd->plan().value();
-    std::printf("gpu_factor %d\nf32_factor %d\nend_cost %.17e\ncpu_end_cost %.17e\n",
-        p.gpu_factor ? 1 : 0, p.f32_factor ? 1 : 0, rd->end_cost, rc->end_cost);
-    if (!p.gpu_factor || !p.f32_factor) {
+    GpuReport g = rd->gpu().value();
+    bool on_device = g.work != GpuWork::Unused;
+    std::printf("on_device %d\nf32_factor %d\nend_cost %.17e\ncpu_end_cost %.17e\n",
+        on_device ? 1 : 0, p.f32_factor ? 1 : 0, rd->end_cost, rc->end_cost);
+    if (!on_device || !p.f32_factor) {
         std::fprintf(stderr, "not on the device's f32 factor\n");
         return 1;
     }

@@ -2789,6 +2789,7 @@ impl Sketch {
                 status: arael::simple_lm::LmStatus::Converged, final_lambda: 0.0,
                 timing: None,
                 solver: None,
+                gpu: None,
                 threads: Default::default(),
                 covariance: Err(arael::covariance::CovError::NotRequested),
             };
@@ -2836,6 +2837,7 @@ impl Sketch {
             final_lambda: 0.0,
             timing: None,
             solver: None,
+            gpu: None,
             threads: Default::default(),
             covariance: Err(arael::covariance::CovError::NotRequested),
         };

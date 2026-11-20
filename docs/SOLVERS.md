@@ -957,7 +957,7 @@ a numeric body.
 `LmProblemInternals::device_unsupported` says why a root has none, and
 then the CPU assembles and the Hessian's values are uploaded per damped
 solve. `SparseFaerOptions::with_gpu_assembly(false)` keeps the assembly
-on the CPU; `SchurPlan::gpu_assembly` reports which ran. The
+on the CPU; the result's GPU report says which ran and why (below). The
 whole-system route runs the same with nothing eliminated. The symbolic
 analysis stays on the CPU.
 
@@ -1061,14 +1061,15 @@ SparseFaer::from_options(&SparseFaerOptions::default()
 An f32 solve without `MixedPrecision` forms the Schur reduction in f32,
 as the CPU's f32 route does: S, W, the eliminated blocks' factors and
 steps, the reduced right-hand side and the kept blocks' solution (S is H
-on the whole-system route). `GpuDevice::with_wide_schur(true)` forms it
-in the wide scalar
-instead, more precisely than the CPU's f32 route; an f64 solve, and one
-with `MixedPrecision` (whose refinement measures its residuals against
-S), always does. The plan's `gpu_f32_reduction` says which ran:
+on the whole-system route). An f64 solve, and one with `MixedPrecision`
+(whose refinement measures its residuals against S), forms it in the
+wide scalar. `MixedPrecision` with no refinement steps forms an f32
+solve's system wide, more precisely than the CPU's f32 route, and
+refines nothing. The GPU report's `f32_system` says which ran:
 
 ```rust,ignore
-.with_gpu(Some(GpuDevice::metal(0).with_wide_schur(true)))
+.with_gpu(Some(GpuDevice::metal(0)))
+.with_mixed_precision(Some(MixedPrecision { max_refinements: 0, ..Default::default() }))
 ```
 
 The device assembly writes its image of the model (the structure once,
@@ -1089,8 +1090,7 @@ so solve after solve, of the same structure or of one up to about a
 quarter larger, allocates nothing (`GpuDevice::reserved_bytes`,
 `buffers_created`); the memory is held until the last clone is gone.
 Separately created values have their own streams and memory, and their
-solves can run at the same time. `SchurPlan::gpu_factor` reports the
-route. A device whose runtime is not compiled in fails the solve with
+solves can run at the same time. A device whose runtime is not compiled in fails the solve with
 `SetupError::SolverUnavailable`, parameters untouched, like the other
 optional backends; a device that fails during the solve, setup included,
 fails it with `SolveFailureKind::Device` (see Solve failures). It pays
@@ -1098,6 +1098,45 @@ where the factor is large: the reduced system
 of a bundle adjustment from a few hundred cameras up, SLAM maps with
 landmarks. A whole system of tens of thousands of tiny supernodes stays
 faster on the CPU, as do pose graphs.
+
+### What ran on the GPU -- `LmResult::gpu`
+
+A solve given a GPU reports what it did there in `LmResult::gpu`
+(`SparseFaer::gpu_report` on a solver), a `GpuReport`; a solve without a
+GPU has `None`:
+
+```rust,ignore
+let r = model.solve_with(&mut solver, &cfg)?;
+if let Some(gpu) = &r.gpu {
+    println!("{} ({}): {:?}", gpu.name, gpu.target, gpu.work);
+}
+```
+
+| field | meaning |
+|---|---|
+| `backend`, `index` | the runtime and the device, as the `GpuDevice` named them |
+| `name`, `target` | the device's name from its driver, and what the kernels were compiled for (`sm_89`, `gfx1036`); empty when the device was not used |
+| `integrated` | the device shares the host's memory: an integrated GPU, or the CPU device |
+| `wide` | the scalar of its wide values, f64 or df32 |
+| `f32_factor` | the factor is f32: an f32 solve, or `MixedPrecision` |
+| `f32_system` | the system the device factorizes (S, or H) is f32: an f32 solve without `MixedPrecision`; otherwise it is in the wide values |
+| `work` | how much of the solve ran on the device (`GpuWork`, below) |
+| `reserved_bytes`, `buffers_created` | the device memory the `GpuDevice`'s state holds, and the buffers it has allocated over its life |
+
+`GpuWork` is one of:
+
+- `Loop`: the assembly, the damped solves and the LM loop's vectors.
+- `Solves(why)`: the damped solves; the gradient and the Hessian were
+  assembled on the CPU and the Hessian's values uploaded for each. `why`
+  is a `CpuAssembly`: `Asked` (`with_gpu_assembly(false)`),
+  `NoDeviceForm(reason)` (the model has none, with
+  `device_unsupported`'s reason) or `NoF64` (an f64 root on a device
+  without f64).
+- `Unused`: the solve took a route that does not run on a device
+  (conjugate gradients, the envelope, the scalar factorization); the
+  plan says which.
+
+`LmResult::report` prints it as a `gpu` block (see Reporting a solve).
 
 ## Where the log goes
 
@@ -1150,11 +1189,14 @@ LM converged in 12 iterations (9 accepted, 3 retried)
     steps         +++-+x++-+++
                   + accepted   - rejected   x not positive definite
   backend   Schur: 480 blocks / 1440 params eliminated, 360 kept
-            fill ratio 0.45, ordered by Amd
+            fill ratio 0.45, ordered by Amd, factored by the block supernodal Cholesky
+  gpu       cuda:0 NVIDIA GeForce RTX 4090 (sm_89), wide f64
+            assembly, damped solves and the LM loop on the device, f64 factor, system in f64, 412.3 MB reserved in 57 buffers
 ```
 
-The timing block appears only when `gather_timing` was set, and the backend line
-only when the backend reported a plan.
+The timing block appears only when `gather_timing` was set, the backend line
+only when the backend reported a plan, and the gpu block only when the solve
+was given a GPU (see What ran on the GPU).
 
 ## Profiling a solve -- `LmTiming`
 

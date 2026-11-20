@@ -321,17 +321,19 @@ class SparseOptions(ctypes.Structure):
         # Factor in single precision on that route and refine each
         # solve against the double-precision matrix, by at most
         # max_refinements steps or until the relative residual is
-        # under refine_tol.
+        # under refine_tol. An f32 solve on a GPU forms the system it
+        # factorizes in f32, and under mixed_precision in the GPU's wide
+        # values (with max_refinements 0: formed wide, not refined).
         ("mixed_precision", ctypes.c_bool),
         ("max_refinements", ctypes.c_uint32),
         ("refine_tol", ctypes.c_double),
         # The GPU the block supernodal route runs on (GpuBackend), device
-        # gpu_index of it, the process's shared state of it. On the
-        # reduced route the device also reduces, and with gpu_assembly
-        # (on by default) assembles and runs the LM loop when the model
-        # has a device form. Needs the capi built with the matching
-        # feature (gpu-cuda, gpu-hip, gpu-metal, gpu-cpu); without it the
-        # solve fails with SolverUnavailable.
+        # gpu_index of it, the process's shared state of it. The device
+        # does the damped solves, and with gpu_assembly (on by default)
+        # assembles and runs the LM loop when the model has a device
+        # form; LmResult.gpu says what ran there. Needs the capi built
+        # with the matching feature (gpu-cuda, gpu-hip, gpu-metal,
+        # gpu-cpu); without it the solve fails with SolverUnavailable.
         ("_gpu", ctypes.c_uint32),
         ("gpu_index", ctypes.c_uint32),
         ("gpu_assembly", ctypes.c_bool),
@@ -340,9 +342,6 @@ class SparseOptions(ctypes.Structure):
         ("_gpu_wide", ctypes.c_uint32),
         # Where the device assembly's image is staged (GpuStaging).
         ("_gpu_staging", ctypes.c_uint32),
-        # An f32 solve's reduced system in the GPU's wide values instead
-        # of f32, as the CPU's f32 route forms it. Off by default.
-        ("gpu_wide_schur", ctypes.c_bool),
     ]
 
     schur = _enum_property("_schur", SchurPolicy)
@@ -402,10 +401,8 @@ class SchurPlan(ctypes.Structure):
     Cholesky factorized it rather than faer's scalar one; `f32_factor`
     that the factor was single precision, with `refinements` the
     refinement steps summed over the solve and `refinement_shortfalls`
-    the damped solves that ended above the tolerance; `gpu_factor` and
-    `gpu_assembly` that the factorization and the assembly ran on the
-    GPU, `gpu_f32_reduction` that the GPU formed the reduced system in
-    f32; optional statistics read as None when absent."""
+    the damped solves that ended above the tolerance; optional
+    statistics read as None when absent."""
     _fields_ = [
         ("reduced", ctypes.c_bool),
         ("eliminated_blocks", ctypes.c_uint32),
@@ -422,9 +419,6 @@ class SchurPlan(ctypes.Structure):
         ("f32_factor", ctypes.c_bool),
         ("_refinements", _OptU32),
         ("_refinement_shortfalls", _OptU32),
-        ("gpu_factor", ctypes.c_bool),
-        ("gpu_assembly", ctypes.c_bool),
-        ("gpu_f32_reduction", ctypes.c_bool),
     ]
 
     fill_ratio = _plan_opt("_fill_ratio", float)
@@ -434,6 +428,90 @@ class SchurPlan(ctypes.Structure):
     ordering = _plan_opt("_ordering", ReducedOrdering)
     refinements = _plan_opt("_refinements", int)
     refinement_shortfalls = _plan_opt("_refinement_shortfalls", int)
+
+
+class GpuWork(enum.IntEnum):
+    """How much of a solve ran on its GPU (GpuReport.work): nothing (the
+    solve took a route that does not run on a device), the damped solves
+    (the assembly on the CPU, GpuReport.cpu_assembly says why), or the
+    assembly, the damped solves and the LM loop's vectors."""
+    UNUSED = 0
+    SOLVES = 1
+    LOOP = 2
+
+
+class CpuAssembly(enum.IntEnum):
+    """Why a GPU solve assembled on the CPU (GpuReport.cpu_assembly): it
+    did not, SparseOptions.gpu_assembly was off, the model has no device
+    form (GpuReport.no_device_form says why), or the model is f64 and
+    the device has no f64 (Metal)."""
+    NONE = 0
+    ASKED = 1
+    NO_DEVICE_FORM = 2
+    NO_F64 = 3
+
+
+class GpuReportRaw(ctypes.Structure):
+    """The C layout of a GpuReport, its strings pointing into the result."""
+    _fields_ = [
+        ("backend", ctypes.c_uint32),
+        ("index", ctypes.c_uint32),
+        ("name", ctypes.c_char_p),
+        ("target", ctypes.c_char_p),
+        ("integrated", ctypes.c_bool),
+        ("wide", ctypes.c_uint32),
+        ("f32_factor", ctypes.c_bool),
+        ("f32_system", ctypes.c_bool),
+        ("work", ctypes.c_uint32),
+        ("cpu_assembly", ctypes.c_uint32),
+        ("no_device_form", ctypes.c_char_p),
+        ("reserved_bytes", ctypes.c_uint64),
+        ("buffers_created", ctypes.c_uint64),
+    ]
+
+
+class GpuReport:
+    """What a solve did on the GPU it was given (mirror of the Rust
+    GpuReport), read with LmResult.gpu:
+
+        g = result.gpu
+        if g is not None and g.work == GpuWork.LOOP:
+            print(g.name, g.target, g.reserved_bytes >> 20, "MB")
+
+    `backend` (GpuBackend) and `index` name the device; `name` is its
+    driver's name and `target` what the kernels were compiled for (both
+    empty when `work` is UNUSED); `integrated` that it shares the host's
+    memory; `wide` (GpuWide) the scalar of its wide values; `f32_factor`
+    that the factor is f32; `f32_system` that the system the device
+    factorizes is f32 (an f32 solve without mixed_precision; otherwise it
+    is in the wide values); `work` (GpuWork) how much of the solve ran
+    there, with `cpu_assembly` (CpuAssembly) and `no_device_form` why the
+    assembly ran on the CPU when it did; `reserved_bytes` the device
+    memory its state holds and `buffers_created` the device buffers it
+    has allocated over its life."""
+
+    __slots__ = ("backend", "index", "name", "target", "integrated", "wide",
+                 "f32_factor", "f32_system", "work", "cpu_assembly",
+                 "no_device_form", "reserved_bytes", "buffers_created")
+
+    def __init__(self, raw):
+        self.backend = GpuBackend(raw.backend)
+        self.index = raw.index
+        self.name = (raw.name or b"").decode()
+        self.target = (raw.target or b"").decode()
+        self.integrated = raw.integrated
+        self.wide = GpuWide(raw.wide)
+        self.f32_factor = raw.f32_factor
+        self.f32_system = raw.f32_system
+        self.work = GpuWork(raw.work)
+        self.cpu_assembly = CpuAssembly(raw.cpu_assembly)
+        self.no_device_form = (raw.no_device_form or b"").decode()
+        self.reserved_bytes = raw.reserved_bytes
+        self.buffers_created = raw.buffers_created
+
+    def __repr__(self):
+        return "GpuReport(" + ", ".join(
+            "%s=%r" % (k, getattr(self, k)) for k in self.__slots__) + ")"
 
 
 class FormTiming(ctypes.Structure):

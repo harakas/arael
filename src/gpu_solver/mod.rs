@@ -36,9 +36,9 @@ pub(crate) trait GpuSolver<T>: Send {
     fn runtime(&self) -> String;
     /// The factor's scalar.
     fn precision(&self) -> GpuPrecision;
-    /// Whether the device computes in f64 (Metal does not): an f64 root
-    /// assembles on the CPU without it.
-    fn has_f64(&self) -> bool;
+    /// The device: its name, its compile target, whether it computes in
+    /// f64 (Metal does not: an f64 root assembles on the CPU there).
+    fn arch(&self) -> &arael_gpu::Arch;
 
     /// Build the reduction by `schur` of matrices with the structure
     /// `hsym`, or with `None` the whole system (nothing eliminated), on the

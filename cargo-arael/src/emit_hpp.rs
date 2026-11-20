@@ -827,6 +827,7 @@ private:
          int32_t {root_sn}_solve_sparse({root}*, const LmConfig*, const SparseOptions*, LmResultT<{fp}>*);\n\
          const char* {root_sn}_result_report(void*, bool);\n\
          bool {root_sn}_result_plan(const void*, SchurPlan*);\n\
+         bool {root_sn}_result_gpu(const void*, GpuReport*);\n\
          uint64_t {root_sn}_result_steps(const void*, LmStep*, uint64_t);\n\
          void {root_sn}_result_threads(const void*, ThreadReport*);\n\
          uint64_t {root_sn}_result_threads_held(const void*, StoreFootprint*, uint64_t);\n\
@@ -910,6 +911,9 @@ using arael::SchurSolve;
 using arael::GpuBackend;
 using arael::GpuWide;
 using arael::GpuStaging;
+using arael::GpuWork;
+using arael::CpuAssembly;
+using arael::GpuReport;
 using arael::SparseOptionsT;
 using arael::LogLevel;
 using arael::PanicError;
@@ -981,8 +985,9 @@ class Covariance;
 /// full Rust result behind them. report()/pretty_report() render the
 /// Rust-side text (status, cost, the timing breakdown and the
 /// backend's plan when gathered); plan() returns the sparse backend's
-/// SchurPlan as data, steps() the per-attempt timeline, threads() what
-/// the threads did, covariance() the covariance the config asked for.
+/// SchurPlan as data, gpu() what the solve did on its GPU, steps() the
+/// per-attempt timeline, threads() what the threads did, covariance()
+/// the covariance the config asked for.
 /// Copies share ownership of the Rust result.
 class LmResult : public LmResultT<{fp}> {{
 public:
@@ -1005,6 +1010,15 @@ public:
         SchurPlan p;
         if (detail && ffi::{root_sn}_result_plan(detail, &p))
             return p;
+        return {{}};
+    }}
+    /// What the solve did on the GPU it was given (SparseOptions::gpu);
+    /// empty for a solve without one. Its strings are valid until the
+    /// destruction of this result's last copy.
+    option<GpuReport> gpu() const {{
+        GpuReport g;
+        if (detail && ffi::{root_sn}_result_gpu(detail, &g))
+            return g;
         return {{}};
     }}
     /// The per-attempt timeline (Rust's LmTiming::steps); empty

@@ -134,9 +134,8 @@ fn main() {
         std::ops::ControlFlow::Continue(())
     });
     let r = s.solve_with(&mut solver, &cfg).unwrap();
-    let plan = solver.plan().expect("a plan");
     println!(
-        "cost {:.4} -> {:.4}, {} iterations ({} accepted), {:?}, device assembly {}",
-        r.start_cost, r.end_cost, r.iterations, r.accepted_iterations, r.status, plan.gpu_assembly
+        "cost {:.4} -> {:.4}, {} iterations ({} accepted), {:?}, on the device: {:?}",
+        r.start_cost, r.end_cost, r.iterations, r.accepted_iterations, r.status, r.gpu.as_ref().map(|g| &g.work)
     );
 }

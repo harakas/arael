@@ -5,6 +5,8 @@
 
 #[path = "parity_verify.rs"]
 mod parity_verify;
+#[path = "gpu_report.rs"]
+mod gpu_report;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -44,6 +46,41 @@ fn python_interface_matches_rust_exactly() {
         }
     }
     parity_verify::verify(&got);
+}
+
+/// The generated Python interface's GPU report (`LmResult.gpu`), the capi
+/// built with `gpu-cpu`: the fixture solved on the CPU device with the
+/// device assembly on and off, and without a GPU.
+#[test]
+fn python_interface_reports_the_gpu() {
+    let ws: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let have = |tool: &str| {
+        Command::new(tool).arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().map(|s| s.success()).unwrap_or(false)
+    };
+    // the CPU device compiles its kernels with the host's C++ compiler
+    if !have("python3") || !have("c++") {
+        eprintln!("python gpu report: python3 or c++ missing, skipping");
+        return;
+    }
+    // its own target directory: the parity tests load the capi built
+    // without a GPU runtime
+    let target = ws.join("target/gpu-cpu");
+    let status = Command::new("cargo")
+        .args(["build", "-p", "cxx-fit-capi", "--release", "--features", "gpu-cpu", "--target-dir"])
+        .arg(&target)
+        .current_dir(&ws)
+        .status().expect("cargo spawn");
+    assert!(status.success(), "capi build failed");
+    let lib = if cfg!(target_vendor = "apple") { "libcxx_fit_capi.dylib" } else { "libcxx_fit_capi.so" };
+    let out = Command::new("python3")
+        .arg(ws.join("runner/tests/gpu_main.py"))
+        .env("ARAEL_CAPI", target.join("release").join(lib))
+        .output().expect("python spawn");
+    assert!(out.status.success(), "python run failed: {}", String::from_utf8_lossy(&out.stderr));
+    gpu_report::verify(&String::from_utf8(out.stdout).unwrap());
 }
 
 /// The generated Python interface on Metal (macOS): the capi built with

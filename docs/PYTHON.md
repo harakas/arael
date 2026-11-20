@@ -397,10 +397,15 @@ f64 matrix; the plan's `f32_factor`, `refinements` and
 NONE / CUDA / HIP / CPU / METAL; CPU is the CPU running the GPU kernels)
 with `gpu_index`, `gpu_assembly`, `gpu_wide` (`GpuWide` F64 / DF32 /
 DEFAULT, the default: the device's own, df32 on Metal, else f64),
-`gpu_staging` (`GpuStaging` PINNED / PAGEABLE) and `gpu_wide_schur` (an
-f32 solve's reduced system in the wide values instead of f32, off by
-default; the plan's `gpu_f32_reduction` reports an f32 one), as in the
-C++ interface (docs/CXX.md). Metal has no f64 (`GpuBackend.METAL.has_f64` is false):
+and `gpu_staging` (`GpuStaging` PINNED / PAGEABLE), as in the
+C++ interface (docs/CXX.md). An f32 solve forms the system it
+factorizes in f32, and under `mixed_precision` in the wide values (with
+`max_refinements` 0: formed wide, not refined). `LmResult.gpu` is what
+the solve did on the device, a `GpuReport` (`None` without a GPU):
+`name`, `target`, `integrated`, `wide`, `f32_factor`, `f32_system`,
+`work` (`GpuWork` UNUSED / SOLVES / LOOP), `cpu_assembly` (`CpuAssembly`
+NONE / ASKED / NO_DEVICE_FORM / NO_F64) with `no_device_form`,
+`reserved_bytes` and `buffers_created`. Metal has no f64 (`GpuBackend.METAL.has_f64` is false):
 an f64 model on it needs `mixed_precision`, and `GpuWide.F64` fails the
 solve with `SolverUnavailable`. The cdylib must be built with the
 runtime's feature (`cargo build --release -p <crate>-capi --features

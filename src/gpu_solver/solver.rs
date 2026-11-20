@@ -172,8 +172,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         self.factor.precision()
     }
 
-    fn has_f64(&self) -> bool {
-        self.factor.device().arch().has_f64
+    fn arch(&self) -> &arael_gpu::Arch {
+        self.factor.device().arch()
     }
 
     fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), GpuError> {

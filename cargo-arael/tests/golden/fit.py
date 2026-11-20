@@ -15,7 +15,8 @@ from .arael import math as _m
 from .arael import transform as _tf
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
-                           FaerOrdering, GpuBackend, GpuStaging, GpuWide, LmPreset, LmStatus, LmStep,
+                           CpuAssembly, FaerOrdering, GpuBackend, GpuReport, GpuReportRaw,
+                           GpuStaging, GpuWide, GpuWork, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
                            SchurPolicy, SchurSolve, SolveFailure,
                            SolveFailureKind, StoreFootprint, ThreadReport,
@@ -202,6 +203,16 @@ class LmResult(_f.LmResultRaw):
         if self._detail and _f.fit_result_plan(self._detail,
                                                      ctypes.byref(p)):
             return p
+        return None
+
+    @property
+    def gpu(self):
+        """What the solve did on the GPU it was given
+        (arael.solver.GpuReport), or None for a solve without one."""
+        g = GpuReportRaw()
+        if self._detail and _f.fit_result_gpu(self._detail,
+                                                    ctypes.byref(g)):
+            return GpuReport(g)
         return None
 
     @property

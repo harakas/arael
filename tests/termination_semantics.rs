@@ -789,6 +789,7 @@ fn synthetic_result() -> LmResult<f64> {
         status: LmStatus::Converged,
         final_lambda: 1e-6,
         solver: None,
+        gpu: None,
         threads: Default::default(),
         covariance: Err(arael::covariance::CovError::NotRequested),
         timing: Some(LmTiming {
@@ -833,6 +834,55 @@ fn report_is_ascii_and_has_no_escapes() {
     // The three ASCII markers, one per attempt, in order: failed, rejected, ok.
     assert!(s.contains("x-+"), "the timeline should read x-+ :\n{s}");
     assert!(s.contains("97.50% down"), "cost 100 -> 2.5:\n{s}");
+}
+
+/// The report's GPU block: the device and what ran on it, why the assembly
+/// stayed on the CPU when it did, and a device that was given and not used.
+#[test]
+fn the_report_says_what_ran_on_the_gpu() {
+    use arael::simple_lm::{CpuAssembly, GpuBackend, GpuReport, GpuWide, GpuWork};
+    let gpu = GpuReport {
+        backend: GpuBackend::Cuda,
+        index: 1,
+        name: "NVIDIA GeForce RTX 4090".into(),
+        target: "sm_89".into(),
+        integrated: false,
+        wide: GpuWide::Df32,
+        f32_factor: true,
+        f32_system: false,
+        work: GpuWork::Loop,
+        reserved_bytes: 412_300_000,
+        buffers_created: 57,
+    };
+    let mut r = synthetic_result();
+    assert!(!r.report().contains("gpu "), "no GPU, no block");
+    r.gpu = Some(gpu.clone());
+    let s = r.report();
+    assert!(s.is_ascii() && !s.contains('\x1b'), "{s}");
+    assert!(s.contains("  gpu       cuda:1 NVIDIA GeForce RTX 4090 (sm_89), wide df32\n"), "{s}");
+    assert!(
+        s.contains("assembly, damped solves and the LM loop on the device, f32 factor, system in df32, 412.3 MB reserved in 57 buffers"),
+        "{s}"
+    );
+    r.gpu = Some(GpuReport {
+        backend: GpuBackend::Hip,
+        integrated: true,
+        wide: GpuWide::F64,
+        f32_factor: false,
+        f32_system: true,
+        work: GpuWork::Solves(CpuAssembly::NoDeviceForm("`Apart` writes `coo` pairs".into())),
+        ..gpu.clone()
+    });
+    let s = r.report();
+    assert!(s.contains("hip:1 NVIDIA GeForce RTX 4090 (sm_89, integrated), wide f64"), "{s}");
+    assert!(s.contains("damped solves on the device, assembly on the CPU (`Apart` writes `coo` pairs), f64 factor, system in f32"), "{s}");
+    r.gpu = Some(GpuReport { work: GpuWork::Solves(CpuAssembly::Asked), ..gpu.clone() });
+    assert!(r.report().contains("assembly on the CPU (as asked)"));
+    r.gpu = Some(GpuReport { work: GpuWork::Solves(CpuAssembly::NoF64), ..gpu.clone() });
+    assert!(r.report().contains("assembly on the CPU (the device has no f64, which the root's scalar is)"));
+    r.gpu = Some(GpuReport { name: String::new(), target: String::new(), work: GpuWork::Unused, ..gpu });
+    let s = r.report();
+    assert!(s.contains("  gpu       cuda:1 not used: the solve took a route that does not run on a device\n"), "{s}");
 }
 
 #[test]

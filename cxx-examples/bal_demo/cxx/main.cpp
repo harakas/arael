@@ -120,7 +120,10 @@ struct Run {
     bool ok = false;
     double start = 0.0, end = 0.0, ms = 0.0;
     uint32_t iters = 0, accepted = 0;
-    bool reduced = false, gpu_factor = false, gpu_assembly = false, f32_factor = false;
+    bool reduced = false, f32_factor = false;
+    // what ran on the GPU, when the solve was given one
+    GpuWork gpu = GpuWork::Unused;
+    std::string device;
     bool has_timing = false;
     LmTiming timing{};
 };
@@ -149,9 +152,11 @@ static Run solve(const Bal& b, const LmConfig& cfg, const SparseOptions& so) {
     if (v.plan().has_value()) {
         SchurPlan p = v.plan().value();
         run.reduced = p.reduced;
-        run.gpu_factor = p.gpu_factor;
-        run.gpu_assembly = p.gpu_assembly;
         run.f32_factor = p.f32_factor;
+    }
+    if (auto g = v.gpu()) {
+        run.gpu = g->work;
+        run.device = std::string(g->name) + " (" + g->target + ")";
     }
     return run;
 }
@@ -165,8 +170,8 @@ static void report(const char* label, const Run& r, size_t n_obs) {
     std::printf("%-5s %9.1f ms  %2u iterations (%2u accepted)  cost %.4f -> %.4f  RMS %.4f -> %.4f px  [%s%s%s%s]\n",
                 label, r.ms, r.iters, r.accepted, r.start, r.end, rms(r.start), rms(r.end),
                 r.reduced ? "reduced" : "whole system",
-                r.gpu_factor ? ", GPU factor" : "",
-                r.gpu_assembly ? ", GPU assembly and loop" : "",
+                r.gpu == GpuWork::Solves ? ", GPU solves on " : r.gpu == GpuWork::Loop ? ", GPU assembly, solves and loop on " : "",
+                r.gpu == GpuWork::Unused ? "" : r.device.c_str(),
                 r.f32_factor ? ", f32 factor" : "");
     if (r.has_timing) {
         const LmTiming& t = r.timing;

@@ -1008,6 +1008,8 @@ pub struct {handle} {{
 pub struct ResultDetail {{
     result: arael::simple_lm::LmResult<{fp}>,
     buf: CString,
+    // The GPU report's name, target and reason, for {root_sn}_result_gpu.
+    gpu_text: [CString; 3],
     // Whether {root_sn}_result_covariance already moved the assembly out.
     cov_taken: bool,
 }}
@@ -1357,7 +1359,9 @@ pub struct CSparseOptions {{
     pub block_supernodal_memory_lean: bool,
     /// Factor in single precision on the block supernodal route and
     /// refine each solve against the double-precision matrix
-    /// (MixedPrecision). Off by default.
+    /// (MixedPrecision). Off by default. An f32 solve on a GPU forms the
+    /// system it factorizes in f32, and under mixed_precision in the
+    /// device's wide values (max_refinements 0: formed wide, not refined).
     pub mixed_precision: bool,
     /// Refinement steps at most per damped solve, under mixed_precision.
     pub max_refinements: u32,
@@ -1370,8 +1374,8 @@ pub struct CSparseOptions {{
     /// SolverUnavailable.
     pub gpu: u32,
     pub gpu_index: u32,
-    /// On the reduced GPU route, assemble on the device too when the model
-    /// has a device form (on by default).
+    /// On a GPU, assemble on the device too when the model has a device
+    /// form (on by default).
     pub gpu_assembly: bool,
     /// The GPU's wide values (GpuWide): 0 f64, 1 df32, 2 the device's
     /// default (df32 on Metal, else f64; the default).
@@ -1379,9 +1383,6 @@ pub struct CSparseOptions {{
     /// Where the device assembly's image is staged (GpuStaging): 0 pinned,
     /// 1 pageable.
     pub gpu_staging: u32,
-    /// An f32 solve's reduced system in the wide values instead of f32
-    /// (GpuDevice::with_wide_schur; off by default).
-    pub gpu_wide_schur: bool,
 }}
 
 impl CSparseOptions {{
@@ -1453,7 +1454,7 @@ impl CSparseOptions {{
                 0 => arael::simple_lm::GpuStaging::Pinned,
                 1 => arael::simple_lm::GpuStaging::Pageable,
                 t => panic!(\"unknown gpu_staging tag {{t}}\"),
-            }}).with_wide_schur(self.gpu_wide_schur)))
+            }})))
             .with_gpu_assembly(self.gpu_assembly);
         let cg = arael::simple_lm::CgParams {{
             tol: self.cg_tol,
@@ -1519,14 +1520,14 @@ pub unsafe extern \"C\" fn {root_sn}_sparse_options(out: *mut CSparseOptions) {{
         mixed_precision: d.mixed_precision.is_some(),
         max_refinements: d.mixed_precision.unwrap_or_default().max_refinements as u32,
         refine_tol: d.mixed_precision.unwrap_or_default().tol,
-        gpu: match d.gpu.as_ref().map(|g| g.backend) {{
+        gpu: match d.gpu.as_ref().map(|g| g.backend()) {{
             None => 0,
             Some(arael::simple_lm::GpuBackend::Cuda) => 1,
             Some(arael::simple_lm::GpuBackend::Hip) => 2,
             Some(arael::simple_lm::GpuBackend::Cpu) => 3,
             Some(arael::simple_lm::GpuBackend::Metal) => 4,
         }},
-        gpu_index: d.gpu.as_ref().map_or(0, |g| g.index as u32),
+        gpu_index: d.gpu.as_ref().map_or(0, |g| g.index() as u32),
         gpu_assembly: d.gpu_assembly,
         gpu_wide: match d.gpu.as_ref().map(|g| g.wide()) {{
             None => 2,
@@ -1537,7 +1538,6 @@ pub unsafe extern \"C\" fn {root_sn}_sparse_options(out: *mut CSparseOptions) {{
             None | Some(arael::simple_lm::GpuStaging::Pinned) => 0,
             Some(arael::simple_lm::GpuStaging::Pageable) => 1,
         }},
-        gpu_wide_schur: d.gpu.as_ref().is_some_and(|g| g.wide_schur()),
     }};
 }}
 
@@ -1885,11 +1885,34 @@ pub struct CSchurPlan {{
     /// Damped solves that ended above the refinement tolerance, on a
     /// single-precision factor.
     pub refinement_shortfalls: COptU32,
-    /// Whether the factorization ran on the GPU, and the assembly too.
-    pub gpu_factor: bool,
-    pub gpu_assembly: bool,
-    /// Whether the GPU formed the reduced system in f32.
-    pub gpu_f32_reduction: bool,
+}}
+
+/// Mirror of arael's GpuReport: what a solve did on the GPU it was given.
+/// The strings point into the result behind `detail` and live as long as
+/// it does. Field order is C ABI.
+#[repr(C)]
+pub struct CGpuReport {{
+    /// GpuBackend: 1 CUDA, 2 HIP, 3 the CPU device, 4 Metal.
+    pub backend: u32,
+    pub index: u32,
+    /// The device's name and compile target; empty when the solve did not
+    /// use the device (work 0).
+    pub name: *const c_char,
+    pub target: *const c_char,
+    pub integrated: bool,
+    /// GpuWide: 0 f64, 1 df32.
+    pub wide: u32,
+    pub f32_factor: bool,
+    pub f32_system: bool,
+    /// GpuWork: 0 unused, 1 the damped solves, 2 the assembly, the damped
+    /// solves and the LM loop.
+    pub work: u32,
+    /// CpuAssembly, why the assembly ran on the CPU when work is 1: 1 asked,
+    /// 2 no device form (the reason in no_device_form), 3 no f64; else 0.
+    pub cpu_assembly: u32,
+    pub no_device_form: *const c_char,
+    pub reserved_bytes: u64,
+    pub buffers_created: u64,
 }}
 
 unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {{
@@ -1944,9 +1967,6 @@ unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {{
             Some(n) => COptU32 {{ has: true, v: n as u32 }},
             None => COptU32 {{ has: false, v: 0 }},
         }},
-        gpu_factor: p.gpu_factor,
-        gpu_assembly: p.gpu_assembly,
-        gpu_f32_reduction: p.gpu_f32_reduction,
     }};
 }}
 
@@ -1997,7 +2017,19 @@ unsafe fn fill_result(out: *mut CLmResult, r: &arael::simple_lm::LmResult<{fp}>)
 }}
 
 fn boxed(r: arael::simple_lm::LmResult<{fp}>) -> *mut ResultDetail {{
-    Box::into_raw(Box::new(ResultDetail {{ result: r, buf: CString::default(), cov_taken: false }}))
+    let text = |t: &str| CString::new(t.replace('\\0', \" \")).unwrap_or_default();
+    let gpu_text = match &r.gpu {{
+        Some(g) => [
+            text(&g.name),
+            text(&g.target),
+            match &g.work {{
+                arael::simple_lm::GpuWork::Solves(arael::simple_lm::CpuAssembly::NoDeviceForm(why)) => text(why),
+                _ => CString::default(),
+            }},
+        ],
+        None => Default::default(),
+    }};
+    Box::into_raw(Box::new(ResultDetail {{ result: r, buf: CString::default(), gpu_text, cov_taken: false }}))
 }}
 
 #[no_mangle]
@@ -2046,6 +2078,48 @@ pub unsafe extern \"C\" fn {root_sn}_result_plan(d: *const ResultDetail, out: *m
         }}
         _ => false,
     }}
+}}
+
+/// What the solve behind `d` did on the GPU it was given. Returns false
+/// with `out` untouched for a solve without a GPU.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_result_gpu(d: *const ResultDetail, out: *mut CGpuReport) -> bool {{
+    use arael::simple_lm::{{CpuAssembly, GpuBackend, GpuWide, GpuWork}};
+    let dd = &*d;
+    let Some(g) = &dd.result.gpu else {{ return false }};
+    *out = CGpuReport {{
+        backend: match g.backend {{
+            GpuBackend::Cuda => 1,
+            GpuBackend::Hip => 2,
+            GpuBackend::Cpu => 3,
+            GpuBackend::Metal => 4,
+        }},
+        index: g.index as u32,
+        name: dd.gpu_text[0].as_ptr(),
+        target: dd.gpu_text[1].as_ptr(),
+        integrated: g.integrated,
+        wide: match g.wide {{
+            GpuWide::F64 => 0,
+            GpuWide::Df32 => 1,
+        }},
+        f32_factor: g.f32_factor,
+        f32_system: g.f32_system,
+        work: match &g.work {{
+            GpuWork::Unused => 0,
+            GpuWork::Solves(_) => 1,
+            GpuWork::Loop => 2,
+        }},
+        cpu_assembly: match &g.work {{
+            GpuWork::Solves(CpuAssembly::Asked) => 1,
+            GpuWork::Solves(CpuAssembly::NoDeviceForm(_)) => 2,
+            GpuWork::Solves(CpuAssembly::NoF64) => 3,
+            _ => 0,
+        }},
+        no_device_form: dd.gpu_text[2].as_ptr(),
+        reserved_bytes: g.reserved_bytes as u64,
+        buffers_created: g.buffers_created as u64,
+    }};
+    true
 }}
 
 fn c_form(f: &arael::threads::FormTiming) -> CFormTiming {{

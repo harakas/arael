@@ -287,10 +287,18 @@ views are named by their container's nature: `PathPosesDeque`,
   (`GpuStaging` Pinned / Pageable) writes the device assembly's image
   into pinned host memory (asynchronous copies, the default) or into
   ordinary memory (for platforms where copies from pinned memory are
-  slow). An f32 solve without `mixed_precision` forms the reduced system
-  in f32, as the CPU's f32 route; `gpu_wide_schur` forms it in the wide
-  values instead (more precise, off by default). The plan's
-  `gpu_factor`, `gpu_assembly` and `gpu_f32_reduction` report which ran.
+  slow). An f32 solve without `mixed_precision` forms the system it
+  factorizes in f32, as the CPU's f32 route; with `mixed_precision` it
+  forms it in the wide values (with `max_refinements` 0: formed wide,
+  not refined). `LmResult::gpu()` returns what the solve did on the
+  device, an `option<GpuReport>` (empty without a GPU): the device's
+  `name` and compile `target`, `wide`, `f32_factor`, `f32_system`,
+  `work` (`GpuWork` Unused / Solves / Loop: nothing, the damped solves,
+  or the assembly, the solves and the LM loop), `cpu_assembly`
+  (`CpuAssembly` None / Asked / NoDeviceForm / NoF64: why the assembly
+  ran on the CPU) with the reason in `no_device_form`, and the device
+  memory in `reserved_bytes` and `buffers_created`; its strings live as
+  long as the result. The text report prints it as a `gpu` block.
   The interface must
   be built with the runtime: the CMake cache variable `ARAEL_GPU`
   (`cuda`, `hip`, `metal` or `cpu`) builds the capi crate with the
