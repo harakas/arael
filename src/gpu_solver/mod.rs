@@ -4,7 +4,6 @@
 
 use arael_faer::bsc::SymbolicSparseBlockColMat;
 use arael_faer::schur::SchurSymbolic;
-use arael_faer::supernodal::SupernodalError;
 use arael_faer::{SparseIndex, ValueIndex};
 use arael_gpu::GpuError;
 use arael_gpu::{GpuPrecision, RefineStats};
@@ -14,23 +13,23 @@ use crate::simple_lm::{DeviceFailure, LmProblemInternals, ResidentAttempt};
 
 pub(crate) mod solver;
 
-/// The GPU side of the supernodal solver, in three layers built one on the
-/// other:
+/// The GPU side of the supernodal solver: the device factor of one
+/// symbolic analysis, and two layers built on it:
 ///
-/// - the factor of one symbolic analysis, factorized and solved from host
-///   values (the reduction on the CPU);
-/// - with [`prepare_reduction`](Self::prepare_reduction), the reduction
-///   too: an attempt forms S from the damped H, factorizes, solves, refines
-///   and back-substitutes on the device, waiting once;
+/// - with [`prepare_reduction`](Self::prepare_reduction), the reduction,
+///   of the reduced system or of the whole one with nothing eliminated: a
+///   damped solve ([`solve_reduced`](Self::solve_reduced)) forms S from
+///   the damped H, factorizes, solves, refines and back-substitutes on the
+///   device, waiting once;
 /// - with [`build_route`](Self::build_route), the device assembly and the
 ///   LM loop's vectors: from the first linearization on, the loop runs on
 ///   the device ([`ResidentLoop`](crate::simple_lm::ResidentLoop)), the
 ///   parameters f64 there whatever `T`.
 ///
 /// Every device operation can fail with a [`DeviceFailure`], which ends
-/// the solve; the inner results of a factorization or a damped solve are
-/// the numerical outcomes the loop raises lambda on. `Send`, so a solver
-/// moves between threads as on the CPU.
+/// the solve; a damped solve's `None` is the numerical outcome the loop
+/// raises lambda on. `Send`, so a solver moves between threads as on the
+/// CPU.
 pub(crate) trait GpuSolver<T>: Send {
     /// The device's runtime and the wide scalar, for the verbose log:
     /// `cuda`, `cuda df32`, `hip`, `hip df32`.
@@ -40,15 +39,6 @@ pub(crate) trait GpuSolver<T>: Send {
     /// Whether the device computes in f64 (Metal does not): an f64 root
     /// assembles on the CPU without it.
     fn has_f64(&self) -> bool;
-
-    /// Factorize the matrix whose tile values are `vals`, in the storage
-    /// order of the structure the factor was built for; the inner `Err`
-    /// for a matrix that is not positive definite.
-    fn factorize(&mut self, vals: &[T]) -> Result<Result<(), SupernodalError>, DeviceFailure>;
-    /// Solve in place with the last factorization.
-    fn solve(&mut self, x: &mut [T]) -> Result<(), DeviceFailure>;
-    /// [`solve`](Self::solve) of an f64 vector: a refinement's correction.
-    fn solve_f64(&mut self, x: &mut [f64]) -> Result<(), DeviceFailure>;
 
     /// Build the reduction by `schur` of matrices with the structure
     /// `hsym`, or with `None` the whole system (nothing eliminated), on the

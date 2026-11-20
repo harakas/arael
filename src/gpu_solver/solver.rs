@@ -4,11 +4,10 @@ use std::sync::Arc;
 
 use arael_faer::bsc::SymbolicSparseBlockColMat;
 use arael_faer::schur::{SchurReal, SchurSymbolic};
-use arael_faer::supernodal::{SupernodalError, SupernodalSymbolic};
+use arael_faer::supernodal::SupernodalSymbolic;
 use arael_faer::{SparseIndex, ValueIndex};
 use arael_gpu::lm::{N_SCALARS, S_COST_TRY, S_COST_X, Scalars};
 use arael_gpu::schur::{GraphKey, STATUS_BYTES};
-use arael_gpu::FactorizeError;
 use arael_gpu::{Device, GpuError, GpuFactor, LmVectors, GpuSchur, GpuSchurError, Scope, Values, Wide};
 use arael_gpu::{GpuPrecision, RefineStats};
 
@@ -175,28 +174,6 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
 
     fn has_f64(&self) -> bool {
         self.factor.device().arch().has_f64
-    }
-
-    fn factorize(&mut self, vals: &[T]) -> Result<Result<(), SupernodalError>, DeviceFailure> {
-        let dev = self.factor.device().clone();
-        let _scope = Scope::new(&*dev, "factorize");
-        match self.factor.factorize(vals) {
-            Ok(()) => Ok(Ok(())),
-            Err(FactorizeError::NotPositiveDefinite) => Ok(Err(SupernodalError::NotPositiveDefinite)),
-            Err(FactorizeError::Device(e)) => on_device(Err(e), "factorization"),
-        }
-    }
-
-    fn solve(&mut self, x: &mut [T]) -> Result<(), DeviceFailure> {
-        let dev = self.factor.device().clone();
-        let _scope = Scope::new(&*dev, "solve");
-        on_device(self.factor.solve(x), "solve")
-    }
-
-    fn solve_f64(&mut self, x: &mut [f64]) -> Result<(), DeviceFailure> {
-        let dev = self.factor.device().clone();
-        let _scope = Scope::new(&*dev, "solve");
-        on_device(self.factor.solve(x), "solve")
     }
 
     fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), GpuError> {

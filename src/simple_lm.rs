@@ -5301,10 +5301,10 @@ pub struct SparseFaerOptions {
     /// Single-precision factor with refinement on the supernodal block route
     /// (see [`Self::with_mixed_precision`]). `None`, off, by default.
     pub mixed_precision: Option<MixedPrecision>,
-    /// The GPU that factorizes and solves the supernodal block route (see
-    /// [`Self::with_gpu`]). `None`, the CPU, by default.
+    /// The GPU the supernodal block route runs on (see [`Self::with_gpu`]).
+    /// `None`, the CPU, by default.
     pub gpu: Option<GpuDevice>,
-    /// Whether the reduced GPU route also assembles on the device (see
+    /// Whether a solve on a GPU also assembles on the device (see
     /// [`Self::with_gpu_assembly`]). On by default.
     pub gpu_assembly: bool,
     /// Parameter ranges to marginalize, named explicitly rather than left to
@@ -5519,34 +5519,38 @@ impl SparseFaerOptions {
         self
     }
 
-    /// Factorize and solve the supernodal block route on a GPU (features
-    /// `gpu-cuda`, `gpu-hip`). The factor lives on the device, in the
-    /// solver's scalar, or in `f32` under [`Self::with_mixed_precision`]
-    /// with the same refinement against the f64 matrix. On the reduced
-    /// route the device also forms the reduced system (in f64), refines the
-    /// solution against it and recovers the eliminated blocks, and assembles
-    /// the gradient, the Hessian and the trial costs from the model's
-    /// constraints when they all have a device form
-    /// ([`Self::with_gpu_assembly`]); otherwise the Hessian's values are
-    /// uploaded for every damped solve. On the whole-system route the
-    /// matrix's values are uploaded and the refinement runs on the CPU. The
-    /// symbolic analysis stays on the CPU. Solvers given clones
-    /// of one [`GpuDevice`] share its stream and buffers (see there).
-    /// `None` (the default) factors on the CPU. Ignored unless the supernodal route runs at all
-    /// (conjugate gradients stay on the CPU); a device whose runtime is not
-    /// compiled in fails the solve with [`SetupError::SolverUnavailable`].
+    /// The GPU the supernodal block route runs on (features `gpu-cuda`,
+    /// `gpu-hip`, `gpu-metal`, `gpu-cpu`); `None`, the default, is the CPU.
+    ///
+    /// The device does the whole damped solve: it forms the system it
+    /// factorizes (the reduced one, or the whole system with nothing
+    /// eliminated), factorizes it in the solver's scalar or in `f32` under
+    /// [`Self::with_mixed_precision`], solves, refines and recovers the
+    /// eliminated blocks. It also assembles the gradient, the Hessian and
+    /// the trial costs when the model's constraints all have a device form
+    /// ([`Self::with_gpu_assembly`]), and the LM loop's vectors then stay
+    /// on the device; otherwise the Hessian's values are uploaded for every
+    /// damped solve. The symbolic analysis stays on the CPU.
+    ///
+    /// Solvers given clones of one [`GpuDevice`] share its stream and
+    /// buffers. Ignored unless the supernodal block route runs (conjugate
+    /// gradients stay on the CPU); a device whose runtime is not compiled
+    /// in fails the solve with [`SetupError::SolverUnavailable`].
+    ///
+    /// ```ignore
+    /// let opts = SparseFaerOptions::default().with_gpu(Some(GpuDevice::cuda(0)));
+    /// ```
     pub fn with_gpu(mut self, gpu: Option<GpuDevice>) -> Self {
         self.gpu = gpu;
         self
     }
 
-    /// Whether the reduced route on a GPU ([`Self::with_gpu`]) also
-    /// assembles there: the gradient, the Hessian's tile values and the
-    /// trial costs computed on the device from the model's constraints, so
-    /// the Hessian never crosses to it. Taken when the root's every
-    /// constraint has a device form
-    /// ([`LmProblemInternals::device_unsupported`] says why not otherwise);
-    /// the structure's first assembly stays on the CPU. On by default.
+    /// Whether a solve on a GPU ([`Self::with_gpu`]) also assembles there:
+    /// the gradient, the Hessian's tile values and the trial costs computed
+    /// on the device from the model's constraints, so the Hessian never
+    /// crosses to it. Taken when the root's every constraint has a device
+    /// form ([`LmProblemInternals::device_unsupported`] says why not
+    /// otherwise). On by default.
     pub fn with_gpu_assembly(mut self, on: bool) -> Self {
         self.gpu_assembly = on;
         self
@@ -5914,11 +5918,10 @@ impl Refine {
 
     /// Refine `x`, the solution of `a x = b` through a reduced-precision
     /// factor, as [`MixedPrecision`] describes: `correct` solves that factor
-    /// for the correction, in place on an f64 vector (a device's solve can
-    /// fail, which ends the refinement with its failure). Returns the steps
-    /// taken, the final residual norm, and whether it stayed above the
-    /// tolerance. `lap` accumulates the solve and residual times for the
-    /// verbose log.
+    /// for the correction, in place on an f64 vector. Returns the steps
+    /// taken, the final residual norm, the norm of `b`, and whether the
+    /// residual stayed above the tolerance. `lap` accumulates the solve and
+    /// residual times for the verbose log.
     fn refine<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal>(
         &mut self,
         a: &arael_faer::bsc::SparseBlockColMat<SparseIndex, T>,
@@ -5929,8 +5932,8 @@ impl Refine {
         lap: &mut impl FnMut(&mut f64),
         t_solve: &mut f64,
         t_residual: &mut f64,
-        mut correct: impl FnMut(&mut [f64]) -> Result<(), DeviceFailure>,
-    ) -> Result<(usize, f64, f64, bool), DeviceFailure> {
+        mut correct: impl FnMut(&mut [f64]),
+    ) -> (usize, f64, f64, bool) {
         // The refinement runs in f64 whatever T: the residual accumulated in
         // f64 from the matrix's entries, the iterate kept in f64 until it is
         // handed back. For an f64 solver that is the native arithmetic; for
@@ -5953,7 +5956,7 @@ impl Refine {
         lap(t_residual);
         while rnorm > tol && steps < mp.max_refinements {
             self.x_prev.copy_from_slice(&self.x64);
-            correct(&mut self.r)?;
+            correct(&mut self.r);
             for (xi, di) in self.x64.iter_mut().zip(&self.r) {
                 *xi += *di;
             }
@@ -5979,7 +5982,7 @@ impl Refine {
         if short {
             self.shortfalls += 1;
         }
-        Ok((steps, rnorm, bnorm, short))
+        (steps, rnorm, bnorm, short)
     }
 }
 
@@ -6291,12 +6294,16 @@ impl<T: crate::utils::Float> SnNumeric<T> {
 }
 
 impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> SnNumeric<T> {
-    /// Factor `a` and solve `a x = b` into `x`. The inner `Err` when the
+    /// Factor `a` on the CPU and solve `a x = b` into `x`. `Err` when the
     /// factorization fails (a pivot that is not positive; the caller raises
-    /// lambda), the outer one when a device operation fails.
+    /// lambda).
     ///
     /// On the mixed route the factor is `f32` and the solution is refined
-    /// against `a` as [`MixedPrecision`] describes, the counters updated.
+    /// against `a` as [`MixedPrecision`] describes, the counters updated. A
+    /// solver with a device factor does not come here: its damped solves
+    /// run on the device through its reduction
+    /// ([`GpuSolver::solve_reduced`](crate::gpu_solver::GpuSolver::solve_reduced),
+    /// or the resident loop).
     fn solve(
         &mut self,
         sn: &arael_faer::supernodal::SupernodalSymbolic,
@@ -6305,8 +6312,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         x: &mut [T],
         threads: usize,
         verbose: bool,
-    ) -> Result<Result<(), arael_faer::supernodal::SupernodalError>, DeviceFailure> {
+    ) -> Result<(), arael_faer::supernodal::SupernodalError> {
         use arael_faer::supernodal::{supernodal_factorize, supernodal_factorize_as, supernodal_solve, supernodal_solve_as};
+        #[cfg(feature = "gpu")]
+        assert!(self.gpu_solver.is_none(), "a device factor solves through its reduction, not from host values");
         // Where the time goes, for the verbose log only: the clock is not
         // read otherwise.
         let mut clock = verbose.then(std::time::Instant::now);
@@ -6318,48 +6327,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
         };
         let (mut t_factor, mut t_solve, mut t_residual) = (0.0, 0.0, 0.0);
-        // The device factor: in the solver's scalar, or in f32 with the
-        // refinement below driving the device solve.
-        #[cfg(feature = "gpu")]
-        {
-            if let Some(g) = self.gpu_solver.as_deref_mut() {
-                if let Err(e) = g.factorize(a.vals())? {
-                    return Ok(Err(e));
-                }
-                let (runtime, precision) = (g.runtime(), g.precision());
-                lap(&mut t_factor);
-                x.copy_from_slice(b);
-                g.solve(x)?;
-                lap(&mut t_solve);
-                let refined = match self.mixed {
-                    Some(mp) if mp.max_refinements > 0 => {
-                        Some(self.rf.refine(a, b, x, mp, threads, &mut lap, &mut t_solve, &mut t_residual, |r| g.solve_f64(r))?)
-                    }
-                    _ => None,
-                };
-                if verbose {
-                    match refined {
-                        None => info!("gpu supernodal ({runtime}, {:?}): factor {:.1} ms, solve {:.1} ms", precision, t_factor, t_solve),
-                        Some((steps, rnorm, bnorm, short)) => info!(
-                            "gpu supernodal ({runtime}, f32): {} refinement steps, relative residual {:.1e}{}; factor {:.1} ms, {} solves {:.1} ms, {} residuals {:.1} ms",
-                            steps,
-                            if bnorm > 0.0 { rnorm / bnorm } else { 0.0 },
-                            if short { " -- short of tolerance" } else { "" },
-                            t_factor,
-                            steps + 1,
-                            t_solve,
-                            steps + 1,
-                            t_residual,
-                        ),
-                    }
-                }
-                return Ok(Ok(()));
-            }
-        }
         let Some(mp) = self.mixed else {
-            if let Err(e) = supernodal_factorize(sn, a, &mut self.factor, &mut self.ctx, threads) {
-                return Ok(Err(e));
-            }
+            supernodal_factorize(sn, a, &mut self.factor, &mut self.ctx, threads)?;
             lap(&mut t_factor);
             x.copy_from_slice(b);
             supernodal_solve(sn, &self.factor, x, &mut self.ctx, threads);
@@ -6367,11 +6336,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if verbose {
                 info!("supernodal: factor {:.1} ms, solve {:.1} ms", t_factor, t_solve);
             }
-            return Ok(Ok(()));
+            return Ok(());
         };
-        if let Err(e) = supernodal_factorize_as(sn, a, &mut self.factor32, &mut self.ctx32, threads) {
-            return Ok(Err(e));
-        }
+        supernodal_factorize_as(sn, a, &mut self.factor32, &mut self.ctx32, threads)?;
         lap(&mut t_factor);
         x.copy_from_slice(b);
         supernodal_solve_as(sn, &self.factor32, x, &mut self.ctx32, threads);
@@ -6380,12 +6347,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if verbose {
                 info!("mixed precision: factor {:.1} ms, solve {:.1} ms, no refinement", t_factor, t_solve);
             }
-            return Ok(Ok(()));
+            return Ok(());
         }
         let (steps, rnorm, bnorm, short) = self.rf.refine(a, b, x, mp, threads, &mut lap, &mut t_solve, &mut t_residual, |r| {
             supernodal_solve_as(sn, &self.factor32, r, &mut self.ctx32, threads);
-            Ok(())
-        })?;
+        });
         if verbose {
             info!(
                 "mixed precision: {} refinement steps, relative residual {:.1e}{}; factor {:.1} ms, {} solves {:.1} ms, {} residuals {:.1} ms",
@@ -6399,7 +6365,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 t_residual,
             );
         }
-        Ok(Ok(()))
+        Ok(())
     }
 
     /// Write the counters into the plan, on the mixed route.
@@ -7252,7 +7218,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             f32_factor: self.sn_num.mixed.is_some(),
             gpu_factor: self.sn_num.gpu_active(),
             gpu_assembly: false,
-            gpu_f32_reduction: false,
+            gpu_f32_reduction: self.sn_num.gpu_f32_reduction(),
             refinements: None,
             refinement_shortfalls: None,
         });
@@ -7434,8 +7400,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     }
 }
 
-/// The LM loop on the device: the reduced GPU route with the device
-/// assembly. The parameters and the trial point stay there, f64 whatever
+/// The LM loop on the device: a GPU solve (reduced or whole system) with
+/// the device assembly. The parameters and the trial point stay there, f64 whatever
 /// `T`, and each attempt makes one wait for its status and scalars.
 #[cfg(feature = "gpu")]
 impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> ResidentLoop<T> for SparseFaer<T> {
@@ -8677,7 +8643,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if self.sn_active {
                 let sn = self.sn_sym.as_ref().unwrap();
                 let threads = self.ctx.threads();
-                if self.sn_num.solve(sn, h, grad, delta, threads, self.verbose)?.is_err() {
+                if self.sn_num.solve(sn, h, grad, delta, threads, self.verbose).is_err() {
                     return Ok(false);
                 }
                 self.sn_num.report_into(&mut self.plan);
@@ -8793,7 +8759,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let threads = self.ctx.threads();
             if self
                 .sn_num
-                .solve(sn, s, &self.rhs_kept, &mut self.x_kept, threads, self.verbose)?
+                .solve(sn, s, &self.rhs_kept, &mut self.x_kept, threads, self.verbose)
                 .is_err()
             {
                 return Ok(false);
@@ -9595,7 +9561,7 @@ mod tests {
 
         let mut rf = super::Refine::default();
         let mut x = [1.0f64, 1.0];
-        let (steps, rnorm, _, short) = rf.refine(&a, &[2.0, f64::NAN], &mut x, mp, 1, &mut lap, &mut ts, &mut tr, |_| Ok(())).unwrap();
+        let (steps, rnorm, _, short) = rf.refine(&a, &[2.0, f64::NAN], &mut x, mp, 1, &mut lap, &mut ts, &mut tr, |_| ());
         assert!(steps == 0 && rnorm.is_nan() && short && rf.shortfalls == 1, "a NaN in b: {steps} steps, norm {rnorm}, short {short}");
 
         // x off the solution (1, 1) of b = (2, 4) by (0.5, 0): the residual is (1, 0)
@@ -9604,9 +9570,7 @@ mod tests {
         let (steps, rnorm, _, short) = rf
             .refine(&a, &[2.0, 4.0], &mut x, mp, 1, &mut lap, &mut ts, &mut tr, |r| {
                 r[0] = f64::NAN;
-                Ok(())
-            })
-            .unwrap();
+            });
         assert!(steps == 1 && rnorm == 1.0 && short, "a NaN correction: {steps} steps, norm {rnorm}, short {short}");
         assert_eq!(x, [0.5, 1.0], "the step is undone");
     }

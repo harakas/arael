@@ -2398,6 +2398,27 @@ fn a_3d_pose_graph_assembles_and_solves_on_the_device_as_on_the_cpu() {
     }
 }
 
+/// An f32 solve of the whole system forms it on the device in f32, as the
+/// reduced route forms S, or in the wide values with
+/// `GpuDevice::with_wide_schur`, and the plan says which.
+#[test]
+fn an_f32_whole_system_solve_reports_its_systems_scalar() {
+    for d in f32_devices() {
+        for wide_schur in [false, true] {
+            let gpu = d.clone().with_wide_schur(wide_schur);
+            let (poses, edges, prior) = pose_graph::<f32>(40, 3);
+            let mut s = Graph2DF { poses, edges, prior };
+            let mut x = Vec::new();
+            s.serialize(&mut x);
+            let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&whole_options(Some(&gpu)));
+            arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &to_the_optimum()).unwrap();
+            let plan = solver.plan().unwrap();
+            assert!(plan.gpu_factor && !plan.reduced, "{}", label(&d));
+            assert_eq!(plan.gpu_f32_reduction, !wide_schur, "{}, wide {wide_schur}", label(&d));
+        }
+    }
+}
+
 /// The f32 twin: the 3D pose graph assembles on the device as on the CPU,
 /// solves on every device to the f64 graph's optimum, and the solve writes
 /// the re-centred rotations back into the model.

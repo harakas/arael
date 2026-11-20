@@ -868,8 +868,8 @@ and its number of parameters -- measure.
 
 ## GPU
 
-With the `gpu-cuda` or `gpu-hip` feature the supernodal block route
-factorizes and solves on a GPU:
+With a GPU feature the supernodal block route runs on a GPU: `gpu-cuda`
+(NVIDIA), `gpu-hip` (AMD) or `gpu-metal` (Apple silicon):
 
 ```rust,ignore
 SparseFaer::from_options(&SparseFaerOptions::default()
@@ -878,6 +878,10 @@ SparseFaer::from_options(&SparseFaerOptions::default()
     .with_mixed_precision(Some(MixedPrecision::default()))
     .with_gpu(Some(GpuDevice::cuda(0))))                   // an f32 factor there, solves refined to f64
 ```
+
+Metal has no f64 (`GpuDevice::has_f64` is false): its wide values are
+df32 and its factor f32, so an f64 solve on it needs `MixedPrecision`,
+and an f64 root assembles on the CPU.
 
 `gpu-cpu` runs the same kernels on the CPU, `GpuDevice::cpu()`, for
 testing the GPU route on machines and CI runners without a GPU: the
