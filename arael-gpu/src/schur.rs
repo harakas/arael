@@ -210,8 +210,8 @@ pub struct GpuSchurParams {
     /// kept blocks' solution and the eliminated blocks' step, from the
     /// inputs rounded to f32 (an f32 root's [`Values`] already are), all
     /// stored in f32 (the step in the route's values). For a solve whose
-    /// factor is f32 and that does not refine against S: a refined solve
-    /// panics. Off: in the wide scalar.
+    /// factor is f32 and that does not refine against S (a refined solve
+    /// panics), or by conjugate gradients in f32. Off: in the wide scalar.
     pub f32_reduction: bool,
     /// Warps (32 threads) a kept block takes in the kernels whose lanes
     /// are its rows, the reduced right-hand side (over the block's

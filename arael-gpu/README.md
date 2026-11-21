@@ -299,7 +299,9 @@ takes a tile of S per lockstep unit (a warp or a wavefront):
 - `f32_reduction`: whether the reduction computes in f32, as the CPU's f32
   route (the eliminated blocks' factors, W, S, the reduced right-hand side
   and the eliminated blocks' step), for a solve with an f32 factor that
-  does not refine against S. The factors, W, S, the reduced right-hand
-  side and the kept blocks' solution are stored in f32. Off: in the wide
-  scalar. arael turns it on for an f32 solve, unless
-  `MixedPrecision` keeps the wide scalar.
+  does not refine against S, or by conjugate gradients in f32. The
+  factors, W, S, the reduced right-hand side and the kept blocks' solution
+  are stored in f32. Off: in the wide scalar. arael turns it on for an f32
+  model's factor without `MixedPrecision` (whose refinement takes S in the
+  wide scalar), and for conjugate gradients on an f32 model, or on an f64
+  model under `MixedPrecision`.
