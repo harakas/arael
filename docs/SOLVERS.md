@@ -888,6 +888,34 @@ Metal has no f64 (`GpuDevice::has_f64` is false): its wide values are
 df32 and its factor f32, so an f64 solve that factorizes needs
 `MixedPrecision` on it, and an f64 root assembles on the CPU.
 
+`GpuDevice::detect()` picks the machine's GPU instead of a named one,
+and `GpuDevice::available()` lists them (`GpuInfo`: the runtime, the
+index, the driver's name, whether it is integrated). The order is
+discrete GPUs before integrated ones, then CUDA, HIP, Metal, then by
+index. Only the runtimes compiled in are asked, a runtime that is not
+installed lists nothing, and no device is opened. A build with both
+`gpu-cuda` and `gpu-hip` runs on an NVIDIA card where there is one and
+on an AMD card where there is not:
+
+```rust,ignore
+// the GPU when the machine has one, else the CPU
+let gpu = GpuDevice::detect();
+// Metal has no f64
+let mixed = gpu.as_ref().is_some_and(|g| !g.has_f64()).then(MixedPrecision::default);
+SparseFaer::from_options(&SparseFaerOptions::default().with_gpu(gpu).with_mixed_precision(mixed))
+
+for gpu in GpuDevice::available() {
+    println!("{gpu}");                 // cuda:0 NVIDIA GeForce RTX 4090
+}
+```
+
+`detect` logs what it found and why a runtime listed nothing:
+
+```text
+gpu: detected cuda:0 NVIDIA GeForce RTX 4090, preferred to hip:0 AMD Radeon Graphics (integrated)
+gpu: detected hip:0 AMD Radeon Graphics (integrated) -- cuda: the CUDA driver library is not installed
+```
+
 `gpu-cpu` runs the same kernels on the CPU, `GpuDevice::cpu()`, for
 testing the GPU route on machines and CI runners without a GPU: the
 host's C++ compiler (`ARAEL_CPU_CXX`, else `CXX`, else `c++`; GCC or

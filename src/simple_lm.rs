@@ -2059,13 +2059,7 @@ fn render_route(plan: &SchurPlan) -> String {
 
 /// A GPU's runtime and index, as the report and the log name it: `cuda:0`.
 fn gpu_label(g: &GpuReport) -> String {
-    let runtime = match g.backend {
-        GpuBackend::Cuda => "cuda",
-        GpuBackend::Hip => "hip",
-        GpuBackend::Cpu => "cpu",
-        GpuBackend::Metal => "metal",
-    };
-    format!("{runtime}:{}", g.index)
+    format!("{}:{}", g.backend.label(), g.index)
 }
 
 /// What ran on the device and what on the host; `None` for a GPU the
@@ -5509,6 +5503,113 @@ impl GpuDevice {
             _ => None,
         }
     }
+
+    /// The GPUs of this machine, the preferred first: discrete before
+    /// integrated, then CUDA, HIP, Metal, then by index. Lists what the
+    /// runtimes compiled in (features `gpu-cuda`, `gpu-hip`, `gpu-metal`)
+    /// find, without opening a device; a runtime that is not installed
+    /// lists none. The CPU device is not a GPU and is not listed.
+    ///
+    /// ```ignore
+    /// for gpu in GpuDevice::available() {
+    ///     println!("{gpu}"); // cuda:0 NVIDIA GeForce RTX 4090
+    /// }
+    /// ```
+    pub fn available() -> std::vec::Vec<GpuInfo> {
+        probe_gpus().0
+    }
+
+    /// The preferred GPU of this machine, the first of
+    /// [`available`](Self::available); `None` without one. Logs what it
+    /// found.
+    ///
+    /// ```ignore
+    /// // NVIDIA's when there is one, else AMD's, else the CPU
+    /// let opts = SparseFaerOptions::default().with_gpu(GpuDevice::detect());
+    /// ```
+    pub fn detect() -> Option<GpuDevice> {
+        let (found, missing) = probe_gpus();
+        let why = if missing.is_empty() { String::new() } else { format!(" -- {}", missing.join("; ")) };
+        match found.split_first() {
+            Some((best, rest)) => {
+                let rest: std::vec::Vec<String> = rest.iter().map(|g| g.to_string()).collect();
+                let over = if rest.is_empty() { String::new() } else { format!(", preferred to {}", rest.join(", ")) };
+                info!("gpu: detected {best}{over}{why}");
+            }
+            None => info!("gpu: none detected{why}"),
+        }
+        found.first().map(GpuInfo::device)
+    }
+}
+
+/// A GPU of this machine, as [`GpuDevice::available`] lists it. Prints as
+/// the log names a device.
+///
+/// ```
+/// use arael::simple_lm::{GpuBackend, GpuInfo};
+/// let gpu = GpuInfo { backend: GpuBackend::Hip, index: 0, name: "AMD Radeon Graphics".into(), integrated: true };
+/// assert_eq!(gpu.to_string(), "hip:0 AMD Radeon Graphics (integrated)");
+/// let device = gpu.device(); // for SparseFaerOptions::with_gpu
+/// assert_eq!((device.backend(), device.index()), (GpuBackend::Hip, 0));
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuInfo {
+    pub backend: GpuBackend,
+    /// The device, as the runtime numbers them.
+    pub index: usize,
+    /// The device's name, as its driver reports it.
+    pub name: String,
+    /// Whether the device shares the host's memory: an integrated GPU.
+    pub integrated: bool,
+}
+
+impl GpuInfo {
+    /// The device, for [`SparseFaerOptions::with_gpu`].
+    pub fn device(&self) -> GpuDevice {
+        GpuDevice::new(self.backend, self.index)
+    }
+}
+
+impl fmt::Display for GpuInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{} {}{}", self.backend.label(), self.index, self.name, if self.integrated { " (integrated)" } else { "" })
+    }
+}
+
+/// Orders `gpus` by preference: discrete before integrated, then CUDA,
+/// HIP, Metal, the CPU device, then by index.
+fn prefer_gpus(gpus: &mut [GpuInfo]) {
+    let rank = |b: GpuBackend| match b {
+        GpuBackend::Cuda => 0,
+        GpuBackend::Hip => 1,
+        GpuBackend::Metal => 2,
+        GpuBackend::Cpu => 3,
+    };
+    gpus.sort_by_key(|g| (g.integrated, rank(g.backend), g.index));
+}
+
+/// The GPUs the runtimes compiled in list, the preferred first
+/// ([`prefer_gpus`]), and for each runtime that lists none, why.
+fn probe_gpus() -> (std::vec::Vec<GpuInfo>, std::vec::Vec<String>) {
+    #[allow(unused_mut)]
+    let (mut found, mut missing): (std::vec::Vec<GpuInfo>, std::vec::Vec<String>) = Default::default();
+    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", gpu_metal))]
+    let mut list = |backend: GpuBackend, listed: Result<std::vec::Vec<arael_gpu::DeviceInfo>, arael_gpu::GpuError>| match listed {
+        Ok(devices) if devices.is_empty() => missing.push(format!("{}: no device", backend.label())),
+        Ok(devices) => found.extend(devices.into_iter().map(|d| GpuInfo { backend, index: d.index, name: d.name, integrated: d.integrated })),
+        Err(arael_gpu::GpuError::Unavailable(why)) => missing.push(format!("{}: {why}", backend.label())),
+        Err(e) => missing.push(format!("{}: {e}", backend.label())),
+    };
+    #[cfg(feature = "gpu-cuda")]
+    list(GpuBackend::Cuda, arael_gpu::cuda::devices());
+    #[cfg(feature = "gpu-hip")]
+    list(GpuBackend::Hip, arael_gpu::hip::devices());
+    #[cfg(gpu_metal)]
+    list(GpuBackend::Metal, Ok(arael_gpu::metal::devices()));
+    #[cfg(not(any(feature = "gpu-cuda", feature = "gpu-hip", gpu_metal)))]
+    missing.push("no GPU runtime is compiled in (features gpu-cuda, gpu-hip, gpu-metal)".to_string());
+    prefer_gpus(&mut found);
+    (found, missing)
 }
 
 /// The GPU runtimes a [`GpuDevice`] can name.
@@ -5529,6 +5630,16 @@ impl GpuBackend {
     /// Whether the backend's devices compute in f64 ([`GpuDevice::has_f64`]).
     pub fn has_f64(self) -> bool {
         self != GpuBackend::Metal
+    }
+
+    /// The runtime as the report and the log name it: `cuda`.
+    fn label(self) -> &'static str {
+        match self {
+            GpuBackend::Cuda => "cuda",
+            GpuBackend::Hip => "hip",
+            GpuBackend::Cpu => "cpu",
+            GpuBackend::Metal => "metal",
+        }
     }
 }
 
@@ -10199,6 +10310,31 @@ pub(crate) fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut 
 #[cfg(test)]
 mod tests {
     use super::{ordering_for, ReducedOrdering};
+
+    /// GPUs are preferred discrete before integrated, then CUDA, HIP,
+    /// Metal, then by index: a machine with an AMD card and no NVIDIA one
+    /// takes the AMD card, and a discrete AMD card goes before an
+    /// integrated NVIDIA GPU.
+    #[test]
+    fn gpus_are_preferred_discrete_first_then_cuda_hip_metal() {
+        use super::{prefer_gpus, GpuBackend, GpuInfo};
+        let gpu = |backend, index, integrated| GpuInfo { backend, index, name: String::new(), integrated };
+        let order = |mut gpus: Vec<GpuInfo>| {
+            prefer_gpus(&mut gpus);
+            gpus.iter().map(|g| (g.backend, g.index)).collect::<Vec<_>>()
+        };
+        use GpuBackend::{Cuda, Hip, Metal};
+        // discrete NVIDIA, integrated AMD
+        assert_eq!(order(vec![gpu(Hip, 0, true), gpu(Cuda, 0, false)]), [(Cuda, 0), (Hip, 0)]);
+        // no NVIDIA card
+        assert_eq!(order(vec![gpu(Hip, 0, true)]), [(Hip, 0)]);
+        // a discrete AMD card before an integrated NVIDIA GPU
+        assert_eq!(order(vec![gpu(Cuda, 0, true), gpu(Hip, 0, false)]), [(Hip, 0), (Cuda, 0)]);
+        // among discrete cards CUDA first, each runtime's by index
+        assert_eq!(order(vec![gpu(Hip, 1, false), gpu(Cuda, 1, false), gpu(Hip, 0, false), gpu(Cuda, 0, false)]), [(Cuda, 0), (Cuda, 1), (Hip, 0), (Hip, 1)]);
+        // an integrated card of a runtime after its discrete one, whatever their indices
+        assert_eq!(order(vec![gpu(Hip, 0, true), gpu(Hip, 1, false), gpu(Metal, 0, true)]), [(Hip, 1), (Hip, 0), (Metal, 0)]);
+    }
 
     /// A residual norm that is not a number is not a converged refinement:
     /// with a NaN in the right-hand side no step is taken and the solve is
