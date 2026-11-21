@@ -985,6 +985,9 @@ fn symbolic<I: Index>(
         tile_off += part.rows.len();
         val_off += part.vals.last().copied().unwrap_or(0);
     }
+    // `I::truncate` wraps silently: the totals bound every offset above
+    assert!(val_off <= I::MAX.zx(), "S holds {val_off} values; the index type addresses at most {}", I::MAX.zx());
+    assert!(tile_off <= I::MAX.zx(), "S holds {tile_off} tiles; the index type addresses at most {}", I::MAX.zx());
     drop(tasks);
     let copy_ptr: Vec<I> = copy_at.iter().map(|&c| I::truncate(c)).collect();
     let kp: Vec<I> = kept_part.iter().map(|&x| I::truncate(x)).collect();

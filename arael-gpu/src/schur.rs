@@ -929,6 +929,11 @@ impl<D: Device> GpuSchur<D> {
         // the kept blocks' tile entries, written on the device from the
         // plan, and the tiles' pair counters the pairs' writing takes
         let (no, nkt, nt) = (p.no as usize, kt_words.len(), p.nt as usize);
+        // the kernels address these records' words in u32
+        let record_words = PX_REC * p.np + KO_REC * no + KT_REC * nkt + nt;
+        if record_words > u32::MAX as usize {
+            return Err(GpuError::Limit(format!("the reduction's {} pairs take {record_words} words of records, more than u32 addresses", p.np)));
+        }
         let kobs_at = 4 * PX_REC * p.np;
         let kt_at = kobs_at + 4 * KO_REC * no;
         let cur_at = kt_at + 4 * KT_REC * nkt;
