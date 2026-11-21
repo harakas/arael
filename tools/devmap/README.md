@@ -51,7 +51,7 @@ repository (see Regenerating): until they are there, the viewer shows
 | case | what it shows |
 |---|---|
 | `*-cpu` | The CPU device with its access probe: every read and write of every launch is measured (counts, distinct elements, pattern). Small problems. |
-| `*-cuda`, `*-hip` | A GPU at the benchmark's size: the launch sequence, the buffers and their sizes, and each launch's time on the device. A GPU does not count accesses: which sections a kernel reads or writes is from its signature, amounts read `n/m` (not measured). |
+| `*-cuda`, `*-hip`, `*-metal` | A GPU at the benchmark's size: the launch sequence, the buffers and their sizes, and each launch's time on the device. A GPU does not count accesses: which sections a kernel reads or writes is from its signature, amounts read `n/m` (not measured). |
 
 A GPU's case borrows its access patterns from the probed case of the same
 bench and model (`gen/devmap.py --patterns-from`): the pattern measured
@@ -79,6 +79,10 @@ is not their sum.
 (cd benchmarks/slam && cargo build -r --features gpu-cpu,gpu-cuda,gpu-trace --target-dir target-trace)
 tools/devmap/gen/run.sh cpu cuda
 ```
+
+On a Mac, build with `gpu-metal` in place of `gpu-cuda` and run
+`tools/devmap/gen/run.sh metal`; its f64 cases take the f32 factor,
+refined, as Metal has no f64.
 
 The probed CPU cases need `clang++` (`ARAEL_CPU_PROBE_CXX` names another).
 Traces go to `/tmp/devmap-traces` (`DEVMAP_TRACES`); `gen/regen.sh` builds

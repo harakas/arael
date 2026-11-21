@@ -1,4 +1,5 @@
 /target
+/target-trace
 /cpp/build
 /datasets/*.txt
 !/datasets/problem-49-7776-pre.txt

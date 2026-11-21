@@ -83,9 +83,17 @@ fn max_iters_from(v: Option<&str>) -> Option<usize> {
 /// warmup and the probes, as do the C++ runners. For one solve traced or
 /// probed (with BENCH_MAX_ITERS=1, one attempt); its first-iteration time is
 /// the solve's own when it was one clean accepted step, and it has no
-/// full-iter.
+/// full-iter. `0` or unset: the probes too; any other value is an error.
 pub fn solve_only() -> bool {
-    std::env::var("BENCH_SOLVE_ONLY").is_ok()
+    solve_only_from(std::env::var("BENCH_SOLVE_ONLY").ok().as_deref())
+}
+
+fn solve_only_from(v: Option<&str>) -> bool {
+    match v {
+        None | Some("0") => false,
+        Some("1") => true,
+        Some(other) => panic!("BENCH_SOLVE_ONLY={other}: expected 0 or 1"),
+    }
 }
 
 /// Drive the probes and the full solve, the full solve held to
@@ -179,6 +187,15 @@ mod tests {
         assert_eq!(max_iters_from(Some("3")), Some(3));
         for bad in ["0", "x", ""] {
             assert!(std::panic::catch_unwind(|| max_iters_from(Some(bad))).is_err(), "{bad:?} accepted");
+        }
+    }
+
+    /// BENCH_SOLVE_ONLY is 1 or 0 (or unset); anything else is an error.
+    #[test]
+    fn bench_solve_only_is_0_or_1() {
+        assert!(!solve_only_from(None) && !solve_only_from(Some("0")) && solve_only_from(Some("1")));
+        for bad in ["yes", "true", ""] {
+            assert!(std::panic::catch_unwind(|| solve_only_from(Some(bad))).is_err(), "{bad:?} accepted");
         }
     }
 }

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Traces the bal and slam benchmarks' device solves and turns them into the
-# viewer's cases (../data). Usage: gen/run.sh [cpu] [cuda] [hip] (default: cpu cuda).
+# viewer's cases (../data). Usage: gen/run.sh [cpu] [cuda] [hip] [metal] (default: cpu cuda).
 #
 # cpu:  the CPU device with its access probe (clang): small problems, every
 #       read and write measured. BAL_CPU_SIZES (default "49 138") and
@@ -8,10 +8,11 @@
 #       BAL_CPU_ATTEMPT_SIZES (default none) the bal problems probed for one
 #       attempt (BENCH_SOLVE_ONLY=1 BENCH_MAX_ITERS=1), too large to probe a
 #       whole solve.
-# cuda, hip: the GPU at the benchmark's size: the launch sequence and the
-#       buffers, reads and writes from the kernels' signatures.
+# cuda, hip, metal: the GPU at the benchmark's size: the launch sequence and
+#       the buffers, reads and writes from the kernels' signatures. Metal has
+#       no f64: its f64 cases take the f32 factor, refined (ARAEL_F32_FACTOR).
 #
-# Needs the benches built with the trace:
+# Needs the benches built with the trace (gpu-metal in place of gpu-cuda on a Mac):
 #   (cd benchmarks/bal  && cargo build -r --features gpu-cpu,gpu-cuda,gpu-trace --target-dir target-trace)
 #   (cd benchmarks/slam && cargo build -r --features gpu-cpu,gpu-cuda,gpu-trace --target-dir target-trace)
 set -e
@@ -73,6 +74,12 @@ for rt in "$@"; do
         trace $rt slam slam-900-f32-$rt "slam 900 poses, f32 model, $rt" "slam 900 poses" f32 SLAM_POSES=900 "SLAM_SYSTEMS=arael LM f32" SLAM_NO_MEM=1
         trace $rt slam slam-900-f64-$rt "slam 900 poses, f64 model, $rt" "slam 900 poses" f64 SLAM_POSES=900 "SLAM_SYSTEMS=arael LM f64" SLAM_NO_MEM=1
         ;;
-    *) echo "unknown runtime $rt (cpu, cuda, hip)"; exit 1 ;;
+    metal)
+        trace metal bal bal-372-f32-metal "bal Ladybug-372, f32 model, metal" "bal Ladybug-372" f32 BAL_ONLY=372 "BAL_SYSTEMS=arael LM f32 schur" BAL_NO_MEM=1
+        trace metal bal bal-372-f64-metal "bal Ladybug-372, f64 model, metal (f32 factor, refined)" "bal Ladybug-372" f64 BAL_ONLY=372 "BAL_SYSTEMS=arael LM f64 schur" BAL_NO_MEM=1 ARAEL_F32_FACTOR=4
+        trace metal slam slam-900-f32-metal "slam 900 poses, f32 model, metal" "slam 900 poses" f32 SLAM_POSES=900 "SLAM_SYSTEMS=arael LM f32" SLAM_NO_MEM=1
+        trace metal slam slam-900-f64-metal "slam 900 poses, f64 model, metal (f32 factor, refined)" "slam 900 poses" f64 SLAM_POSES=900 "SLAM_SYSTEMS=arael LM f64" SLAM_NO_MEM=1 ARAEL_F32_FACTOR=4
+        ;;
+    *) echo "unknown runtime $rt (cpu, cuda, hip, metal)"; exit 1 ;;
     esac
 done

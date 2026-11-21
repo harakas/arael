@@ -302,4 +302,4 @@ takes a tile of S per lockstep unit (a warp or a wavefront):
   does not refine against S. The factors, W, S, the reduced right-hand
   side and the kept blocks' solution are stored in f32. Off: in the wide
   scalar. arael turns it on for an f32 solve, unless
-  `GpuDevice::with_wide_schur` keeps the wide scalar.
+  `MixedPrecision` keeps the wide scalar.

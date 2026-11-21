@@ -18,8 +18,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -135,7 +137,7 @@ inline int full_iters(int wanted) {
     if (const char* m = getenv("BENCH_MAX_ITERS")) {
         char* end = nullptr;
         long n = strtol(m, &end, 10);
-        if (end == m || *end != '\0' || n < 1) {
+        if (end == m || *end != '\0' || n < 1 || n > INT_MAX) {
             fprintf(stderr, "BENCH_MAX_ITERS=%s: expected an iteration count of at least 1\n", m);
             exit(2);
         }
@@ -148,8 +150,15 @@ inline int full_iters(int wanted) {
 // as for the in-process rows. For one solve traced or probed (with
 // BENCH_MAX_ITERS=1, one attempt); the full solve stands in for the first
 // iteration's probe, so its first-iteration time counts only when it was one
-// clean accepted step, and there is no second.
-inline bool solve_only() { return getenv("BENCH_SOLVE_ONLY") != nullptr; }
+// clean accepted step, and there is no second. `0` or unset: the probes too;
+// any other value is an error.
+inline bool solve_only() {
+    const char* v = getenv("BENCH_SOLVE_ONLY");
+    if (v == nullptr || strcmp(v, "0") == 0) return false;
+    if (strcmp(v, "1") == 0) return true;
+    fprintf(stderr, "BENCH_SOLVE_ONLY=%s: expected 0 or 1\n", v);
+    exit(2);
+}
 
 // Fastest of PROBE_SUBROUNDS runs of the same capped solve, after a discarded
 // warmup. Solve is any callable: Result(int max_iters).
