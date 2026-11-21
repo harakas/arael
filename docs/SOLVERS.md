@@ -1215,13 +1215,23 @@ steps of a mixed-precision solve or the conjugate gradients' iterations:
 
 ```text
 [arael WARN] gpu: cuda:0 was given and is not used -- the reduced system is factored under its envelope, on the CPU. ...
-[arael INFO] gpu: cuda:0 NVIDIA GeForce RTX 4090 (sm_89), wide f64 -- assembly, damped solves and the LM loop on the device
+[arael INFO] gpu: cuda:0 NVIDIA GeForce RTX 4090 (sm_89), wide f64 -- assembly, damped solves and the LM loop on the device, f64 factor
 [arael INFO] 2/0: 273874->250676 / 23198.2, lambda=3.33333e-5 (step=9262, gpu=9201)
 [arael INFO] 2/0: 273874->250676 / 23198.2, lambda=3.33333e-5 (step=5103, gpu=5046, 2 refinement steps, residual 6.7e-13)
 [arael INFO] 2/0: 263165->247585 / 15580.2, lambda=3.33333e-5 (step=3692, gpu=3624, cg 38 iterations (64 queued in 3 rounds), residual 9.6e-4)
 ```
 
-`LmResult::report` prints it as a `gpu` block (see Reporting a solve).
+`LmResult::report` prints it as a `gpu` block (see Reporting a solve),
+and a `GpuReport` prints on one line, for a program that reports it
+without the verbose log:
+
+```rust,ignore
+if let Some(gpu) = &result.gpu {
+    println!("gpu: {gpu}");
+    // gpu: cuda:0 NVIDIA GeForce RTX 4090 (sm_89), wide f64 -- assembly, damped solves and the LM loop on the device, f64 factor
+    // gpu: cuda:0 -- not used: the solve took a route that does not run on a device
+}
+```
 
 ## Where the log goes
 

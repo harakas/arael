@@ -2078,13 +2078,9 @@ fn gpu_work(work: &GpuWork) -> Option<String> {
 fn log_gpu(gpu: Option<GpuReport>, plan: Option<SolverReport>, verbose: bool) {
     let Some(g) = gpu else { return };
     match gpu_work(&g.work) {
-        Some(work) => {
+        Some(_) => {
             if verbose {
-                let wide = match g.wide {
-                    GpuWide::F64 => "f64",
-                    GpuWide::Df32 => "df32",
-                };
-                info!("gpu: {} {} ({}), wide {wide} -- {work}", gpu_label(&g), g.name, g.target);
+                info!("gpu: {g}");
             }
         }
         None => {
@@ -5739,6 +5735,57 @@ pub struct GpuReport {
     /// Device buffers the device's state has allocated over its life
     /// ([`GpuDevice::buffers_created`]).
     pub buffers_created: usize,
+}
+
+/// One line: the device and what the solve did on it, or that it did not
+/// use it.
+///
+/// ```
+/// use arael::simple_lm::{GpuBackend, GpuReport, GpuSolve, GpuWide, GpuWork};
+/// let mut gpu = GpuReport {
+///     backend: GpuBackend::Cuda,
+///     index: 0,
+///     name: "NVIDIA GeForce RTX 4090".into(),
+///     target: "sm_89".into(),
+///     integrated: false,
+///     wide: GpuWide::F64,
+///     solve: Some(GpuSolve::Factor { f32: false }),
+///     f32_system: false,
+///     work: GpuWork::Loop,
+///     reserved_bytes: 0,
+///     buffers_created: 0,
+/// };
+/// assert_eq!(
+///     gpu.to_string(),
+///     "cuda:0 NVIDIA GeForce RTX 4090 (sm_89), wide f64 -- assembly, damped solves and the LM loop on the device, f64 factor"
+/// );
+/// gpu.work = GpuWork::Unused;
+/// assert_eq!(gpu.to_string(), "cuda:0 -- not used: the solve took a route that does not run on a device");
+/// ```
+impl fmt::Display for GpuReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some(work) = gpu_work(&self.work) else {
+            return write!(f, "{} -- not used: the solve took a route that does not run on a device", gpu_label(self));
+        };
+        let wide = match self.wide {
+            GpuWide::F64 => "f64",
+            GpuWide::Df32 => "df32",
+        };
+        let solve = match self.solve {
+            Some(GpuSolve::Factor { f32: true }) => ", f32 factor",
+            Some(GpuSolve::Factor { f32: false }) => ", f64 factor",
+            Some(GpuSolve::ConjugateGradients) => ", conjugate gradients",
+            None => "",
+        };
+        write!(
+            f,
+            "{} {} ({}{}), wide {wide} -- {work}{solve}",
+            gpu_label(self),
+            self.name,
+            self.target,
+            if self.integrated { ", integrated" } else { "" }
+        )
+    }
 }
 
 /// How a GPU solve solves its system on the device, the reduced one or the
