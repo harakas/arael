@@ -286,9 +286,9 @@ DEVICE void euler_advance(GLOBAL T* RESTRICT refr, GLOBAL const F* RESTRICT ev, 
             m[i * 3 + j] = v;
         }
     }
-    // q = 3 I - m^T m
+    // q = 3 I - m^T m (not `half`: a type in Metal)
     T q[9];
-    T zero = 0.0f, three = 3.0f, half = 0.5f;
+    T zero = 0.0f, three = 3.0f, one_half = 0.5f;
 #pragma unroll
     for (u32 i = 0; i < 3; i++) {
 #pragma unroll
@@ -306,7 +306,7 @@ DEVICE void euler_advance(GLOBAL T* RESTRICT refr, GLOBAL const F* RESTRICT ev, 
             T v = 0.0f;
 #pragma unroll
             for (u32 k = 0; k < 3; k++) v += m[i * 3 + k] * q[k * 3 + j];
-            refr[r0 + i * 3 + j] = v * half;
+            refr[r0 + i * 3 + j] = v * one_half;
         }
     }
 }
