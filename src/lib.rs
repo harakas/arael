@@ -1619,6 +1619,8 @@
 //! | `0.0276` | absolute cost improvement |
 //! | `lambda=2e-5` | damping in effect |
 //! | `(step=91)` | microseconds for this iteration |
+//! | `(step=2194, factor=229, solve=16)` | with the block supernodal Cholesky: its factorization and its solves |
+//! | `(step=899, gpu=889)` | on a GPU: the device's part |
 //!
 //! A Cholesky rejection prints a longer diagnostic line:
 //!

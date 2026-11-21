@@ -1509,7 +1509,8 @@ fn the_first_linearization_is_assembled_on_the_device() {
         let lines = lines.lock().unwrap();
         let name = label(&d);
         assert!(lines.iter().any(|l| l.starts_with("gpu:") && l.contains("its first assembly")), "{name}: {lines:#?}");
-        assert!(lines.iter().any(|l| l.starts_with(&format!("gpu schur ({name},"))), "{name}: {lines:#?}");
+        // each attempt's line has the device's time in it
+        assert!(lines.iter().any(|l| l.contains(" (step=") && l.contains(", gpu=")), "{name}: {lines:#?}");
         assert!((device.start_cost - cpu.start_cost).abs() <= 1e-12 * cpu.start_cost, "{name}");
         assert!((device.end_cost - cpu.end_cost).abs() <= 1e-9 * cpu.end_cost, "{name}");
     }
@@ -1540,7 +1541,8 @@ fn an_f32_first_linearization_is_assembled_on_the_device() {
         let lines = lines.lock().unwrap();
         let name = label(&d);
         assert!(lines.iter().any(|l| l.starts_with("gpu:") && l.contains("its first assembly")), "{name}: {lines:#?}");
-        assert!(lines.iter().any(|l| l.starts_with(&format!("gpu schur ({name},"))), "{name}: {lines:#?}");
+        // each attempt's line has the device's time in it
+        assert!(lines.iter().any(|l| l.contains(" (step=") && l.contains(", gpu=")), "{name}: {lines:#?}");
         let (start, cpu_start) = (device.start_cost as f64, cpu.start_cost as f64);
         assert!((start - cpu_start).abs() <= 1e-5 * cpu_start, "{name}: start {start} against {cpu_start}");
         let end = device.end_cost as f64;

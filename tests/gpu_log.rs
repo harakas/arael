@@ -103,11 +103,18 @@ fn a_solve_logs_what_its_gpu_does() {
         (line.1.clone(), nums)
     };
 
+    // an attempt's line of the verbose log, `i/j: a->b / d, lambda=l
+    // (step=us ...)`: all of them, and the lines the device's attempts used
+    // to get beside them
+    let attempts = |log: &[(Level, String)]| -> Vec<String> { log.iter().filter(|(_, m)| m.contains(" (step=")).map(|(_, m)| m.clone()).collect() };
+    let beside = |log: &[(Level, String)]| log.iter().filter(|(_, m)| m.starts_with("gpu schur")).count();
+
     // no GPU: nothing about one
     let (log, _) = solve(supernodal(), true);
     assert_eq!(about_gpu(&log), 0, "{log:?}");
     let (line, nums) = setup_items(&log);
     assert!(!line.contains("GPU") && nums.len() == 6, "{line}");
+    assert!(!attempts(&log).is_empty() && attempts(&log).iter().all(|l| !l.contains("gpu=")), "{log:?}");
 
     // on the device: no warning, and quiet unless verbose
     let (log, r) = solve(supernodal().with_gpu(Some(GpuDevice::cpu())), false);
@@ -119,15 +126,30 @@ fn a_solve_logs_what_its_gpu_does() {
     assert!(line.1.contains(", wide f64 -- ") && line.1.contains("on the device"), "{}", line.1);
     let (line, nums) = setup_items(&log);
     assert!(line.contains(" + ordering it ") && line.contains(" + opening the GPU ") && nums.len() == 7, "{line}");
+    // each attempt's line ends with the device's time in it, in
+    // microseconds, and no line of the device's own stands beside it
+    let lines = attempts(&log);
+    assert!(!lines.is_empty() && beside(&log) == 0, "{log:?}");
+    for l in &lines {
+        let us = l.rsplit_once(", gpu=").and_then(|(_, t)| t.strip_suffix(')')).unwrap_or_else(|| panic!("the device's time in `{l}`"));
+        assert!(us.parse::<u64>().is_ok_and(|us| us > 0), "{l}");
+    }
+
+    // mixed precision: the attempt's line has the refinement too
+    let (log, _) = solve(supernodal().with_mixed_precision(Some(Default::default())).with_gpu(Some(GpuDevice::cpu())), true);
+    let lines = attempts(&log);
+    assert!(!lines.is_empty() && beside(&log) == 0, "{log:?}");
+    assert!(lines.iter().all(|l| l.contains(", gpu=") && l.contains(" refinement step") && l.contains(", residual ")), "{lines:?}");
 
     // conjugate gradients on the formed reduced system run on the device
-    // too: no warning, and under verbose each solve's iterations
+    // too: no warning, and under verbose each attempt's iterations
     let (log, r) = solve(reduced().with_iterative_schur(Default::default()).with_gpu(Some(GpuDevice::cpu())), true);
     let g = r.gpu.unwrap();
     assert!(g.solve == Some(arael::simple_lm::GpuSolve::ConjugateGradients) && !g.f32_system, "an f64 solve, its system in f64: {g:?}");
     assert!(unused(&log).is_empty(), "{log:?}");
-    let line = log.iter().find(|(_, m)| m.starts_with("gpu schur (cpu, cg): ")).unwrap_or_else(|| panic!("a solve's line in {log:?}"));
-    assert!(line.1.contains("conjugate gradients") && line.1.contains(" iterations (") && line.1.contains(" queued) in 1 round"), "{}", line.1);
+    let lines = attempts(&log);
+    assert!(!lines.is_empty() && beside(&log) == 0, "{log:?}");
+    assert!(lines.iter().all(|l| l.contains(", gpu=") && l.contains(", cg ") && l.contains(" iteration") && l.contains(" queued in 1 round), residual ")), "{lines:?}");
 
     // mixed precision with conjugate gradients: on the device the reduced
     // system in f32, no warning; on the CPU ignored, with a warning

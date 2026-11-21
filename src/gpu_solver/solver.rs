@@ -226,13 +226,6 @@ impl<T: crate::utils::Float, D: Device> DeviceSolver<T, D> {
 }
 
 impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolver<T, D> {
-    fn runtime(&self) -> String {
-        match self.wide {
-            Wide::F64 => D::RUNTIME.to_string(),
-            Wide::Df32 => format!("{} df32", D::RUNTIME),
-        }
-    }
-
     fn solve(&self) -> GpuSolve {
         match &self.solve {
             Solve::Factor { factor, .. } => GpuSolve::Factor { f32: factor.precision() == GpuPrecision::F32 },

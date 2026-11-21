@@ -2419,6 +2419,22 @@ pub trait LmSolver<T: Float> {
         None
     }
 
+    /// What the backend adds to the verbose log's line of the LAST attempt
+    /// (a damped solve, or an attempt of its loop on a device), after the
+    /// attempt's `step=`: where its microseconds went (a factorization and
+    /// its solves, a GPU's part), a refinement's steps, the conjugate
+    /// gradients' iterations. Taken: a second call gives `None`. `None`,
+    /// the default, for nothing to add, and when [`LmConfig::verbose`] is
+    /// off.
+    ///
+    /// ```text
+    /// 3/0: 87186.4->86769.8 / 416.654, lambda=4e-10 (step=2194, factor=229, solve=16)
+    /// 3/0: 87186.4->86769.8 / 416.654, lambda=4e-10 (step=3258, gpu=3201)
+    /// ```
+    fn attempt_note(&mut self) -> Option<String> {
+        None
+    }
+
     /// The device's own time in this solve so far, from a backend on a
     /// GPU, surfaced in [`LmTiming::gpu`]. `None` without a GPU, and when
     /// [`LmConfig::gather_timing`] is off.
@@ -3746,11 +3762,14 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             if config.verbose {
                 let step_us = timer.map_or(0, |t| t.elapsed().as_micros());
                 timer = Some(Instant::now());
-                info!("{}/{}: {}->{} / {}, lambda={} (step={})",
+                // what the backend adds about this attempt: a GPU's time in
+                // it, its refinement steps or its iterations
+                let note = solver.attempt_note().map_or(String::new(), |n| format!(", {n}"));
+                info!("{}/{}: {}->{} / {}, lambda={} (step={}{})",
                     iter, inner,
                     G(end_cost.to_f64().unwrap()), G(new_cost.to_f64().unwrap()),
                     G((end_cost - new_cost).to_f64().unwrap()), G(lambda.to_f64().unwrap()),
-                    step_us);
+                    step_us, note);
             }
 
             // Wanted by both outcomes below, and by the parameter-tolerance test.
@@ -6886,7 +6905,14 @@ impl<T: crate::utils::Float> SnNumeric<T> {
 impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> SnNumeric<T> {
     /// Factor `a` on the CPU and solve `a x = b` into `x`. `Err` when the
     /// factorization fails (a pivot that is not positive; the caller raises
-    /// lambda).
+    /// lambda). `verbose`, returns what the solve adds to its attempt's
+    /// line of the log ([`LmSolver::attempt_note`]): where its time went,
+    /// in microseconds, and on the mixed route the refinement.
+    ///
+    /// ```text
+    /// factor=412, solve=31
+    /// factor=4100, solves=900, residuals=300, 2 refinement steps, residual 6.7e-13
+    /// ```
     ///
     /// On the mixed route the factor is `f32` and the solution is refined
     /// against `a` as [`MixedPrecision`] describes, the counters updated. A
@@ -6902,7 +6928,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         x: &mut [T],
         threads: usize,
         verbose: bool,
-    ) -> Result<(), arael_faer::supernodal::SupernodalError> {
+    ) -> Result<Option<String>, arael_faer::supernodal::SupernodalError> {
         use arael_faer::supernodal::{supernodal_factorize, supernodal_factorize_as, supernodal_solve, supernodal_solve_as};
         // Where the time goes, for the verbose log only: the clock is not
         // read otherwise.
@@ -6914,6 +6940,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 *t = now;
             }
         };
+        // a lapped time, in the log's microseconds
+        let us = |ms: f64| (ms * 1e3).round() as u64;
         let (mut t_factor, mut t_solve, mut t_residual) = (0.0, 0.0, 0.0);
         let Some(mp) = self.mixed else {
             supernodal_factorize(sn, a, &mut self.factor, &mut self.ctx, threads)?;
@@ -6921,10 +6949,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             x.copy_from_slice(b);
             supernodal_solve(sn, &self.factor, x, &mut self.ctx, threads);
             lap(&mut t_solve);
-            if verbose {
-                info!("supernodal: factor {:.1} ms, solve {:.1} ms", t_factor, t_solve);
-            }
-            return Ok(());
+            return Ok(verbose.then(|| format!("factor={}, solve={}", us(t_factor), us(t_solve))));
         };
         supernodal_factorize_as(sn, a, &mut self.factor32, &mut self.ctx32, threads)?;
         lap(&mut t_factor);
@@ -6932,28 +6957,23 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         supernodal_solve_as(sn, &self.factor32, x, &mut self.ctx32, threads);
         lap(&mut t_solve);
         if mp.max_refinements == 0 {
-            if verbose {
-                info!("mixed precision: factor {:.1} ms, solve {:.1} ms, no refinement", t_factor, t_solve);
-            }
-            return Ok(());
+            return Ok(verbose.then(|| format!("factor={}, solve={}, no refinement", us(t_factor), us(t_solve))));
         }
         let (steps, rnorm, bnorm, short) = self.rf.refine(a, b, x, mp, threads, &mut lap, &mut t_solve, &mut t_residual, |r| {
             supernodal_solve_as(sn, &self.factor32, r, &mut self.ctx32, threads);
         });
-        if verbose {
-            info!(
-                "mixed precision: {} refinement steps, relative residual {:.1e}{}; factor {:.1} ms, {} solves {:.1} ms, {} residuals {:.1} ms",
+        Ok(verbose.then(|| {
+            format!(
+                "factor={}, solves={}, residuals={}, {} refinement step{}, residual {:.1e}{}",
+                us(t_factor),
+                us(t_solve),
+                us(t_residual),
                 steps,
+                if steps == 1 { "" } else { "s" },
                 if bnorm > 0.0 { rnorm / bnorm } else { 0.0 },
-                if short { " -- short of tolerance" } else { "" },
-                t_factor,
-                steps + 1,
-                t_solve,
-                steps + 1,
-                t_residual,
-            );
-        }
-        Ok(())
+                if short { " short of tolerance" } else { "" },
+            )
+        }))
     }
 
     /// Write the counters into the plan, on the mixed route.
@@ -7045,6 +7065,10 @@ pub struct SparseFaer<T = f64> {
     plan: Option<SchurPlan>,
     // From LmConfig via configure(): explain the decisions below.
     verbose: bool,
+    // What the last damped solve (the block supernodal factor's, or a
+    // GPU's) adds to its attempt's line of the verbose log
+    // (LmSolver::attempt_note), until taken.
+    attempt_note: Option<String>,
     // Read the clock at all? Set from LmConfig::gather_timing by configure().
     // Nothing here reads it otherwise -- the wasm build has no working clock.
     measure: bool,
@@ -7165,6 +7189,7 @@ impl<T> SparseFaer<T> {
             supernodal: true,
             plan: None,
             verbose: false,
+            attempt_note: None,
             measure: false,
             setup_clock: None,
             setup: SetupTiming::default(),
@@ -8059,63 +8084,66 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let clock = self.verbose.then(Instant::now);
         let solved = self.gpu.solver_mut().solve_reduced(h.vals(), grad, delta)?;
         let ok = solved.is_some();
-        self.note_gpu_solve(solved, clock, false);
+        self.note_gpu_solve(solved, clock);
         Ok(ok)
     }
 
     /// A device solve counted (a factor's refinement steps, the conjugate
-    /// gradients' iterations) and, verbose, reported, timed from `clock`;
-    /// `looped` for an attempt of the loop on the device, which damps and
-    /// takes the trial cost there too. `None` for a failed one.
+    /// gradients' iterations) and, verbose, noted for its attempt's line of
+    /// the log ([`LmSolver::attempt_note`]) with its time from `clock`: the
+    /// reduction, the solve and the back-substitution, and in the loop on
+    /// the device the damping and the trial cost too. `None` for a failed
+    /// one, which leaves no note.
     #[cfg(feature = "gpu")]
-    fn note_gpu_solve(&mut self, stats: Option<crate::gpu_solver::SolveStats>, clock: Option<Instant>, looped: bool) {
+    fn note_gpu_solve(&mut self, stats: Option<crate::gpu_solver::SolveStats>, clock: Option<Instant>) {
         use crate::gpu_solver::SolveStats;
+        self.attempt_note = None;
         let Some(stats) = stats else { return };
-        let (scalar, solve, detail) = match stats {
+        let s = |n: usize| if n == 1 { "" } else { "s" };
+        let detail = match stats {
             SolveStats::Refined(st) => {
                 self.sn_num.rf.steps += st.steps;
                 if st.short {
                     self.sn_num.rf.shortfalls += 1;
                 }
                 self.sn_num.report_into(&mut self.plan);
-                let detail = if self.sn_num.mixed.is_some() {
+                if self.sn_num.mixed.is_some() {
                     format!(
-                        ", {} refinement steps, relative residual {:.1e}{}",
+                        ", {} refinement step{}, residual {:.1e}{}",
                         st.steps,
+                        s(st.steps),
                         if st.bnorm > 0.0 { st.rnorm / st.bnorm } else { 0.0 },
-                        if st.short { " -- short of tolerance" } else { "" }
+                        if st.short { " short of tolerance" } else { "" }
                     )
                 } else {
                     String::new()
-                };
-                (if self.gpu.solver_ref().solve() == (GpuSolve::Factor { f32: true }) { "F32" } else { "F64" }, "factor + solve", detail)
+                }
             }
             SolveStats::Cg(st) => {
                 self.cg_iters += st.iters;
                 if let Some(plan) = self.plan.as_mut() {
                     plan.cg_iterations = Some(self.cg_iters);
                 }
-                let detail = format!(
-                    ", {} iterations ({} queued) in {} round{}, relative residual {:.1e}{}",
+                format!(
+                    ", cg {} iteration{} ({} queued in {} round{}), residual {:.1e}{}",
                     st.iters,
+                    s(st.iters),
                     st.queued,
                     st.rounds,
-                    if st.rounds == 1 { "" } else { "s" },
+                    s(st.rounds),
                     st.relative_residual,
                     if st.converged {
                         ""
                     } else if st.breakdown {
-                        " -- stopped on a direction without positive curvature"
+                        " stopped on a direction without positive curvature"
                     } else {
-                        " -- at the iteration cap"
+                        " at the iteration cap"
                     }
-                );
-                ("cg", "conjugate gradients", detail)
+                )
             }
         };
         if let Some(t) = clock {
-            let what = if looped { format!("damp + reduce + {solve} + back-substitution + trial cost") } else { format!("reduce + {solve} + back-substitution") };
-            info!("gpu schur ({}, {scalar}): {what} {:.1} ms{detail}", self.gpu.solver_ref().runtime(), t.elapsed().as_secs_f64() * 1e3);
+            self.attempt_note = Some(format!("gpu={}{detail}", t.elapsed().as_micros()));
         }
     }
 }
@@ -8136,7 +8164,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     fn attempt(&mut self, lambda: T) -> Result<ResidentAttempt, DeviceFailure> {
         let clock = self.verbose.then(Instant::now);
         let (stats, attempt) = self.gpu.solver_mut().attempt(arael_faer::schur::SchurReal::to_f64(lambda))?;
-        self.note_gpu_solve(stats, clock, true);
+        self.note_gpu_solve(stats, clock);
         Ok(attempt)
     }
 
@@ -8257,6 +8285,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             return self.gpu.solver.as_ref().and_then(|g| g.timing());
         }
         None
+    }
+
+    fn attempt_note(&mut self) -> Option<String> {
+        self.attempt_note.take()
     }
 
     // The whole-system block route's pattern, binding and symbolic, when the
@@ -9353,6 +9385,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     fn solve_damped(&mut self, n: usize, matrix: &mut FaerMatrix<T>, diagonal: &[T], damp: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> Result<bool, SolveFailureKind> {
         // Copied out so the scratch buffers below can be borrowed mutably.
         let par = self.par;
+        // this solve's note for its attempt's line of the log, when it has one
+        self.attempt_note = None;
 
         // Declined reduction: the Hessian is already the scalar CSC we
         // factorize. Damp it and solve -- no block storage, no reduce, no
@@ -9411,8 +9445,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 assert!(!self.gpu.built(), "a device factor solves through its reduction, not from host values");
                 let sn = self.sn_sym.as_ref().unwrap();
                 let threads = self.ctx.threads();
-                if self.sn_num.solve(sn, h, grad, delta, threads, self.verbose).is_err() {
-                    return Ok(false);
+                match self.sn_num.solve(sn, h, grad, delta, threads, self.verbose) {
+                    Ok(note) => self.attempt_note = note,
+                    Err(_) => return Ok(false),
                 }
                 self.sn_num.report_into(&mut self.plan);
                 return Ok(true);
@@ -9526,12 +9561,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let sn = self.sn_sym.as_ref().unwrap();
             let s = self.s.as_ref().unwrap();
             let threads = self.ctx.threads();
-            if self
-                .sn_num
-                .solve(sn, s, &self.rhs_kept, &mut self.x_kept, threads, self.verbose)
-                .is_err()
-            {
-                return Ok(false);
+            match self.sn_num.solve(sn, s, &self.rhs_kept, &mut self.x_kept, threads, self.verbose) {
+                Ok(note) => self.attempt_note = note,
+                Err(_) => return Ok(false),
             }
             self.sn_num.report_into(&mut self.plan);
         } else {

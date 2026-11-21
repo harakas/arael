@@ -60,9 +60,6 @@ pub(crate) enum SolveStats {
 /// raises lambda on. `Send`, so a solver moves between threads as on the
 /// CPU.
 pub(crate) trait GpuSolver<T>: Send {
-    /// The device's runtime and the wide scalar, for the verbose log:
-    /// `cuda`, `cuda df32`, `hip`, `hip df32`.
-    fn runtime(&self) -> String;
     /// How the system is solved, as the report says it.
     fn solve(&self) -> GpuSolve;
     /// The device: its name, its compile target, whether it computes in

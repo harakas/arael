@@ -467,6 +467,21 @@ Each accepted or rejected iteration prints one line to stderr:
 | `lambda=2e-5` | damping in effect for this step |
 | `(step=91)` | wall-clock microseconds for this iteration |
 
+Some linear solvers add where the microseconds went, inside the same
+parentheses:
+
+```
+(step=2194, factor=229, solve=16)
+(step=95403, factor=40633, solves=1687, residuals=668, 1 refinement step, residual 7.2e-11)
+(step=899, gpu=889)
+```
+
+| Addition | Meaning |
+|---|---|
+| `factor=229, solve=16` | the block supernodal Cholesky: its factorization and its triangular solves |
+| `solves=1687, residuals=668, 1 refinement step, residual 7.2e-11` | under `MixedPrecision`: the solves and the residuals of the refinement, its steps and the relative residual reached (`no refinement` with none asked, `short of tolerance` when it stopped short) |
+| `gpu=889` | on a GPU: the device's part, followed by the refinement or the conjugate gradients' iterations (see GPU) |
+
 A Cholesky rejection gets a longer diagnostic line (commit
 `6c72586`):
 
@@ -1193,13 +1208,17 @@ if let Some(gpu) = &r.gpu {
   system that is not formed); the plan says which.
 
 A solve also logs it: a warning when a GPU was given and not used, with
-the route that ran instead, and under `verbose` the device, what ran on
-it, and each damped solve:
+the route that ran instead, and under `verbose` the device and what ran
+on it. Each attempt's line then has, after the attempt's time `step`,
+the device's part of it, `gpu`, both in microseconds, with the refinement
+steps of a mixed-precision solve or the conjugate gradients' iterations:
 
 ```text
 [arael WARN] gpu: cuda:0 was given and is not used -- the reduced system is factored under its envelope, on the CPU. ...
 [arael INFO] gpu: cuda:0 NVIDIA GeForce RTX 4090 (sm_89), wide f64 -- assembly, damped solves and the LM loop on the device
-[arael INFO] gpu schur (cuda, cg): damp + reduce + conjugate gradients + back-substitution + trial cost 5.0 ms, 74 iterations (96 queued) in 1 round, relative residual 9.4e-4
+[arael INFO] 2/0: 273874->250676 / 23198.2, lambda=3.33333e-5 (step=9262, gpu=9201)
+[arael INFO] 2/0: 273874->250676 / 23198.2, lambda=3.33333e-5 (step=5103, gpu=5046, 2 refinement steps, residual 6.7e-13)
+[arael INFO] 2/0: 263165->247585 / 15580.2, lambda=3.33333e-5 (step=3692, gpu=3624, cg 38 iterations (64 queued in 3 rounds), residual 9.6e-4)
 ```
 
 `LmResult::report` prints it as a `gpu` block (see Reporting a solve).
