@@ -9466,10 +9466,18 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             return Ok(true);
         }
 
-        // The device route: H is on the device, damped there.
+        // The device route with the loop driven from the host (a caller of
+        // compute and solve_damped; lm_solve runs its attempts through
+        // ResidentLoop): H is on the device, damped and solved there, and
+        // the step is read back.
         #[cfg(feature = "gpu")]
-        // H is on the device: the loop runs its attempts there (ResidentLoop)
-        assert!(!self.gpu.route_live(), "a damped solve on the host with H on the device");
+        if self.gpu.route_live() {
+            let clock = self.verbose.then(Instant::now);
+            let stats = self.gpu.solver_mut().route_solve(diagonal, damp, arael_faer::schur::SchurReal::to_f64(lambda), delta)?;
+            let solved = stats.is_some();
+            self.note_gpu_solve(stats, clock);
+            return Ok(solved);
+        }
         // INVARIANT: lm_solve calls compute() (which sets matrix.h) before this.
         let h = matrix.h.as_mut().expect("compute before solve_damped");
         {

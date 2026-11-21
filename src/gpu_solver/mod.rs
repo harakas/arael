@@ -109,6 +109,14 @@ pub(crate) trait GpuSolver<T>: Send {
     fn route_compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T]) -> Result<T, DeviceFailure>;
     /// The undamped diagonal of the last [`route_compute`](Self::route_compute).
     fn route_diagonal(&self, diagonal: &mut [T]);
+    /// A damped solve of the last [`route_compute`](Self::route_compute)'s
+    /// system for a caller that drives the loop from the host
+    /// ([`LmSolver::solve_damped`](crate::simple_lm::LmSolver::solve_damped)):
+    /// H's diagonal set to `diagonal + lambda damp` on the device, the
+    /// system solved there and the step read into `delta`, with what the
+    /// solve took. `None` for a system that is not positive definite, which
+    /// leaves `delta`.
+    fn route_solve(&mut self, diagonal: &[T], damp: &[T], lambda: f64, delta: &mut [T]) -> Result<Option<SolveStats>, DeviceFailure>;
 
     /// [`ResidentLoop::start`](crate::simple_lm::ResidentLoop::start).
     fn start(&mut self, x: &[T], floor: Option<f64>) -> Result<(), DeviceFailure>;

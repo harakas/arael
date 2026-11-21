@@ -326,6 +326,90 @@ fn options(gpu: Option<&GpuDevice>, assembly: bool) -> arael::simple_lm::SparseF
         .with_gpu_assembly(assembly)
 }
 
+/// A program that drives the solver itself through `LmSolver` (compute,
+/// extract_diagonal, solve_damped), as a loop of its own does, gets on a
+/// GPU the CPU's linearizations and steps. With the assembly on the device
+/// H stays there and each damped solve runs there, from the caller's
+/// diagonal and damping scale (the diagonal, the diagonal floored, a scale
+/// of its own); with the assembly on the host the solves alone do. With an
+/// f64 factor, the f32 factor refined, and conjugate gradients.
+#[test]
+fn a_solver_driven_by_hand_solves_on_the_device() {
+    use arael::simple_lm::{CgParams, LmSolver, MixedPrecision, SparseFaer, SparseFaerOptions};
+    // a linearization: its cost, gradient and diagonal, and the step of each damped solve
+    type Linearization = (f64, Vec<f64>, Vec<f64>, Vec<Vec<f64>>);
+    let drive = |opts: &SparseFaerOptions| -> (Vec<Linearization>, Option<GpuReport>) {
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let n = x.len();
+        let mut solver = SparseFaer::<f64>::from_options(opts);
+        let mut ctx = arael::threads::Context::new();
+        let mut matrix = solver.new_matrix(n);
+        let (mut grad, mut diagonal, mut delta) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+        let mut trace: Vec<Linearization> = Vec::new();
+        for _ in 0..2 {
+            let cost = solver.compute(&mut s, &x, &mut grad, &mut matrix, &mut ctx).unwrap();
+            solver.extract_diagonal(&matrix, &mut diagonal);
+            let floored: Vec<f64> = diagonal.iter().map(|d| d.max(1e3)).collect();
+            let own: Vec<f64> = diagonal.iter().enumerate().map(|(i, d)| 0.5 * d + 1.0 + (i % 5) as f64).collect();
+            let mut steps = Vec::new();
+            for (scale, lambda) in [(&diagonal, 1e-3), (&diagonal, 1e-1), (&floored, 1e-2), (&own, 1e-2)] {
+                let solved = solver.solve_damped(n, &mut matrix, &diagonal, scale, lambda, &grad, &mut delta).unwrap();
+                assert!(solved, "a damped system is positive definite");
+                steps.push(delta.clone());
+            }
+            // the next linearization at a point of the test's own: the
+            // same for every solver, whose steps agree to their tolerance
+            for (i, xi) in x.iter_mut().enumerate() {
+                *xi += 1e-3 * (i as f64).sin();
+            }
+            trace.push((cost, grad.clone(), diagonal.clone(), steps));
+        }
+        (trace, solver.gpu_report())
+    };
+    let err = |a: &[f64], b: &[f64]| {
+        let scale = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        a.iter().zip(b).fold(0.0f64, |e, (x, y)| e.max((x - y).abs())) / scale
+    };
+    // The step's tolerance against the CPU's. The conjugate gradients are
+    // asked for a residual they do not reach on this scene (54 kept
+    // parameters: they stop at the iteration cap), so their steps move
+    // with rounding, most in df32, with the assembly on the host as on the
+    // device.
+    type Variant = (&'static str, fn(SparseFaerOptions) -> SparseFaerOptions, f64);
+    let variants: [Variant; 3] = [
+        ("an f64 factor", |o| o, 1e-9),
+        ("the f32 factor refined", |o| o.with_mixed_precision(Some(MixedPrecision::default())), 1e-7),
+        ("conjugate gradients", |o| o.with_iterative_schur(CgParams { tol: 1e-22, ..Default::default() }), 1e-5),
+    ];
+    for (what, with, tol) in variants {
+        let (cpu, none) = drive(&with(options(None, true)));
+        assert!(none.is_none());
+        for d in devices() {
+            for assembly in [true, false] {
+                let name = format!("{}, {what}, assembly on the {}", label(&d), if assembly { "device" } else { "host" });
+                let (dev, report) = drive(&with(options(Some(&d), assembly)));
+                let work = report.expect("the solver's GPU report").work;
+                if assembly {
+                    assert_eq!(work, GpuWork::Loop, "{name}");
+                } else {
+                    assert_eq!(work, GpuWork::Solves(arael::simple_lm::HostAssembly::Asked), "{name}");
+                }
+                for (k, ((c, g, dg, steps), (cc, cg, cdg, csteps))) in dev.iter().zip(&cpu).enumerate() {
+                    assert!((c - cc).abs() <= 1e-11 * cc, "{name}, linearization {k}: cost {c} against {cc}");
+                    assert!(err(g, cg) < 1e-9 && err(dg, cdg) < 1e-9, "{name}, linearization {k}: gradient {:.1e}, diagonal {:.1e}", err(g, cg), err(dg, cdg));
+                    for (j, (step, cstep)) in steps.iter().zip(csteps).enumerate() {
+                        let e = err(step, cstep);
+                        assert!(e < tol, "{name}, linearization {k}, solve {j}: the step against the CPU's, {e:.1e}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The LM solve through the device assembly (H, the gradient and the
 /// trial costs on the GPU, the rotations re-centred there after every
 /// accepted step) reaches the CPU route's optimum, as the GPU route with

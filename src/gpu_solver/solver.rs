@@ -386,6 +386,31 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         diagonal.copy_from_slice(&self.route.as_ref().expect("a device route").diag_host);
     }
 
+    /// The caller's diagonal and damping scale go to the device, then an
+    /// attempt of the loop runs as it does there (the parameters are the
+    /// last compute's, so its trial point and trial cost are computed too
+    /// and not read), and the step comes back.
+    fn route_solve(&mut self, diagonal: &[T], damp: &[T], lambda: f64, delta: &mut [T]) -> Result<Option<SolveStats>, DeviceFailure> {
+        {
+            let r = self.route.as_mut().expect("a device route");
+            assert!(r.live, "a damped solve on the device follows a compute there");
+            let n = diagonal.len();
+            r.host.clear();
+            r.host.extend(diagonal.iter().chain(damp).map(|&v| SchurReal::to_f64(v)));
+            on_device(r.vec.write_damping(&r.host[..n], &r.host[n..]), "upload of the diagonal and the damping scale")?;
+        }
+        let (stats, _) = self.attempt(lambda)?;
+        if stats.is_some() {
+            let values = self.values();
+            let gs = self.schur.as_ref().expect("a device route has its reduction");
+            let r = self.route.as_mut().expect("a device route");
+            let s = gs.step_view();
+            on_device(read_values(&**r.asm.device(), &[(s.0, s.1, delta.len(), values)], &mut r.bytes, &mut r.host), "read of the step")?;
+            narrow(delta, &r.host);
+        }
+        Ok(stats)
+    }
+
     fn start(&mut self, x: &[T], floor: Option<f64>) -> Result<(), DeviceFailure> {
         let dev = self.dev.clone();
         let _scope = Scope::new(&*dev, "start");

@@ -257,6 +257,25 @@ impl<D: Device> LmVectors<D> {
         Ok(())
     }
 
+    /// Write H's undamped diagonal and the damping scale, for a caller that
+    /// has its own in place of what [`linearized`](Self::linearized)
+    /// leaves (no wait): the next [`damp`](Self::damp) sets H's diagonal to
+    /// `diag + lambda damp`.
+    ///
+    /// ```ignore
+    /// vec.write_damping(&diagonal, &scale)?;
+    /// vec.set_lambda(1e-3)?;
+    /// vec.damp(h)?; // H's diagonal is diagonal + 1e-3 scale
+    /// ```
+    pub fn write_damping(&mut self, diag: &[f64], damp: &[f64]) -> Result<(), GpuError> {
+        assert_eq!((diag.len(), damp.len()), (self.n, self.n));
+        if self.n > 0 {
+            self.dev.write(&mut self.block, self.sec.diag, &self.values.encode(diag))?;
+            self.dev.write(&mut self.block, self.sec.damp, &self.values.encode(damp))?;
+        }
+        Ok(())
+    }
+
     /// The parameters on the device (block, byte offset), `len` values of
     /// [`values`](Self::values).
     pub fn x(&self) -> (&D::Block, usize) {
@@ -663,6 +682,34 @@ mod tests {
         let tol = if wide == Wide::F64 { 0.0 } else { 1e-13 };
         for i in 0..n {
             let want = h[i] + 2.0 * h[i].max(1e-3);
+            assert!((damped[i] - want).abs() <= tol * want, "{wide:?} entry {i}: {} against {want}", damped[i]);
+        }
+    }
+
+    /// A caller's own diagonal and damping scale take the place of the
+    /// linearization's: H's diagonal is damped to `diag + lambda damp`
+    /// from them, whatever H held.
+    #[test]
+    fn a_callers_diagonal_and_scale_damp_h() {
+        let dev = device();
+        let wide = test_wide(&*dev);
+        let n = 300usize;
+        let pos: Vec<u32> = (0..n as u32).collect();
+        let held = |v: f64| wide.value(wide.bits(v));
+        let h: Vec<f64> = (0..n).map(|i| held(2.0 + i as f64)).collect();
+        let (hd, gd) = (upw(&dev, &h, wide), upw(&dev, &vec![1.0f64; n], wide));
+        let mut v = LmVectors::new(&dev, &pos, wide).unwrap();
+        // the linearization's own, replaced below
+        v.linearized((&gd, 0), (&hd, 0), Some(1e-3)).unwrap();
+        let diag: Vec<f64> = (0..n).map(|i| held(5.0 + 0.5 * i as f64)).collect();
+        let scale: Vec<f64> = (0..n).map(|i| held(1.0 + (i % 7) as f64)).collect();
+        v.write_damping(&diag, &scale).unwrap();
+        v.set_lambda(0.25).unwrap();
+        v.damp((&hd, 0)).unwrap();
+        let damped = readw(&dev, (&hd, 0), n, wide);
+        let tol = if wide == Wide::F64 { 0.0 } else { 1e-13 };
+        for i in 0..n {
+            let want = diag[i] + 0.25 * scale[i];
             assert!((damped[i] - want).abs() <= tol * want, "{wide:?} entry {i}: {} against {want}", damped[i]);
         }
     }
