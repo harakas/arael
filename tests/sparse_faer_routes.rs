@@ -215,6 +215,7 @@ fn the_setup_report_itemises_the_ordering() {
         // schur: setup T ms = finding the blocks a + finding the reduction b
         // + ordering it c + weighing it d (skipped) + factor setup e
         assert!(line.contains(" + ordering it ") && line.contains(" (skipped) + factor setup "), "{line}");
+        assert!(!line.contains("GPU"), "a solve without a GPU opens none: {line}");
         let nums: Vec<f64> = line.split_whitespace().filter_map(|t| t.parse().ok()).collect();
         assert_eq!(nums.len(), 6, "{line}");
         let parts: f64 = nums[1..].iter().sum();

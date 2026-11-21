@@ -8532,7 +8532,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let ordered = self.setup_lap();
         self.setup.ordering += ordered;
         let t_order = ms(self.setup.ordering);
-        let t_open = ms(self.setup.gpu_open);
+        // the GPU's open: an item of the setup report when the solver has a GPU
+        let t_open = self.gpu.given.as_ref().map(|_| ms(self.setup.gpu_open));
+        let open_item = |t: Option<f64>| t.map_or(String::new(), |t| format!(" + opening the GPU {t:.1}"));
 
         // The reduction is a GEMM loop over pairs of observers plus a
         // one-column update per observer, and the tile shapes both need come
@@ -8882,13 +8884,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 let rest = ms(t.elapsed());
                 info!(
                     "schur: setup {:.1} ms = finding the blocks {:.1} + finding the \
-                     reduction {:.1} and ordering it {:.1} (thrown away with it) + opening the \
-                     GPU {:.1} + weighing it {:.1}{} + CSC pattern, scatter map and the rest {:.1}",
-                    t_block + t_schur_symbolic + t_order + t_open + t_gate + rest,
+                     reduction {:.1} and ordering it {:.1} (thrown away with it){} + weighing \
+                     it {:.1}{} + CSC pattern, scatter map and the rest {:.1}",
+                    t_block + t_schur_symbolic + t_order + t_open.unwrap_or(0.0) + t_gate + rest,
                     t_block,
                     t_schur_symbolic,
                     t_order,
-                    t_open,
+                    open_item(t_open),
                     t_gate,
                     decision_detail,
                     rest,
@@ -9184,13 +9186,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let rest = ms(self.setup.factor);
             info!(
                 "schur: setup {:.1} ms = finding the blocks {:.1} + finding the \
-                 reduction {:.1} + ordering it {:.1} + opening the GPU {:.1} + weighing it \
-                 {:.1}{} + factor setup {:.1}",
-                t_block + t_schur_symbolic + t_order + t_open + t_gate + rest,
+                 reduction {:.1} + ordering it {:.1}{} + weighing it {:.1}{} + factor setup {:.1}",
+                t_block + t_schur_symbolic + t_order + t_open.unwrap_or(0.0) + t_gate + rest,
                 t_block,
                 t_schur_symbolic,
                 t_order,
-                t_open,
+                open_item(t_open),
                 t_gate,
                 decision_detail,
                 rest,

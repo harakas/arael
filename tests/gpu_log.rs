@@ -93,9 +93,21 @@ fn a_solve_logs_what_its_gpu_does() {
     };
     let about_gpu = |log: &[(Level, String)]| log.iter().filter(|(_, m)| m.starts_with("gpu: cpu:0 ")).count();
 
+    // the verbose setup report: its items add up to its total, the GPU's
+    // open one of them when the solver has a GPU
+    let setup_items = |log: &[(Level, String)]| -> (String, Vec<f64>) {
+        let line = log.iter().find(|(l, m)| *l == Level::Info && m.starts_with("schur: setup")).unwrap_or_else(|| panic!("the setup report in {log:?}"));
+        let nums: Vec<f64> = line.1.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+        let parts: f64 = nums[1..].iter().sum();
+        assert!((nums[0] - parts).abs() <= 0.05 * nums.len() as f64, "{}", line.1);
+        (line.1.clone(), nums)
+    };
+
     // no GPU: nothing about one
     let (log, _) = solve(supernodal(), true);
     assert_eq!(about_gpu(&log), 0, "{log:?}");
+    let (line, nums) = setup_items(&log);
+    assert!(!line.contains("GPU") && nums.len() == 6, "{line}");
 
     // on the device: no warning, and quiet unless verbose
     let (log, r) = solve(supernodal().with_gpu(Some(GpuDevice::cpu())), false);
@@ -105,6 +117,8 @@ fn a_solve_logs_what_its_gpu_does() {
     assert!(unused(&log).is_empty(), "{log:?}");
     let line = log.iter().find(|(l, m)| *l == Level::Info && m.starts_with("gpu: cpu:0 ")).unwrap_or_else(|| panic!("the device's line in {log:?}"));
     assert!(line.1.contains(", wide f64 -- ") && line.1.contains("on the device"), "{}", line.1);
+    let (line, nums) = setup_items(&log);
+    assert!(line.contains(" + ordering it ") && line.contains(" + opening the GPU ") && nums.len() == 7, "{line}");
 
     // conjugate gradients on the formed reduced system run on the device
     // too: no warning, and under verbose each solve's iterations
