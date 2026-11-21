@@ -521,7 +521,10 @@ fn an_f32_solve_reaches_the_optimum_with_s_in_f32_or_in_the_wide_values() {
         assert!((c - optimum).abs() <= 1e-9 * optimum, "{}, refined: {c} against the optimum {optimum}", label(&d));
         let report = solver.gpu_report().unwrap();
         let f32_factor = report.solve == Some(arael::simple_lm::GpuSolve::Factor { f32: true });
-        assert!(report.work == GpuWork::Loop && f32_factor && !report.f32_system, "{}: a refined solve's S is wide", label(&d));
+        assert!(f32_factor && !report.f32_system, "{}: a refined solve's S is wide", label(&d));
+        // an f64 root assembles on the host of a device without f64 (Metal)
+        let work = if d.has_f64() { GpuWork::Loop } else { GpuWork::Solves(arael::simple_lm::HostAssembly::NoF64) };
+        assert_eq!(report.work, work, "{}", label(&d));
     }
 }
 
@@ -6285,6 +6288,44 @@ pub struct Pull {
 #[derive(Clone)]
 pub struct PullsF {
     pub pulls: refs::Vec<Pull>,
+}
+
+/// With every block marginalized the reduced system keeps none: the
+/// conjugate gradients on the device have nothing to iterate, and the solve
+/// reaches the optimum (cost 0) as the CPU's conjugate gradients and the
+/// device's factor do.
+#[test]
+fn conjugate_gradients_over_a_reduction_that_keeps_no_block_solve() {
+    use arael::simple_lm::{CgParams, SparseFaer};
+    let mut pulls = refs::Vec::new();
+    for k in 0..50 {
+        pulls.push(Pull { p: Param::new(vect2::new(0.0, 0.0)), a: vect2::new(k as f32 * 0.01, 0.5), w: 1.0, hb: SelfBlock::new() });
+    }
+    let mut s = PullsF { pulls };
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let n = x.len();
+    let devices = f32_devices();
+    let mut runs = vec![(None, true)];
+    for d in &devices {
+        runs.extend([(Some(d), false), (Some(d), true)]);
+    }
+    for (gpu, cg) in runs {
+        let mut opts = options(gpu, true).with_marginalize(0..n);
+        if cg {
+            opts = opts.with_iterative_schur(CgParams::default());
+        }
+        let mut s = s.clone();
+        let mut solver = SparseFaer::<f32>::from_options(&opts);
+        let c = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &to_the_optimum()).unwrap().end_cost;
+        let what = format!("{}, cg {cg}", gpu.map_or("cpu".to_string(), label));
+        assert!(c.abs() < 1e-10, "{what}: {c}");
+        let plan = solver.plan().unwrap();
+        assert!(plan.reduced && plan.kept_params == 0, "{what}: {plan:?}");
+        if cg {
+            assert_eq!(plan.cg_iterations, Some(0), "{what}");
+        }
+    }
 }
 
 /// The CPU sums an f32 root's cost in a chain per constraint, each small
