@@ -649,9 +649,19 @@ fn main() {
             println!("\nPass {} (isigma scale={}):", pass + 1, scale);
             let config = arael::simple_lm::LmConfig::well_conditioned()
                 .with_verbose(true)
+                .with_gather_timing(true)
                 .with_rel_precision(1e-6);
             let result = session.solve(path, &config).unwrap();
             println!("  {} iterations, cost {:.4} -> {:.4}", result.iterations, result.start_cost, result.end_cost);
+            if pass + 1 == scales.len() {
+                println!("\n--- Solve report (pass {}) ---", pass + 1);
+                // colors and glyphs on a terminal, plain text into a file or a pipe
+                if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                    result.pretty_print();
+                } else {
+                    result.print();
+                }
+            }
         }
         match session.assemble_covariance(path, CovMode::AllMarginals) {
             Ok(c) => Some(c),
@@ -659,9 +669,16 @@ fn main() {
         }
     }
 
+    // The faer solver runs on the machine's GPU when the example was built
+    // with its runtime (`--features gpu-cuda`, `gpu-hip`, `gpu-metal`, any
+    // of them together). A GPU without f64 (Metal) factors in f32, and this
+    // f64 solve then refines its steps (mixed precision).
+    let gpu = arael::simple_lm::GpuDevice::detect();
+    let mixed = gpu.as_ref().is_some_and(|g| !g.has_f64()).then(arael::simple_lm::MixedPrecision::default);
+    let faer = arael::simple_lm::SparseFaerOptions::default().with_gpu(gpu).with_mixed_precision(mixed);
     let cov = match solver_name.as_str() {
         "dense" => run_ramp(arael::simple_lm::Dense, &mut path, &isigma_scales),
-        "faer" => run_ramp(arael::simple_lm::SparseFaer::new(), &mut path, &isigma_scales),
+        "faer" => run_ramp(arael::simple_lm::SparseFaer::from_options(&faer), &mut path, &isigma_scales),
         #[cfg(feature = "eigen")]
         "eigen" => run_ramp(arael::simple_lm::SparseEigen::new(), &mut path, &isigma_scales),
         #[cfg(not(feature = "eigen"))]

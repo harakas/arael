@@ -25,6 +25,16 @@ and solver are command-line flags:
 cargo run -r --example slam_demo -- --solver faer --poses 100 --landmarks 400
 ```
 
+Built with a GPU feature (`gpu-cuda`, `gpu-hip`, `gpu-metal`, or
+several of them), the faer solver runs on the machine's GPU
+(`GpuDevice::detect()`): an NVIDIA card where there is one, else an AMD
+one. The report printed after the last pass says what ran on it and how
+long it took:
+
+```bash
+cargo run -r --example slam_demo --features gpu-cuda,gpu-hip
+```
+
 ## Problem structure
 
 Each entity owns its own parameters and its own `SelfBlock` -- the
