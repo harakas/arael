@@ -499,6 +499,18 @@ impl Launch {
     pub fn linear(n: u32, block: u32) -> Self {
         Launch { grid: [n.div_ceil(block).max(1), 1, 1], block: [block, 1, 1], shared_bytes: 0 }
     }
+
+    /// Whether the grid holds no block (a dimension of 0): a launch of it
+    /// queues nothing ([`Device::launch`]).
+    ///
+    /// ```
+    /// use arael_gpu::Launch;
+    /// assert!(Launch { grid: [0, 1, 1], block: [32, 1, 1], shared_bytes: 0 }.is_empty());
+    /// assert!(!Launch::linear(0, 32).is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.grid.contains(&0)
+    }
 }
 
 /// A named run of a device block's bytes, for the tools that inspect a
@@ -785,7 +797,9 @@ pub trait Device: Send + Sync {
         format!("{}{defines}\n{HEADER}\n{source}", self.arch().defines())
     }
 
-    /// Queues `kernel` with `args` (at most [`MAX_ARGS`]).
+    /// Queues `kernel` with `args` (at most [`MAX_ARGS`]). A launch over an
+    /// empty grid ([`Launch::is_empty`]) queues nothing: it is not run,
+    /// recorded into a capture, timed or traced.
     fn launch(
         &self,
         kernel: &Self::Kernel,

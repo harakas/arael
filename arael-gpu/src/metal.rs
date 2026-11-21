@@ -935,6 +935,9 @@ impl Device for MetalDevice {
     }
 
     fn launch_on(&self, lane: Lane, kernel: &MetalKernel, launch: Launch, args: &[Arg<'_, MetalBlock>]) -> Result<(), GpuError> {
+        if launch.is_empty() {
+            return Ok(());
+        }
         crate::fault::check("launch")?;
         self.forks.check(lane);
         assert!(args.len() <= MAX_ARGS, "a launch takes at most {MAX_ARGS} arguments");

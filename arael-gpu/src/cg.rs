@@ -713,6 +713,51 @@ mod tests {
         }
     }
 
+    /// A reduction that keeps no block (every block eliminated, none
+    /// coupled to another) has nothing to iterate: the solve converges in
+    /// no iteration, and the step is the eliminated blocks' own solves.
+    #[test]
+    fn a_reduction_that_keeps_no_block_converges_at_once() {
+        let widths = [3usize, 2, 3, 1, 6];
+        let nblk = 40;
+        let mut part = vec![0u32];
+        for b in 0..nblk {
+            part.push(part[b] + widths[b % widths.len()] as u32);
+        }
+        let n = part[nblk] as usize;
+        let (hsym, _) = SymbolicSparseBlockColMat::<SparseIndex>::from_scalar_coords(part.clone(), part.clone(), nblk, |i| (part[i] as usize, part[i] as usize));
+        let mut h = Matrix::zeroed(hsym);
+        let mut rng = crate::test_util::Lcg(17);
+        for b in 0..nblk {
+            let (w, base) = (widths[b % widths.len()], h.symbolic().val_range(b).start);
+            for c in 0..w {
+                for r in 0..=c {
+                    h.vals_mut()[base + r + c * w] = if r == c { 8.0 + rng.unit() } else { rng.unit() };
+                }
+            }
+        }
+        let dense = crate::test_util::dense_of(&h);
+        let rhs: Vec<f64> = (0..n).map(|_| rng.unit() * 2.0).collect();
+        let elim: Vec<usize> = (0..nblk).collect();
+        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
+        assert_eq!(sym.kept_size(), 0);
+        let dev = device();
+        for wide in wides(&*dev) {
+            let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+            for graphs in [true, false] {
+                let mut solver = GpuCg::new(&g, &CgParams::default(), &GpuCgParams::default()).unwrap();
+                solver.use_graphs(graphs);
+                for _ in 0..2 {
+                    let mut delta = vec![0.0f64; n];
+                    let stats = solver.solve(&mut g, h.vals(), &rhs, &mut delta).unwrap();
+                    assert_eq!((stats.iters, stats.converged, stats.breakdown, stats.relative_residual), (0, true, false, 0.0), "{wide:?}, graphs {graphs}: {stats:?}");
+                    let res = rel_residual(&dense, n, &delta, &rhs);
+                    assert!(res < 1e-12, "{wide:?}, graphs {graphs}: residual {res}");
+                }
+            }
+        }
+    }
+
     /// The iterations are queued in rounds: graphs of one iteration and of
     /// many reach the same solution in the same iterations, the small ones
     /// in several rounds, and a second solve sizes its first round from the

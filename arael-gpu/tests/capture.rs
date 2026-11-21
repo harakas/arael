@@ -64,6 +64,44 @@ fn a_replay_runs_the_recorded_launches_against_the_blocks_contents() {
     }
 }
 
+/// A launch over an empty grid (a dimension of 0) queues nothing: on its
+/// own, among the launches of a capture, and timed, where it has no time.
+#[test]
+fn a_launch_over_an_empty_grid_runs_nothing() {
+    let dev = Dev::new(0).unwrap();
+    let k = dev.compile(SOURCE, "", "axpc").unwrap();
+    let mut x = dev.alloc(4 * N).unwrap();
+    let y = dev.alloc(4 * N).unwrap();
+    let host: Vec<f32> = (0..N).map(|i| i as f32).collect();
+    dev.write(&mut x, 0, bytemuck::cast_slice(&host)).unwrap();
+    let empty = |grid: [u32; 3]| {
+        let launch = Launch { grid, block: [256, 1, 1], shared_bytes: 0 };
+        assert!(launch.is_empty(), "{grid:?}");
+        dev.launch(&k, launch, &[Arg::Block(&x, 0), Arg::Block(&y, 0), Arg::F32(5.0), Arg::U32(N as u32)])
+    };
+    assert!(!Launch::linear(N as u32, 256).is_empty() && !Launch::linear(0, 256).is_empty(), "a linear launch has a block");
+    for grid in [[0, 1, 1], [1, 0, 1], [1, 1, 0], [0, 0, 0]] {
+        empty(grid).unwrap_or_else(|e| panic!("{grid:?}: {e}"));
+    }
+    assert!(read(&dev, &y).iter().all(|&v| v == 0.0), "an empty grid writes nothing");
+    let graph = dev
+        .capture(|| {
+            empty([0, 1, 1])?;
+            axpc(&dev, &k, &x, &y, 2.0)?;
+            empty([0, 1, 1])
+        })
+        .unwrap();
+    dev.replay(&graph).unwrap();
+    let got = read(&dev, &y);
+    assert!((0..N).all(|i| got[i] == 2.0 * host[i] + 1.0), "the capture's other launch ran");
+    dev.time_launches(true);
+    empty([0, 1, 1]).unwrap();
+    axpc(&dev, &k, &x, &y, 3.0).unwrap();
+    dev.sync().unwrap();
+    dev.time_launches(false);
+    assert_eq!(dev.take_times().len(), 1, "an empty grid has no time");
+}
+
 /// `read_many` reads each range, of several blocks and offsets, after the
 /// replay queued before it.
 #[test]

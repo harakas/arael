@@ -539,6 +539,9 @@ impl<D: Device> Device for Traced<D> {
     }
 
     fn launch_on(&self, lane: Lane, kernel: &Self::Kernel, launch: Launch, args: &[Arg<'_, Self::Block>]) -> Result<(), GpuError> {
+        if launch.is_empty() {
+            return Ok(());
+        }
         assert!(args.len() <= MAX_ARGS, "a launch takes at most {MAX_ARGS} arguments");
         let mut inner = [Arg::U32(0); MAX_ARGS];
         let mut blocks = [0u64; MAX_ARGS];

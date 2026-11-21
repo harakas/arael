@@ -1218,9 +1218,6 @@ impl<D: Device> GpuSchur<D> {
 
     /// [`run`](Self::run) with `shared_bytes` of dynamic shared memory a block.
     fn run_shared(&self, kernel: &D::Kernel, blocks: u32, threads: u32, shared_bytes: u32, args: &[Arg<'_, D::Block>]) -> Result<(), GpuError> {
-        if blocks == 0 {
-            return Ok(());
-        }
         self.dev.launch(kernel, Launch { grid: [blocks, 1, 1], block: [threads, 1, 1], shared_bytes }, args)
     }
 

@@ -656,6 +656,9 @@ impl Device for CpuDevice {
     }
 
     fn launch(&self, kernel: &CpuKernel, launch: Launch, args: &[Arg<'_, CpuBlock>]) -> Result<(), GpuError> {
+        if launch.is_empty() {
+            return Ok(());
+        }
         crate::fault::check("launch")?;
         assert!(args.len() <= MAX_ARGS, "a launch takes at most {MAX_ARGS} arguments");
         let mut slots = [0u64; MAX_ARGS];
@@ -696,6 +699,9 @@ impl Device for CpuDevice {
     }
 
     fn launch_on(&self, lane: Lane, kernel: &CpuKernel, launch: Launch, args: &[Arg<'_, CpuBlock>]) -> Result<(), GpuError> {
+        if launch.is_empty() {
+            return Ok(());
+        }
         self.forks.check(lane);
         self.launch(kernel, launch, args)
     }

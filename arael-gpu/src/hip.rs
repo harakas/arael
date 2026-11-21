@@ -856,6 +856,9 @@ impl Device for HipDevice {
     }
 
     fn launch_on(&self, lane: Lane, kernel: &HipKernel, launch: Launch, args: &[Arg<'_, HipBlock>]) -> Result<(), GpuError> {
+        if launch.is_empty() {
+            return Ok(());
+        }
         crate::fault::check("launch")?;
         self.forks.check(lane);
         let stream = match lane {

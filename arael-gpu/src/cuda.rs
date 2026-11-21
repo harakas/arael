@@ -674,6 +674,10 @@ impl Device for CudaDevice {
     }
 
     fn launch_on(&self, lane: Lane, kernel: &CudaKernel, launch: Launch, args: &[Arg<'_, CudaBlock>]) -> Result<(), GpuError> {
+        // the driver refuses a grid of no block
+        if launch.is_empty() {
+            return Ok(());
+        }
         crate::fault::check("launch")?;
         self.forks.check(lane);
         let stream = match lane {
