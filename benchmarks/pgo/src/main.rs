@@ -384,6 +384,8 @@ fn print_header(rounds: usize, only: &Option<String>) {
         arael_runner::schur_policy());
     println!("arael termination : abs {:e}, rel {:e}, patience {}, min_iters {}",
         c64.abs_precision, c64.rel_precision, c64.patience, c64.min_iters);
+    println!("arael gpu         : {}", bench_harness::arael::gpu_value());
+    println!("arael f32 factor  : {}", bench_harness::arael::f32_factor_value());
     println!("solver verbose    : {} [VERBOSE], per-solve timing {} [TIMING]",
         if c64.verbose { "on" } else { "off" },
         if std::env::var("TIMING").is_ok() { "on" } else { "off" });

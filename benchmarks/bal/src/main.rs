@@ -166,6 +166,7 @@ fn print_header(rounds: usize, only: &Option<String>, systems: &Option<String>,
             }))
         .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",
             cfg.abs_precision, cfg.rel_precision, cfg.patience, cfg.min_iters))
+        .gpu()
         .line("solver verbose", format!("{} [VERBOSE], per-solve timing {} [TIMING]",
             if cfg.verbose { "on" } else { "off" },
             if std::env::var("TIMING").is_ok() { "on" } else { "off" }))

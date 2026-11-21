@@ -26,6 +26,12 @@ impl Header {
         self.line("rounds", rounds_value(rounds))
     }
 
+    /// The GPU the arael rows are given and their single-precision factor
+    /// ([`crate::arael::gpu_value`], [`crate::arael::f32_factor_value`]).
+    pub fn gpu(self) -> Self {
+        self.line("arael gpu", crate::arael::gpu_value()).line("arael f32 factor", crate::arael::f32_factor_value())
+    }
+
     /// And the pin, which every timing depends on.
     pub fn core(self) -> Self {
         let n = crate::pin::threads();

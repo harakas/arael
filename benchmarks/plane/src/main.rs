@@ -48,6 +48,7 @@ fn print_header(raw: &RawScene, rounds: usize, systems_filter: &Option<String>) 
         .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",
             arael_cfg.abs_precision, arael_cfg.rel_precision,
             arael_cfg.patience, arael_cfg.min_iters))
+        .gpu()
         .line("solver verbose", format!("{} [VERBOSE], per-solve timing {} [TIMING]",
             if arael_cfg.verbose { "on" } else { "off" },
             if std::env::var("TIMING").is_ok() { "on" } else { "off" }))

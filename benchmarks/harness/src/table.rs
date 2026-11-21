@@ -38,6 +38,9 @@ pub struct Row<S> {
     /// The solver's own report of the full solve `solve_ms` timed, printed
     /// under the row.
     pub report: Option<String>,
+    /// What the full solve did on the GPU it was given, one line printed
+    /// under the row; `None` for a row without a GPU.
+    pub gpu: Option<String>,
     pub solution: S,
 }
 
@@ -53,12 +56,19 @@ impl<S> Row<S> {
             peak_mb: None,
             inexact: false,
             report: None,
+            gpu: None,
             solution,
         }
     }
 
     pub fn report(mut self, report: Option<String>) -> Self {
         self.report = report;
+        self
+    }
+
+    /// What the row's solve did on its GPU ([`Self::gpu`]).
+    pub fn gpu(mut self, gpu: Option<String>) -> Self {
+        self.gpu = gpu;
         self
     }
 
@@ -242,6 +252,10 @@ impl<'a, G: Geometry> Table<'a, G> {
             if row.solve_ms < prev.solve_ms {
                 prev.report = row.report;
             }
+            // What the GPU did is the same every round: the first one's.
+            if prev.gpu.is_none() {
+                prev.gpu = row.gpu;
+            }
             prev.solve_ms = prev.solve_ms.min(row.solve_ms);
             prev.first_iter_ms = prev.first_iter_ms.min(row.first_iter_ms);
             // t(2) must be minimized over rounds like t(1) is: full-iter is their
@@ -370,6 +384,9 @@ impl<'a, G: Geometry> Table<'a, G> {
                 label, row.solve_ms, iters,
                 row.solve_ms / row.iterations.max(1) as f64,
                 full, norm, fmt_ms(row.first_iter_ms), mem, cost, q, miss, w = w);
+            if let Some(gpu) = &row.gpu {
+                println!("    gpu: {}", gpu);
+            }
             if let Some(text) = &row.report {
                 println!("{}", text);
             }
@@ -452,6 +469,20 @@ mod tests {
         let (_, row, _) = &t.cells[0];
         assert_eq!(row.solve_ms, 20.0);
         assert_eq!(row.report.as_deref(), Some("second"));
+    }
+
+    /// A row keeps what its solve did on the GPU over the rounds, and a
+    /// row without a GPU has none.
+    #[test]
+    fn a_row_keeps_its_gpu_note_over_the_rounds() {
+        let g = Scalar;
+        let mut t = Table::new(&g);
+        let round = |ms: f64, gpu: Option<&str>| Row::new(ms, 1.0, 2, 1.0).gpu(gpu.map(str::to_string));
+        t.record("arael LM f64", round(30.0, Some("cuda:0 -- on the device")));
+        t.record("arael LM f64", round(20.0, Some("cuda:0 -- on the device")));
+        t.record("ceres LM", round(25.0, None));
+        assert_eq!(t.cells[0].1.gpu.as_deref(), Some("cuda:0 -- on the device"));
+        assert_eq!(t.cells[1].1.gpu, None);
     }
 
     /// The reference row is named, and normalizing against it makes that row

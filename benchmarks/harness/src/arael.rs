@@ -93,6 +93,55 @@ pub fn mixed_precision() -> Option<arael::simple_lm::MixedPrecision> {
     Some(mp)
 }
 
+/// The header's value for the single-precision factor ([`mixed_precision`]).
+pub fn f32_factor_value() -> String {
+    match mixed_precision() {
+        None => "off [ARAEL_F32_FACTOR]".to_string(),
+        Some(mp) => format!(
+            "on, at most {} refinement step{} to a relative residual of {:e} [ARAEL_F32_FACTOR, ARAEL_REFINE_TOL]",
+            mp.max_refinements,
+            if mp.max_refinements == 1 { "" } else { "s" },
+            mp.tol
+        ),
+    }
+}
+
+/// The header's value for the GPU the arael rows are given ([`gpu`]): the
+/// device as its runtime lists it, its wide scalar and its staging, or
+/// `none`. A device the build does not find on the machine says so: its
+/// rows will fail.
+pub fn gpu_value() -> String {
+    gpu_value_of(gpu().as_ref())
+}
+
+/// [`gpu_value`] of `device`.
+fn gpu_value_of(device: Option<&arael::simple_lm::GpuDevice>) -> String {
+    use arael::simple_lm::{GpuBackend, GpuDevice, GpuStaging, GpuWide};
+    let Some(d) = device else {
+        return "none [ARAEL_GPU: cuda|hip|metal|cpu, with :index]".to_string();
+    };
+    let device = match d.backend() {
+        GpuBackend::Cpu => "cpu:0, the CPU running the GPU's kernels".to_string(),
+        backend => match GpuDevice::available().into_iter().find(|g| g.backend == backend && g.index == d.index()) {
+            Some(g) => g.to_string(),
+            None => format!(
+                "{}:{} NOT FOUND on this machine by this build (its gpu-* feature, its driver): the arael rows will fail",
+                format!("{backend:?}").to_lowercase(),
+                d.index()
+            ),
+        },
+    };
+    let wide = match d.wide() {
+        GpuWide::F64 => "f64",
+        GpuWide::Df32 => "df32",
+    };
+    let staging = match d.staging() {
+        GpuStaging::Pinned => "pinned",
+        GpuStaging::Pageable => "pageable",
+    };
+    format!("{device}, wide {wide}, staging {staging} [ARAEL_GPU, ARAEL_GPU_WIDE, ARAEL_GPU_STAGING]")
+}
+
 /// ARAEL_GPU puts the supernodal block route, and a row's conjugate
 /// gradients on the formed reduced system, on a GPU: `cuda`, `hip` or
 /// `metal`, or any with a device index (`cuda:1`); `cpu` is the CPU device
@@ -272,6 +321,9 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
     let full_iters = crate::solver::full_iters(FULL_ITERS);
     let report = std::env::var("REPORT").is_ok();
     let mut full_report: Option<String> = None;
+    // What the full solve did on the GPU it was given, for the table to
+    // print under the row whether or not the solver is verbose.
+    let mut gpu_note: Option<String> = None;
     let mut failure: Option<String> = None;
     let row = crate::solver::run(FULL_ITERS, |max_iters| {
         // The clone and the config are the probe's reset, not the solve: the
@@ -314,6 +366,9 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
         if report && max_iters == full_iters {
             full_report = Some(r.pretty_report());
         }
+        if max_iters == full_iters {
+            gpu_note = r.gpu.as_ref().map(|g| g.to_string());
+        }
         m.deserialize(&r.x);
         crate::solver::Outcome {
             ms,
@@ -324,7 +379,7 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
     });
     match failure {
         Some(why) => Err(why),
-        None => Ok(row.inexact(M::inexact(input)).report(full_report)),
+        None => Ok(row.inexact(M::inexact(input)).report(full_report).gpu(gpu_note)),
     }
 }
 
@@ -396,4 +451,23 @@ where
         }
     }
     (h, grad, partition)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gpu_value_of;
+    use arael::simple_lm::{GpuDevice, GpuWide};
+
+    /// The header's GPU line: none without a device, the CPU device by its
+    /// role, a device's wide scalar and staging, and a device the machine
+    /// does not have called out.
+    #[test]
+    fn the_headers_gpu_line_says_what_the_rows_are_given() {
+        assert!(gpu_value_of(None).starts_with("none [ARAEL_GPU"));
+        let cpu = gpu_value_of(Some(&GpuDevice::cpu().with_wide(GpuWide::Df32)));
+        assert_eq!(cpu, "cpu:0, the CPU running the GPU's kernels, wide df32, staging pinned [ARAEL_GPU, ARAEL_GPU_WIDE, ARAEL_GPU_STAGING]");
+        // no machine has an eighth HIP device
+        let missing = gpu_value_of(Some(&GpuDevice::hip(7)));
+        assert!(missing.starts_with("hip:7 NOT FOUND") && missing.contains("the arael rows will fail"), "{missing}");
+    }
 }
