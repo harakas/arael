@@ -179,13 +179,6 @@ fn captures_leave_other_threads_alone() {
     });
 }
 
-/// Whether this file's device times its launches ([`Device::time_launches`]):
-/// all but the Metal device, which has its own `time_kernels`.
-const TIMED: bool = cfg!(any(feature = "cuda", feature = "hip", not(all(feature = "metal", target_vendor = "apple"))));
-
-/// Whether the device keeps stamps: every one but Metal's.
-const STAMPED: bool = cfg!(any(feature = "cuda", feature = "hip", not(all(feature = "metal", target_vendor = "apple"))));
-
 /// Stamps mark points of the device's queue without waiting, and a span is
 /// the device's time between two of them once it has passed both: a long
 /// loop's span is longer than a short one's, the two add up to the span
@@ -210,10 +203,6 @@ fn stamps_give_the_devices_time_between_two_points() {
     spin(8_000_000).unwrap();
     dev.stamp(2).unwrap();
     wait();
-    if !STAMPED {
-        assert_eq!(dev.span(0, 2).unwrap(), None, "a device without stamps");
-        return;
-    }
     let span = |a, b| dev.span(a, b).unwrap().expect("both stamps were made");
     let (short, long, both) = (span(0, 1), span(1, 2), span(0, 2));
     assert!(short >= 0.0 && long > 4.0 * short, "the longer loop takes longer: {short} and {long}");
@@ -232,9 +221,6 @@ fn stamps_give_the_devices_time_between_two_points() {
 /// Unasked it gives none.
 #[test]
 fn a_timed_device_gives_a_time_a_launch() {
-    if !TIMED {
-        return;
-    }
     let dev = Dev::new(0).unwrap();
     let k = dev.compile(SOURCE, "", "spin").unwrap();
     let out = dev.alloc(4 * N).unwrap();

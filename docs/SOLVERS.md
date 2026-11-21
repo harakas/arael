@@ -1362,9 +1362,10 @@ part of the attempts:
 ```
 
 Timing a GPU solve adds two markers to the device's queue around each
-linearization and each attempt, about ten microseconds an attempt on CUDA;
-an untimed solve adds none. `gpu` is `None` without a GPU and on Metal,
-whose device keeps no timestamps.
+linearization and each attempt, about ten microseconds an attempt on CUDA
+(on Metal each marker is a command buffer of one empty dispatch, under a
+tenth of a millisecond an attempt); an untimed solve adds none. `gpu` is
+`None` without a GPU.
 
 With a factor an attempt is one captured graph on the device, and a
 timestamp inside a graph cannot be read back, so `LmTiming` does not

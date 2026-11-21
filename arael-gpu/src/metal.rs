@@ -18,7 +18,10 @@
 //! a read waits, then copies out of the buffer.
 //!
 //! [`MetalDevice::time_kernels`] times each launch on the GPU, summed per
-//! kernel.
+//! kernel, and [`Device::time_launches`] each launch in order: a timed
+//! launch is a command buffer of its own, its GPU start to its end. A
+//! [`Device::stamp`] is a command buffer of one empty dispatch, whose GPU
+//! end marks when the main queue passed it.
 //!
 //! ```ignore
 //! let dev = arael_gpu::metal::MetalDevice::new(0)?;
@@ -112,10 +115,14 @@ struct Streams {
     /// when the next launch goes to the other, so it runs while the host
     /// encodes the other's.
     last: Lane,
-    /// Whether launches are timed ([`MetalDevice::time_kernels`]).
+    /// Whether launches are timed per kernel ([`MetalDevice::time_kernels`]).
     timing: bool,
     /// Each timed kernel's launches and GPU seconds, until taken.
     times: HashMap<String, (usize, f64)>,
+    /// Whether each launch is timed ([`Device::time_launches`]).
+    launch_timing: bool,
+    /// The GPU seconds of each launch timed so, in launch order, until taken.
+    launch_times: Vec<f64>,
 }
 
 /// A kernel's GPU time over its launches while [`MetalDevice::time_kernels`]
@@ -131,6 +138,14 @@ pub struct KernelTime {
 // under the device's lock on its streams, one thread at a time.
 unsafe impl Send for Streams {}
 
+/// A stamp's committed command buffer ([`Device::stamp`]).
+struct StampCb(Retained<ProtocolObject<dyn MTLCommandBuffer>>);
+
+// SAFETY: a committed command buffer is only waited for and its times read,
+// which Metal allows from any thread; it is kept under the device's lock on
+// its stamps.
+unsafe impl Send for StampCb {}
+
 /// One Metal GPU and two command queues of its own ([`Streams`]).
 pub struct MetalDevice {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -144,6 +159,11 @@ pub struct MetalDevice {
     capture: Mutex<Option<(ThreadId, Vec<Op>)>>,
     pool: Arc<Pool<Buf>>,
     host_pool: Arc<Pool<HostMem>>,
+    /// Each stamp's command buffer ([`Device::stamp`]): one empty dispatch,
+    /// run when the main queue reaches the stamp.
+    stamps: Mutex<[Option<StampCb>; crate::STAMPS]>,
+    /// The stamps' empty kernel, compiled at the first stamp.
+    stamp_kernel: std::sync::OnceLock<MetalKernel>,
 }
 
 impl core::fmt::Debug for MetalDevice {
@@ -305,6 +325,12 @@ pub fn compiles() -> usize {
     COMPILES.load(Ordering::Relaxed)
 }
 
+impl Drop for Stream {
+    fn drop(&mut self) {
+        self.end_encoder();
+    }
+}
+
 impl Stream {
     /// A stream on `queue`, its fence from `device`.
     fn new(device: &ProtocolObject<dyn MTLDevice>, queue: Retained<ProtocolObject<dyn MTLCommandQueue>>) -> Result<Self, GpuError> {
@@ -334,7 +360,9 @@ impl Stream {
     }
 
     /// Ends the compute encoder, if any, updating the fence the queue's next
-    /// encoder waits for.
+    /// encoder waits for. Also on drop: Metal aborts the process when an
+    /// encoder is released without `endEncoding`, as a panic unwinding past
+    /// encoded launches would release it.
     fn end_encoder(&mut self) {
         if let Some(enc) = self.encoder.take() {
             enc.updateFence(&self.fence);
@@ -548,6 +576,8 @@ impl MetalDevice {
                 last: Lane::Main,
                 timing: false,
                 times: HashMap::new(),
+                launch_timing: false,
+                launch_times: Vec::new(),
             };
             let arch = Arch {
                 name,
@@ -571,6 +601,8 @@ impl MetalDevice {
                 capture: Mutex::new(None),
                 pool: Arc::new(Pool::new()),
                 host_pool: Arc::new(Pool::new()),
+                stamps: Mutex::new(Default::default()),
+                stamp_kernel: std::sync::OnceLock::new(),
             })
         })
     }
@@ -673,7 +705,7 @@ impl MetalDevice {
             streams.lane(last).commit();
             streams.last = lane;
         }
-        let timing = streams.timing;
+        let timing = streams.timing || streams.launch_timing;
         let s = streams.lane(lane);
         if timing {
             // a command buffer of its own: the copies queued before stay out of its time
@@ -702,11 +734,16 @@ impl MetalDevice {
         s.launches += 1;
         if timing {
             let seconds = s.time_open()?;
-            let name = &kernel.inner.entry.name;
-            match streams.times.get_mut(name) {
-                Some(t) => *t = (t.0 + 1, t.1 + seconds),
-                None => {
-                    streams.times.insert(name.clone(), (1, seconds));
+            if streams.launch_timing {
+                streams.launch_times.push(seconds);
+            }
+            if streams.timing {
+                let name = &kernel.inner.entry.name;
+                match streams.times.get_mut(name) {
+                    Some(t) => *t = (t.0 + 1, t.1 + seconds),
+                    None => {
+                        streams.times.insert(name.clone(), (1, seconds));
+                    }
                 }
             }
         } else if s.launches >= COMMIT_EVERY {
@@ -1009,6 +1046,70 @@ impl Device for MetalDevice {
             Ok(())
         })
     }
+
+    fn time_launches(&self, on: bool) {
+        self.streams().launch_timing = on;
+    }
+
+    fn take_times(&self) -> Vec<f64> {
+        core::mem::take(&mut self.streams().launch_times)
+    }
+
+    /// A command buffer of one empty dispatch, committed on the main queue
+    /// behind its work so far: it completes when the queue has passed this
+    /// point. A stamp is not recorded into a capture: one made while a
+    /// capture is open is an error.
+    fn stamp(&self, slot: usize) -> Result<(), GpuError> {
+        assert!(slot < crate::STAMPS, "stamp {slot} of {}", crate::STAMPS);
+        self.not_capturing("a stamp")?;
+        let kernel = match self.stamp_kernel.get() {
+            Some(k) => k,
+            None => {
+                let k = self.compile("KERNEL void k_stamp() {}", "", "k_stamp")?;
+                self.stamp_kernel.get_or_init(|| k)
+            }
+        };
+        autoreleasepool(|_| {
+            let mut streams = self.streams();
+            if streams.last != Lane::Main {
+                let last = streams.last;
+                streams.lane(last).commit();
+                streams.last = Lane::Main;
+            }
+            let s = &mut streams.main;
+            s.commit();
+            let enc = s.encoder()?;
+            enc.setComputePipelineState(&kernel.inner.pipeline);
+            let one = MTLSize { width: 1, height: 1, depth: 1 };
+            enc.dispatchThreadgroups_threadsPerThreadgroup(one, one);
+            let cb = s.open.as_ref().expect("the stamp's command buffer").cb.clone();
+            s.commit();
+            self.stamps.lock().unwrap_or_else(|e| e.into_inner())[slot] = Some(StampCb(cb));
+            Ok(())
+        })
+    }
+
+    /// From the GPU end of stamp `from`'s command buffer to the end of stamp
+    /// `to`'s, after waiting for both. (A command buffer's start time can
+    /// precede its wait for the queue's work before it; its end cannot.)
+    fn span(&self, from: usize, to: usize) -> Result<Option<f64>, GpuError> {
+        let (a, b) = {
+            let stamps = self.stamps.lock().unwrap_or_else(|e| e.into_inner());
+            let (Some(a), Some(b)) = (&stamps[from], &stamps[to]) else { return Ok(None) };
+            (a.0.clone(), b.0.clone())
+        };
+        let mut ends = [0.0f64; 2];
+        for (end, cb) in ends.iter_mut().zip([&a, &b]) {
+            cb.waitUntilCompleted();
+            if cb.status() == MTLCommandBufferStatus::Error {
+                return Err(GpuError::Driver(format!("a stamp's command buffer failed: {}", status_error(cb))));
+            }
+            // SAFETY: takes no arguments and returns a CFTimeInterval (an
+            // f64, seconds); the command buffer has completed.
+            *end = unsafe { msg_send![&**cb, GPUEndTime] };
+        }
+        Ok(Some(ends[1] - ends[0]))
+    }
 }
 
 #[cfg(test)]
@@ -1029,6 +1130,20 @@ mod tests {
         assert!(a.multiprocessors >= 7, "{a:?}");
         assert!(a.shared_bytes >= 32 * 1024, "{a:?}");
         assert!(matches!(MetalDevice::new(99), Err(GpuError::Unavailable(_))));
+    }
+
+    /// A panic with a launch encoded and not yet committed unwinds: the
+    /// device dropped on the way ends its open encoder.
+    #[test]
+    fn a_panic_past_encoded_launches_unwinds() {
+        let caught = std::panic::catch_unwind(|| {
+            let dev = MetalDevice::new(0).unwrap();
+            let k = dev.compile("KERNEL void one(GLOBAL float* x) { x[global_x()] = 1.0f; }", "", "one").unwrap();
+            let x = dev.alloc(4 * 256).unwrap();
+            dev.launch(&k, Launch::linear(256, 256), &[Arg::Block(&x, 0)]).unwrap();
+            panic!("past an encoded launch");
+        });
+        assert!(caught.is_err());
     }
 
     /// Writes queued behind launches land after them, and a reused block is
