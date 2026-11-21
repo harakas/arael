@@ -2,6 +2,7 @@
 # gpu-cpu feature (python.rs): the fixture solved on the CPU device with
 # the device assembly on and off, and without a GPU. Prints `name value`
 # lines for python.rs to check.
+import ctypes
 import os
 import sys
 
@@ -103,3 +104,20 @@ pi("cg_solve", int(r.gpu.solve))
 pi("cg_is_cg", 1 if r.gpu.solve == fit.GpuSolve.CONJUGATE_GRADIENTS else 0)
 pi("cg_work", int(r.gpu.work))
 pi("cg_iters", 1 if (r.plan.cg_iterations or 0) > 0 else 0)
+
+# The machine's GPUs and the one detected, the first of them. (The capi
+# built with the CPU device alone lists none: it is not a GPU.) GpuInfo's
+# C layout.
+gpus = fit.available_gpus()
+detected = fit.detect_gpu()
+pi("gpus", len(gpus))
+pi("detected", 0 if detected is None else 1)
+if gpus:
+    first = detected is not None and (detected.backend, detected.index) == (gpus[0].backend, gpus[0].index)
+else:
+    first = detected is None
+pi("detect_first", 1 if first else 0)
+pi("gpu_info_size", ctypes.sizeof(fit.GpuInfoRaw))
+pi("gpu_info_name_at", fit.GpuInfoRaw.name.offset)
+for gpu in gpus:
+    print("gpu", gpu, file=sys.stderr)

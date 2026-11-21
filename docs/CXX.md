@@ -332,6 +332,22 @@ views are named by their container's nature: `PathPosesDeque`,
   so.gpu = GpuBackend::Metal;
   so.mixed_precision = !arael::has_f64(so.gpu);   // an f64 model needs it
   ```
+
+  `detect_gpu()` picks the machine's GPU and `available_gpus()` lists
+  them (`GpuInfo`: `backend`, `index`, `name`, `integrated`), of the
+  runtimes the interface was built with: discrete before integrated,
+  then CUDA, HIP, Metal, then by index. No device is opened, and the CPU
+  device is not listed. `detect_gpu()` logs what it found:
+
+  ```cpp
+  if (auto gpu = detect_gpu()) {        // empty without a GPU: the solve stays on the CPU
+      so.gpu = gpu->backend;
+      so.gpu_index = gpu->index;
+      so.mixed_precision = !arael::has_f64(so.gpu);
+  }
+  for (const GpuInfo& gpu : available_gpus())
+      std::puts(gpu.name);              // NVIDIA GeForce RTX 4090
+  ```
 - **LmSession**: warm reuse over repeated sparse solves --
   `LmSession sess;` (optionally over a `SparseOptions`), then
   `sess.solve(model, cfg)` keeps the sparsity analysis (pattern,

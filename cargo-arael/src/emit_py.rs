@@ -1070,6 +1070,11 @@ class Covariance:
     sig(&mut py, &format!("{root_sn}_pool_shutdown"), &[], "None");
     sig(&mut py, &format!("{root_sn}_arael_version"),
         &["ctypes.POINTER(_solver.AraelVersion)"], "None");
+    sig(&mut py, &format!("{root_sn}_gpu_available"),
+        &["ctypes.POINTER(_solver.GpuInfoRaw)", "ctypes.c_uint64"],
+        "ctypes.c_uint64");
+    sig(&mut py, &format!("{root_sn}_gpu_detect"),
+        &["ctypes.POINTER(_solver.GpuInfoRaw)"], "ctypes.c_bool");
     sig(&mut py, &format!("{root_sn}_result_report"),
         &["ctypes.c_void_p", "ctypes.c_bool"], "ctypes.c_char_p");
     sig(&mut py, &format!("{root_sn}_result_plan"),
@@ -1385,7 +1390,8 @@ from .arael import math as _m
 from .arael import transform as _tf
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
-                           HostAssembly, FaerOrdering, GpuBackend, GpuReport, GpuReportRaw,
+                           HostAssembly, FaerOrdering, GpuBackend, GpuInfo, GpuInfoRaw,
+                           GpuReport, GpuReportRaw,
                            GpuSolve, GpuStaging, GpuTiming, GpuWide, GpuWork, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
                            SchurPolicy, SchurSolve, SetupTiming, SolveFailure,
@@ -1451,6 +1457,39 @@ def arael_version():
     v = AraelVersion()
     _f.{root_sn}_arael_version(ctypes.byref(v))
     return v
+
+
+def available_gpus():
+    \"\"\"The machine's GPUs (arael.solver.GpuInfo), the preferred first:
+    discrete before integrated, then CUDA, HIP, Metal, of the runtimes the
+    package was built with. No device is opened; the CPU device is not
+    listed.
+
+        for gpu in available_gpus():
+            print(gpu)   # cuda:0 NVIDIA GeForce RTX 4090
+    \"\"\"
+    load()
+    n = _f.{root_sn}_gpu_available(None, 0)
+    if not n:
+        return []
+    buf = (GpuInfoRaw * n)()
+    n = min(n, _f.{root_sn}_gpu_available(buf, n))
+    return [GpuInfo(buf[i]) for i in range(n)]
+
+
+def detect_gpu():
+    \"\"\"The preferred GPU of the machine (arael.solver.GpuInfo), the
+    first of available_gpus(), logged; None without one.
+
+        gpu = detect_gpu()
+        if gpu is not None:
+            opts.gpu, opts.gpu_index = gpu.backend, gpu.index
+    \"\"\"
+    load()
+    raw = GpuInfoRaw()
+    if not _f.{root_sn}_gpu_detect(ctypes.byref(raw)):
+        return None
+    return GpuInfo(raw)
 
 
 def _raw(r):

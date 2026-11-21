@@ -531,6 +531,45 @@ class GpuReport:
             "%s=%r" % (k, getattr(self, k)) for k in self.__slots__) + ")"
 
 
+class GpuInfoRaw(ctypes.Structure):
+    """The C layout of a GpuInfo."""
+    _fields_ = [
+        ("backend", ctypes.c_uint32),
+        ("index", ctypes.c_uint32),
+        ("integrated", ctypes.c_bool),
+        ("name", ctypes.c_char * 128),
+    ]
+
+
+class GpuInfo:
+    """A GPU of the machine (mirror of the Rust GpuInfo), as a generated
+    package's available_gpus() and detect_gpu() give it:
+
+        gpu = fit.detect_gpu()
+        if gpu is not None:
+            opts.gpu, opts.gpu_index = gpu.backend, gpu.index
+
+    `backend` (GpuBackend) and `index` name the device, `name` is its
+    driver's name, and `integrated` says that it shares the host's memory.
+    str() gives the log's form: "hip:0 AMD Radeon Graphics (integrated)"."""
+
+    __slots__ = ("backend", "index", "name", "integrated")
+
+    def __init__(self, raw):
+        self.backend = GpuBackend(raw.backend)
+        self.index = raw.index
+        self.name = raw.name.decode()
+        self.integrated = raw.integrated
+
+    def __str__(self):
+        return "%s:%d %s%s" % (self.backend.name.lower(), self.index, self.name,
+                               " (integrated)" if self.integrated else "")
+
+    def __repr__(self):
+        return "GpuInfo(" + ", ".join(
+            "%s=%r" % (k, getattr(self, k)) for k in self.__slots__) + ")"
+
+
 class FormTiming(ctypes.Structure):
     """One form's share of a sweep phase, summed over its calls (mirror
     of the Rust FormTiming). Seconds."""

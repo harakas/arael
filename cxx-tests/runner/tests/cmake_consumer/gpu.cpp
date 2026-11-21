@@ -99,5 +99,16 @@ int main() {
     std::printf("cg_solve %u\ncg_is_cg %d\ncg_work %u\ncg_iters %d\n", unsigned(g.solve), g.solve == GpuSolve::ConjugateGradients ? 1 : 0,
         unsigned(g.work), (p.cg_iterations && *p.cg_iterations > 0) ? 1 : 0);
     timing("cg", cg.value());
+
+    // The machine's GPUs and the one detected, the first of them. (The
+    // interface built with the CPU device alone lists none: it is not a
+    // GPU.) GpuInfo's C layout.
+    std::vector<GpuInfo> gpus = available_gpus();
+    auto detected = detect_gpu();
+    bool first = gpus.empty() ? !detected : (detected && detected->backend == gpus[0].backend && detected->index == gpus[0].index);
+    std::printf("gpus %zu\ndetected %d\ndetect_first %d\n", gpus.size(), detected ? 1 : 0, first ? 1 : 0);
+    std::printf("gpu_info_size %zu\ngpu_info_name_at %zu\n", sizeof(GpuInfo), offsetof(GpuInfo, name));
+    for (const GpuInfo& gpu : gpus)
+        std::fprintf(stderr, "gpu %u:%u %s%s\n", unsigned(gpu.backend), gpu.index, gpu.name, gpu.integrated ? " (integrated)" : "");
     return 0;
 }

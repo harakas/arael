@@ -42,6 +42,8 @@ SIGS = [
     ("decay_set_log_level", [ctypes.c_uint32], None),
     ("decay_pool_shutdown", [], None),
     ("decay_arael_version", [ctypes.POINTER(_solver.AraelVersion)], None),
+    ("decay_gpu_available", [ctypes.POINTER(_solver.GpuInfoRaw), ctypes.c_uint64], ctypes.c_uint64),
+    ("decay_gpu_detect", [ctypes.POINTER(_solver.GpuInfoRaw)], ctypes.c_bool),
     ("decay_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),
     ("decay_result_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.SchurPlan)], ctypes.c_bool),
     ("decay_result_gpu", [ctypes.c_void_p, ctypes.POINTER(_solver.GpuReportRaw)], ctypes.c_bool),

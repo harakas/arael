@@ -47,4 +47,9 @@ pub fn verify(text: &str) {
     // conjugate gradients on the reduced system: GpuSolve::ConjugateGradients,
     // the damped solves on the device (GpuWork::Solves), iterations counted
     assert_eq!((g("cg_solve"), g("cg_is_cg"), g("cg_work"), g("cg_iters")), (3.0, 1.0, 1.0, 1.0), "{text}");
+    // the machine's GPUs: the interface has the CPU device alone, which
+    // is not a GPU, so none is listed and none detected
+    assert_eq!((g("gpus"), g("detected"), g("detect_first")), (0.0, 0.0, 1.0), "{text}");
+    // GpuInfo's C layout: two u32, a bool, the name's 128 chars
+    assert_eq!((g("gpu_info_size"), g("gpu_info_name_at")), (140.0, 9.0), "{text}");
 }

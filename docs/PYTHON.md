@@ -430,6 +430,21 @@ so.gpu = fit.GpuBackend.METAL               # cdylib built with --features gpu-m
 so.mixed_precision = not so.gpu.has_f64     # an f64 model needs it there
 ```
 
+`detect_gpu()` picks the machine's GPU and `available_gpus()` lists them
+(`GpuInfo`: `backend`, `index`, `name`, `integrated`), of the runtimes
+the cdylib was built with: discrete before integrated, then CUDA, HIP,
+Metal, then by index. No device is opened, and the CPU device is not
+listed. `detect_gpu()` logs what it found:
+
+```python
+gpu = fit.detect_gpu()                      # None without a GPU: the solve stays on the CPU
+if gpu is not None:
+    so.gpu, so.gpu_index = gpu.backend, gpu.index
+    so.mixed_precision = not so.gpu.has_f64
+for gpu in fit.available_gpus():
+    print(gpu)                              # cuda:0 NVIDIA GeForce RTX 4090
+```
+
 `LmSession(opts=None)` keeps the sparsity analysis (pattern,
 ordering, symbolic factorization, Schur plan) across repeated solves
 of the same structure. Call `invalidate()` after any structural

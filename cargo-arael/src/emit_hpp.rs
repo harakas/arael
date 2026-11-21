@@ -822,6 +822,8 @@ private:
          void {root_sn}_set_log_level(uint32_t);\n\
          void {root_sn}_pool_shutdown(void);\n\
          void {root_sn}_arael_version(AraelVersion*);\n\
+         uint64_t {root_sn}_gpu_available(GpuInfo*, uint64_t);\n\
+         bool {root_sn}_gpu_detect(GpuInfo*);\n\
          void {root_sn}_sparse_options(SparseOptions*);\n\
          int32_t {root_sn}_solve_dense({root}*, const LmConfig*, LmResultT<{fp}>*);\n\
          int32_t {root_sn}_solve_sparse({root}*, const LmConfig*, const SparseOptions*, LmResultT<{fp}>*);\n\
@@ -917,6 +919,7 @@ using arael::GpuSolve;
 using arael::GpuWork;
 using arael::HostAssembly;
 using arael::GpuReport;
+using arael::GpuInfo;
 using arael::SparseOptionsT;
 using arael::LogLevel;
 using arael::PanicError;
@@ -980,6 +983,39 @@ inline AraelVersion arael_version() {{
     AraelVersion v{{}};
     ffi::{root_sn}_arael_version(&v);
     return v;
+}}
+
+/// The machine's GPUs, the preferred first (Rust's
+/// GpuDevice::available): discrete before integrated, then CUDA, HIP,
+/// Metal, of the runtimes the interface was built with (ARAEL_GPU). No
+/// device is opened; the CPU device is not listed.
+///
+///     for (const auto& gpu : available_gpus())
+///         puts(gpu.name);
+inline std::vector<GpuInfo> available_gpus() {{
+    std::vector<GpuInfo> out(ffi::{root_sn}_gpu_available(nullptr, 0));
+    if (!out.empty()) {{
+        // a device gone between the two calls leaves fewer
+        uint64_t n = ffi::{root_sn}_gpu_available(out.data(), out.size());
+        if (n < out.size())
+            out.resize(n);
+    }}
+    return out;
+}}
+
+/// The preferred GPU of the machine, the first of available_gpus()
+/// (Rust's GpuDevice::detect, which logs what it found); empty without
+/// one.
+///
+///     if (auto gpu = detect_gpu()) {{
+///         opts.gpu = gpu->backend;
+///         opts.gpu_index = gpu->index;
+///     }}
+inline option<GpuInfo> detect_gpu() {{
+    GpuInfo gpu{{}};
+    if (ffi::{root_sn}_gpu_detect(&gpu))
+        return gpu;
+    return {{}};
 }}
 
 class Covariance;

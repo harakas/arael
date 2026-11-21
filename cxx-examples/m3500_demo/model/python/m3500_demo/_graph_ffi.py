@@ -73,6 +73,8 @@ SIGS = [
     ("graph_set_log_level", [ctypes.c_uint32], None),
     ("graph_pool_shutdown", [], None),
     ("graph_arael_version", [ctypes.POINTER(_solver.AraelVersion)], None),
+    ("graph_gpu_available", [ctypes.POINTER(_solver.GpuInfoRaw), ctypes.c_uint64], ctypes.c_uint64),
+    ("graph_gpu_detect", [ctypes.POINTER(_solver.GpuInfoRaw)], ctypes.c_bool),
     ("graph_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),
     ("graph_result_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.SchurPlan)], ctypes.c_bool),
     ("graph_result_gpu", [ctypes.c_void_p, ctypes.POINTER(_solver.GpuReportRaw)], ctypes.c_bool),

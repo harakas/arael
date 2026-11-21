@@ -71,6 +71,7 @@ using arael::GpuSolve;
 using arael::GpuWork;
 using arael::HostAssembly;
 using arael::GpuReport;
+using arael::GpuInfo;
 using arael::SparseOptionsT;
 using arael::LogLevel;
 using arael::PanicError;
@@ -504,6 +505,8 @@ const char* fit_validate(Fit*);
 void fit_set_log_level(uint32_t);
 void fit_pool_shutdown(void);
 void fit_arael_version(AraelVersion*);
+uint64_t fit_gpu_available(GpuInfo*, uint64_t);
+bool fit_gpu_detect(GpuInfo*);
 void fit_sparse_options(SparseOptions*);
 int32_t fit_solve_dense(Fit*, const LmConfig*, LmResultT<double>*);
 int32_t fit_solve_sparse(Fit*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
@@ -552,6 +555,39 @@ inline AraelVersion arael_version() {
     AraelVersion v{};
     ffi::fit_arael_version(&v);
     return v;
+}
+
+/// The machine's GPUs, the preferred first (Rust's
+/// GpuDevice::available): discrete before integrated, then CUDA, HIP,
+/// Metal, of the runtimes the interface was built with (ARAEL_GPU). No
+/// device is opened; the CPU device is not listed.
+///
+///     for (const auto& gpu : available_gpus())
+///         puts(gpu.name);
+inline std::vector<GpuInfo> available_gpus() {
+    std::vector<GpuInfo> out(ffi::fit_gpu_available(nullptr, 0));
+    if (!out.empty()) {
+        // a device gone between the two calls leaves fewer
+        uint64_t n = ffi::fit_gpu_available(out.data(), out.size());
+        if (n < out.size())
+            out.resize(n);
+    }
+    return out;
+}
+
+/// The preferred GPU of the machine, the first of available_gpus()
+/// (Rust's GpuDevice::detect, which logs what it found); empty without
+/// one.
+///
+///     if (auto gpu = detect_gpu()) {
+///         opts.gpu = gpu->backend;
+///         opts.gpu_index = gpu->index;
+///     }
+inline option<GpuInfo> detect_gpu() {
+    GpuInfo gpu{};
+    if (ffi::fit_gpu_detect(&gpu))
+        return gpu;
+    return {};
 }
 
 class Covariance;

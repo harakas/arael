@@ -624,6 +624,24 @@ enum class HostAssembly : uint32_t {
     NoF64 = 3,
 };
 
+/// A GPU of the machine (mirrors arael's GpuInfo), as a model's
+/// available_gpus() and detect_gpu() give it. Layout is part of the C ABI
+/// -- field order matters.
+///
+///     if (auto gpu = fit::detect_gpu()) {
+///         opts.gpu = gpu->backend;
+///         opts.gpu_index = gpu->index;
+///     }
+struct GpuInfo {
+    GpuBackend backend;
+    /// The device, as the runtime numbers them (SparseOptions::gpu_index).
+    uint32_t index;
+    /// Whether it shares the host's memory: an integrated GPU.
+    bool integrated;
+    /// The device's name, as its driver reports it.
+    char name[128];
+};
+
 /// What a solve did on the GPU it was given (mirrors arael's GpuReport);
 /// read it with LmResult::gpu(). The strings belong to the result and live
 /// as long as it does. Layout is part of the C ABI -- field order matters.

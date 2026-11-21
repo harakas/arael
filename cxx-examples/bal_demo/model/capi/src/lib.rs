@@ -1076,6 +1076,41 @@ pub struct CGpuReport {
     pub buffers_created: u64,
 }
 
+/// A GPU of the machine (mirror of arael's GpuInfo). `name` is its
+/// driver's name, NUL-terminated, cut to fit. Field order is C ABI.
+#[repr(C)]
+pub struct CGpuInfo {
+    /// GpuBackend: 1 CUDA, 2 HIP, 4 Metal.
+    pub backend: u32,
+    pub index: u32,
+    pub integrated: bool,
+    pub name: [c_char; 128],
+}
+
+fn c_gpu_info(g: &arael::simple_lm::GpuInfo) -> CGpuInfo {
+    use arael::simple_lm::GpuBackend;
+    let mut name = [0 as c_char; 128];
+    // whole characters of the name, the last element left for the NUL
+    let mut len = g.name.len().min(name.len() - 1);
+    while !g.name.is_char_boundary(len) {
+        len -= 1;
+    }
+    for (c, b) in name.iter_mut().zip(&g.name.as_bytes()[..len]) {
+        *c = *b as c_char;
+    }
+    CGpuInfo {
+        backend: match g.backend {
+            GpuBackend::Cuda => 1,
+            GpuBackend::Hip => 2,
+            GpuBackend::Cpu => 3,
+            GpuBackend::Metal => 4,
+        },
+        index: g.index as u32,
+        integrated: g.integrated,
+        name,
+    }
+}
+
 unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
     use arael::simple_lm::ReducedOrdering;
     let od = |o: Option<f64>| match o {
@@ -1508,6 +1543,33 @@ pub unsafe extern "C" fn scene_arael_version(out: *mut CAraelVersion) {
         patch: arael::VERSION.patch,
         pre: PRE.get_or_init(|| CString::new(arael::VERSION.pre).unwrap()).as_ptr(),
     };
+}
+
+/// The machine's GPUs, the preferred first (arael's
+/// GpuDevice::available): discrete before integrated, then CUDA, HIP,
+/// Metal, of the runtimes the shim was built with. Copies up to `cap`
+/// records into `out` and returns the total count -- call with cap 0 to
+/// size the buffer.
+#[no_mangle]
+pub unsafe extern "C" fn scene_gpu_available(out: *mut CGpuInfo, cap: u64) -> u64 {
+    let gpus = arael::simple_lm::GpuDevice::available();
+    for (i, g) in gpus.iter().take(cap as usize).enumerate() {
+        *out.add(i) = c_gpu_info(g);
+    }
+    gpus.len() as u64
+}
+
+/// The preferred GPU of the machine (arael's GpuDevice::detect, which
+/// logs what it found): true and the GPU in `out`, false with `out`
+/// untouched without one.
+#[no_mangle]
+pub unsafe extern "C" fn scene_gpu_detect(out: *mut CGpuInfo) -> bool {
+    let Some(gpu) = arael::simple_lm::GpuDevice::detect() else { return false };
+    // the listing's record of it has its name
+    let gpus = arael::simple_lm::GpuDevice::available();
+    let Some(g) = gpus.iter().find(|g| g.backend == gpu.backend() && g.index == gpu.index()) else { return false };
+    *out = c_gpu_info(g);
+    true
 }
 
 /// Empty string when the model is clean, the Diagnostic text otherwise.
