@@ -229,6 +229,11 @@ pub fn solve<T: SchurReal>(
     let mut rho = dot(r, z);
     let rho0 = rho;
 
+    // A NaN or infinite start (a right-hand side not finite) has nothing to
+    // descend to: not converged, not iterated.
+    if !rho0.is_finite() {
+        return CgStats { iters: 0, converged: false, relative_residual: f64::NAN };
+    }
     // A zero right-hand side is already solved; so is a starting residual the
     // preconditioner reports as non-positive, which cannot be descended.
     if !(rho0 > 0.0) {
@@ -367,6 +372,20 @@ mod tests {
         let stats = solve(|u, v| a.mul_symmetric_upper(u, v), &m, &b, &mut x, &opts, &mut w);
         assert_eq!(stats.iters, 1);
         assert!(!stats.converged);
+    }
+
+    /// A right-hand side with a NaN or an infinite entry is not solved: no
+    /// iteration, not converged, a NaN relative residual.
+    #[test]
+    fn a_right_hand_side_not_finite_is_not_converged() {
+        let a = spd();
+        let m = BlockJacobi::build(&a).unwrap();
+        for bad in [f64::NAN, f64::INFINITY] {
+            let b = vec![1.0, bad, 3.0, 4.0];
+            let mut x = vec![0.0; 4];
+            let stats = solve(|u, v| a.mul_symmetric_upper(u, v), &m, &b, &mut x, &CgParams::default(), &mut CgWorkspace::default());
+            assert!(stats.iters == 0 && !stats.converged && stats.relative_residual.is_nan(), "{bad}: {stats:?}");
+        }
     }
 
     #[test]

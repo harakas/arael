@@ -125,7 +125,8 @@ KERNEL_THREADS(THREADS) void k_cg_start(GLOBAL const u32* RESTRICT kb, GLOBAL co
 
 // The start's sum, one block: rho = rho0 = r.z, the target tol rho0, the
 // flags. Nothing to iterate when the reduction or the preconditioner failed
-// (failed[F_ELIM], failed[F_FACTOR]), when rho0 is not positive (solved:
+// (failed[F_ELIM], failed[F_FACTOR]), when rho0 is not finite (a right-hand
+// side not finite: not converged), when it is not positive (solved:
 // converged in no iteration) or is already at the target.
 KERNEL_THREADS(THREADS) void k_cg_begin(GLOBAL const W* RESTRICT part, GLOBAL W* RESTRICT st, GLOBAL u32* RESTRICT fl, GLOBAL const u32* RESTRICT failed, u32 nk, W tol) {
     SHARED W sh[THREADS];
@@ -136,11 +137,12 @@ KERNEL_THREADS(THREADS) void k_cg_begin(GLOBAL const W* RESTRICT part, GLOBAL W*
         st[CG_RHO0] = rho;
         st[CG_TARGET] = target;
         u32 bad = failed[F_ELIM] | failed[F_FACTOR];
-        u32 go = bad == 0 && rho > 0.0f && !(rho <= target) ? 1u : 0u;
+        bool finite = isfinite(rho);
+        u32 go = bad == 0 && finite && rho > 0.0f && !(rho <= target) ? 1u : 0u;
         fl[CF_ITERS] = 0;
         fl[CF_BREAKDOWN] = 0;
         fl[CF_RESTART] = 0;
-        fl[CF_CONVERGED] = bad == 0 && go == 0 ? 1u : 0u;
+        fl[CF_CONVERGED] = bad == 0 && finite && go == 0 ? 1u : 0u;
         fl[CF_ACTIVE] = go;
     }
 }

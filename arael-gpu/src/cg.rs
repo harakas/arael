@@ -204,15 +204,15 @@ pub struct GpuCg<D: Device> {
 impl<D: Device> GpuCg<D> {
     /// Conjugate gradients under `cg` on the reduced system of `gs`, on
     /// its device, with the vectors, the preconditioner's factors and the
-    /// kernels.
+    /// kernels. A reduction that keeps no block has nothing to iterate: its
+    /// solve converges at once.
     ///
     /// # Panics
     ///
-    /// When `gs` keeps no block, or [`GpuCgParams::graph_iters`] is 0.
+    /// When [`GpuCgParams::graph_iters`] is 0.
     pub fn new(gs: &GpuSchur<D>, cg: &CgParams, params: &GpuCgParams) -> Result<Self, GpuError> {
         let dev = gs.device();
         let rs = gs.reduced_system();
-        assert!(rs.nk > 0, "conjugate gradients solve a reduced system, and this reduction keeps no block");
         assert!(params.graph_iters > 0, "a graph of no iteration");
         let _scope = (Scope::new(&**dev, "setup"), Scope::new(&**dev, "cg"));
         let reduced = gs.reduced();
@@ -428,8 +428,15 @@ impl<D: Device> GpuCg<D> {
             iters: flag(CF_ITERS) as usize,
             converged: flag(CF_CONVERGED) != 0,
             breakdown: flag(CF_BREAKDOWN) != 0,
-            // a right-hand side of zero is solved as it stands
-            relative_residual: if rho0 > 0.0 { rho / rho0 } else { 0.0 },
+            // a right-hand side of zero is solved as it stands; one not
+            // finite is not solved
+            relative_residual: if !rho0.is_finite() {
+                f64::NAN
+            } else if rho0 > 0.0 {
+                rho / rho0
+            } else {
+                0.0
+            },
         }
     }
 
@@ -684,6 +691,26 @@ mod tests {
         let stats = solver.solve(&mut g, h.vals(), &zero, &mut delta).unwrap();
         assert_eq!((stats.iters, stats.converged, stats.relative_residual), (0, true, 0.0), "{stats:?}");
         assert!(delta.iter().all(|&v| v == 0.0));
+    }
+
+    /// A right-hand side with a NaN or an infinite entry is not solved, as
+    /// on the CPU: no iteration, not converged, a NaN relative residual.
+    #[test]
+    fn a_right_hand_side_not_finite_is_not_converged() {
+        let (h, _, rhs, elim, sym) = setup(40, 300, 5);
+        let n = h.symbolic().ncols();
+        let dev = device();
+        let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide(&*dev)).unwrap();
+        let mut solver = GpuCg::new(&g, &CgParams::default(), &GpuCgParams::default()).unwrap();
+        // an entry of a kept block, where the reduced right-hand side takes it
+        let kept = (0..h.symbolic().nblk_cols()).find(|b| !elim.contains(b)).expect("a kept block");
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut b = rhs.clone();
+            b[h.symbolic().col_span(kept).start] = bad;
+            let mut delta = vec![0.0f64; n];
+            let stats = solver.solve(&mut g, h.vals(), &b, &mut delta).unwrap();
+            assert!(stats.iters == 0 && !stats.converged && stats.relative_residual.is_nan(), "{bad}: {stats:?}");
+        }
     }
 
     /// The iterations are queued in rounds: graphs of one iteration and of
