@@ -239,6 +239,36 @@ fn check_table(function: &CudaFunction, index: usize, bytes: usize) {
     }
 }
 
+/// The CUDA devices of this machine, by index, without opening one.
+/// [`GpuError::Unavailable`] when the CUDA driver library or NVRTC is not
+/// installed, or the driver does not start (a machine without an NVIDIA
+/// GPU).
+///
+/// ```ignore
+/// let discrete = arael_gpu::cuda::devices()?.into_iter().find(|d| !d.integrated);
+/// ```
+pub fn devices() -> Result<Vec<crate::DeviceInfo>, GpuError> {
+    // cudarc panics when it loads a library that is missing: ask first.
+    // SAFETY: loading the vendor's libraries runs their initializers.
+    if !unsafe { sys::is_culib_present() } {
+        return Err(GpuError::Unavailable("the CUDA driver library is not installed".into()));
+    }
+    if !unsafe { nvrtc::sys::is_culib_present() } {
+        return Err(GpuError::Unavailable("NVRTC, CUDA's run-time compiler, is not installed".into()));
+    }
+    let unavailable = |e: result::DriverError| GpuError::Unavailable(format!("the CUDA driver does not start ({e})"));
+    result::init().map_err(unavailable)?;
+    let count = result::device::get_count().map_err(unavailable)?;
+    (0..count)
+        .map(|i| {
+            let dev = result::device::get(i).map_err(driver)?;
+            // SAFETY: `dev` is the device `get` returned.
+            let integrated = unsafe { result::device::get_attribute(dev, CUdevice_attribute::CU_DEVICE_ATTRIBUTE_INTEGRATED) }.map_err(driver)? != 0;
+            Ok(crate::DeviceInfo { index: i as usize, name: result::device::get_name(dev).map_err(driver)?, integrated })
+        })
+        .collect()
+}
+
 impl CudaDevice {
     /// Device `index`. [`GpuError::Unavailable`] when there is no such
     /// device or the CUDA driver is not installed.

@@ -551,6 +551,24 @@ fn gpu_cores() -> Result<u32, GpuError> {
     }
 }
 
+/// The Metal devices of this Mac that [`MetalDevice::new`] opens (Apple
+/// GPUs of family 7 or later, M1 on), each with its index there, without
+/// opening one.
+///
+/// ```ignore
+/// let gpu = arael_gpu::metal::devices().into_iter().next();
+/// ```
+pub fn devices() -> Vec<crate::DeviceInfo> {
+    autoreleasepool(|_| {
+        MTLCopyAllDevices()
+            .iter()
+            .enumerate()
+            .filter(|(_, device)| device.supportsFamily(MTLGPUFamily::Apple7))
+            .map(|(index, device)| crate::DeviceInfo { index, name: device.name().to_string(), integrated: device.hasUnifiedMemory() })
+            .collect()
+    })
+}
+
 impl MetalDevice {
     /// Metal device `index` (0 is the Mac's GPU). [`GpuError::Unavailable`]
     /// when there is no such device or it is not an Apple GPU of family 7

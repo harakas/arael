@@ -6,6 +6,9 @@
 //! libraries at run time, so a build needs neither the CUDA toolkit nor
 //! ROCm. `cpu::CpuDevice` (feature `cpu`) runs the same kernels on the
 //! CPU, compiled by the host's C++ compiler, for tests without a GPU.
+//! A runtime's `devices()` (`cuda::devices`, `hip::devices`,
+//! `metal::devices`) lists the machine's devices ([`DeviceInfo`]) without
+//! opening one.
 //!
 //! On a device: [`GpuSupernodal`] (the block supernodal Cholesky and its
 //! level-set solve), [`GpuSchur`] (the Schur reduction, the refinement and
@@ -362,6 +365,24 @@ pub enum Vendor {
     Apple,
     /// The CPU device.
     Cpu,
+}
+
+/// A device as its runtime lists it (`cuda::devices`, `hip::devices`,
+/// `metal::devices`), without opening it.
+///
+/// ```ignore
+/// for d in arael_gpu::cuda::devices()? {
+///     println!("cuda:{} {}{}", d.index, d.name, if d.integrated { " (integrated)" } else { "" });
+/// }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceInfo {
+    /// The index the runtime's device type opens it by.
+    pub index: usize,
+    /// The device's name, as its driver reports it.
+    pub name: String,
+    /// Whether the device shares the host's memory: an integrated GPU.
+    pub integrated: bool,
 }
 
 /// What a device's kernels are specialised on.

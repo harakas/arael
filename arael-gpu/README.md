@@ -8,6 +8,9 @@ feature `hip`). Both runtimes load the vendor's libraries at run time, so
 a build needs neither the CUDA toolkit nor ROCm. The CPU device
 (`cpu::CpuDevice`, feature `cpu`) runs the same kernels on the CPU,
 compiled by the host's C++ compiler, for tests and CI without a GPU.
+A runtime's `devices()` (`cuda::devices`, `hip::devices`,
+`metal::devices`) lists the machine's devices (`DeviceInfo`: index, name,
+whether integrated) without opening one.
 
 On a device:
 

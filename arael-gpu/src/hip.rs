@@ -492,6 +492,34 @@ fn field(chars: &[core::ffi::c_char]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// The HIP devices of this machine, by index, without opening one.
+/// [`GpuError::Unavailable`] when the HIP runtime or hipRTC is not
+/// installed, or the runtime does not start.
+///
+/// ```ignore
+/// let discrete = arael_gpu::hip::devices()?.into_iter().find(|d| !d.integrated);
+/// ```
+pub fn devices() -> Result<Vec<crate::DeviceInfo>, GpuError> {
+    let l = libs()?;
+    let unavailable = |e: GpuError| match e {
+        GpuError::Driver(why) => GpuError::Unavailable(format!("the HIP runtime does not start ({why})")),
+        e => e,
+    };
+    // SAFETY: plain runtime calls with out-parameters.
+    unsafe {
+        check(l, l.rt.hipInit(0), "hipInit").map_err(unavailable)?;
+        let mut count = 0;
+        check(l, l.rt.hipGetDeviceCount(&mut count), "hipGetDeviceCount").map_err(unavailable)?;
+        (0..count)
+            .map(|i| {
+                let mut prop: rt::hipDeviceProp_tR0600 = core::mem::zeroed();
+                check(l, l.rt.hipGetDevicePropertiesR0600(&mut prop, i), "hipGetDeviceProperties")?;
+                Ok(crate::DeviceInfo { index: i as usize, name: field(&prop.name), integrated: prop.integrated != 0 })
+            })
+            .collect()
+    }
+}
+
 impl HipDevice {
     /// Device `index`. [`GpuError::Unavailable`] when there is no such
     /// device or the HIP runtime or hipRTC is not installed.
