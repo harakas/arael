@@ -86,11 +86,15 @@ pub fn stop() {
 
 /// Whether a trace is on: started by [`start`], or by `ARAEL_GPU_TRACE`
 /// (a path) in the environment, opened at the first call.
+///
+/// # Panics
+///
+/// When `ARAEL_GPU_TRACE` names a file that cannot be created.
 pub fn active() -> bool {
     FROM_ENV.get_or_init(|| {
-        if let Some(path) = std::env::var_os("ARAEL_GPU_TRACE").filter(|p| !p.is_empty())
-            && let Ok(file) = std::fs::File::create(&path)
-        {
+        if let Some(path) = std::env::var_os("ARAEL_GPU_TRACE").filter(|p| !p.is_empty()) {
+            let file = std::fs::File::create(&path)
+                .unwrap_or_else(|e| panic!("ARAEL_GPU_TRACE={}: the trace file cannot be created: {e}", path.to_string_lossy()));
             *SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::io::BufWriter::new(file));
         }
         if std::env::var_os("ARAEL_GPU_TRACE_TIME").is_some_and(|v| !v.is_empty() && v != "0") {
