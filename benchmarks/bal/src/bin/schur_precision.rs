@@ -19,13 +19,18 @@
 //!   llt32     S rounded to f32 and factorized in f32 (the f32 route)
 //!   step64    the step through the f64 factor against the exact S's
 //!   step32    the step through the f32 factor against the exact S's
+//!
+//! The factorizations run on BENCH_THREADS threads (8 when unset, not
+//! pinned).
 
 // The included modules are the benchmark's, and expose more than this binary
 // calls.
 #![allow(dead_code)]
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../bal.rs"]
 mod bal;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
@@ -306,13 +311,14 @@ fn step<T: arael_faer::schur::SchurReal>(sn: &SupernodalSymbolic, s: &SparseBloc
 }
 
 fn main() {
+    bench_harness::env::check(&[]);
     let cams = std::env::var("BAL_DATASET").unwrap_or_else(|_| "372".to_string());
     let lambdas: Vec<f64> = std::env::var("BAL_LAMBDAS")
         .unwrap_or_else(|_| "1e-4,1e-6,1e-8".to_string())
         .split(',')
         .map(|v| v.trim().parse().expect("BAL_LAMBDAS: comma-separated numbers"))
         .collect();
-    let threads: usize = std::env::var("BENCH_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    let threads = bench_harness::pin::threads_or(8);
     let f64_model = match std::env::var("BAL_MODEL").as_deref() {
         Err(_) | Ok("f32") => false,
         Ok("f64") => true,

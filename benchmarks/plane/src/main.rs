@@ -14,15 +14,25 @@ mod scene;
 
 use scene::{RawScene, Scene, Solution};
 
-fn print_header(raw: &RawScene, rounds: usize, systems_filter: &Option<String>) {
+/// The shared environment variables plane does not read
+/// (`bench_harness::env::check`).
+const NOT_READ: &[&str] = &[
+    "BENCH_COV",
+    "ARAEL_ORDERING",
+    "ARAEL_CG_TOL",
+    "ARAEL_CG_MAXITER",
+    "ARAEL_CG_RESTART",
+    "ARAEL_COV_ORDERING",
+];
+
+fn print_header(raw: &RawScene, rounds: usize) {
     use bench_harness::header::Header;
     let arael_cfg = bench_harness::arael::config::<arael_runner::World>(raw, 0);
     Header::new("plane-bench")
         .rounds(rounds)
         .line("scene", format!("{} poses, {} planes, seed {} [PLANE_POSES, PLANE_SHARED]",
             raw.poses.len(), raw.planes.len(), scene::SEED))
-        .line("systems", format!("{} [PLANE_SYSTEMS]",
-            systems_filter.as_deref().unwrap_or("all")))
+        .systems()
         .line("arael lambda0", format!("{:e} (f64), {:e} (f32) [ARAEL_LAMBDA0]",
             bench_harness::arael::lambda0::<arael_runner::World>(raw),
             bench_harness::arael::lambda0::<arael_runner::WorldF>(raw)))
@@ -35,8 +45,8 @@ fn print_header(raw: &RawScene, rounds: usize, systems_filter: &Option<String>) 
             } else {
                 "closed loop"
             }))
-        .line("arael schur", format!("{} [PLANE_SCHUR: auto|force|never], envelope {:?} \
-             [PLANE_ENVELOPE: auto|always|never]",
+        .line("arael schur", format!("{} [ARAEL_SCHUR: auto|force|never], envelope {:?} \
+             [ARAEL_ENVELOPE: auto|always|never]",
             match arael_runner::schur_policy() {
                 arael::simple_lm::SchurPolicy::Force => "force the reduction",
                 arael::simple_lm::SchurPolicy::Never => "never reduce",
@@ -49,11 +59,8 @@ fn print_header(raw: &RawScene, rounds: usize, systems_filter: &Option<String>) 
             arael_cfg.abs_precision, arael_cfg.rel_precision,
             arael_cfg.patience, arael_cfg.min_iters))
         .gpu()
-        .line("solver verbose", format!("{} [VERBOSE], per-solve timing {} [TIMING]",
-            if arael_cfg.verbose { "on" } else { "off" },
-            if std::env::var("TIMING").is_ok() { "on" } else { "off" }))
-        .line("memory pass", format!("{} [PLANE_NO_MEM]",
-            if std::env::var("PLANE_NO_MEM").is_err() { "on" } else { "off" }))
+        .verbose()
+        .memory()
         .core()
         .print();
 }
@@ -65,8 +72,7 @@ fn mem_pass() -> bool {
     let sc = scene::make_scene();
     // The peak fill-in is reached in the first factorization, so a capped
     // solve measures the same high-water mark as the full one, faster.
-    let iters: usize = std::env::var("PLANE_MEM_ITERS").ok()
-        .and_then(|v| v.parse().ok()).unwrap_or(3);
+    let iters = bench_harness::env::mem_iters();
     match which.as_str() {
         "arael LM f64" => { std::hint::black_box(arael_runner::run_capped(&sc.raw, iters)); }
         "arael LM f32" => { std::hint::black_box(arael_runner::run_f32_capped(&sc.raw, iters)); }
@@ -116,19 +122,19 @@ fn run_ext(cmd: &str, args: &[&str], sol_out: &str, n_poses: usize,
 }
 
 fn main() {
+    bench_harness::env::check(NOT_READ);
     bench_harness::pin::enforce_cores();
     if mem_pass() {
         return;
     }
-    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
-    // PLANE_SYSTEMS=<comma-separated substrings> runs only the matching rows.
-    // A filtered run validates only against whatever ran -- for iterating,
-    // not publishing.
-    let systems_filter = std::env::var("PLANE_SYSTEMS").ok();
+    let rounds = bench_harness::env::rounds(3);
+    // BENCH_SYSTEMS picks the rows; a filtered run validates only against
+    // whatever ran.
+    bench_harness::env::note_filtered();
 
     let sc: Scene = scene::make_scene();
     let raw = &sc.raw;
-    print_header(raw, rounds, &systems_filter);
+    print_header(raw, rounds);
 
     let init_sol = Solution { poses: raw.poses.clone(), planes: raw.planes.clone() };
     let initial_cost = scene::reference_cost(raw, &init_sol);
@@ -177,15 +183,7 @@ fn main() {
         eprintln!("WARNING: cpp/build/symforce_plane missing (build with -DSYMFORCE_DIR=...); skipping SymForce");
     }
 
-    let want = |label: &str| -> bool {
-        systems_filter.as_deref().is_none_or(|f| {
-            f.split(',').any(|pat| label.contains(pat.trim()))
-        })
-    };
-    if systems_filter.is_some() {
-        eprintln!("PLANE_SYSTEMS={} -- partial run, cross-system validation is not meaningful",
-            systems_filter.as_deref().unwrap_or(""));
-    }
+    let want = bench_harness::env::wants;
     for _ in 0..rounds {
         if want("arael LM f64") {
             t.record_result("arael LM f64", arael_runner::run(raw));
@@ -224,7 +222,7 @@ fn main() {
         }
     }
 
-    if std::env::var("PLANE_NO_MEM").is_err() {
+    if bench_harness::env::memory_pass() {
         let poses = raw.poses.len().to_string();
         let shared = std::env::var("PLANE_SHARED").unwrap_or_default();
         for label in ["arael LM f64", "arael LM f32", "factrs LM"] {

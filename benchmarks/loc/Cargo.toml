@@ -9,6 +9,16 @@ publish = false
 # Standalone workspace, same pattern as benchmarks/slam and benchmarks/pgo.
 [workspace]
 
+[features]
+# A GPU for the arael rows of the faer and narrow_band routes (ARAEL_GPU=cuda,
+# hip or metal; see ../README.md).
+gpu-cuda = ["arael/gpu-cuda", "bench-harness/gpu-cuda"]
+gpu-hip = ["arael/gpu-hip", "bench-harness/gpu-hip"]
+gpu-metal = ["arael/gpu-metal", "bench-harness/gpu-metal"]
+# The CPU device (ARAEL_GPU=cpu) and the device trace (ARAEL_GPU_TRACE), for tools/devmap.
+gpu-cpu = ["arael/gpu-cpu", "bench-harness/gpu-cpu"]
+gpu-trace = ["arael/gpu-trace", "bench-harness/gpu-trace"]
+
 [dependencies]
 arael = { path = "../..", features = ["threads"] }
 bench-harness = { path = "../harness", features = ["factrs"] }

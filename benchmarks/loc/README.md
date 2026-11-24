@@ -1,11 +1,12 @@
 # Localization benchmark
 
-A trajectory estimated against a **known, fixed** landmark map from bearing
+A trajectory estimated against a known, fixed landmark map from bearing
 observations, wheel/visual odometry, and pose priors -- the localization
 problem, as distinct from SLAM. It is ported from `examples/loc_demo.rs`, and
 it runs on the shared [`benchmarks/harness`](../harness) -- the same probes,
-timing rules, table and core pin as [`benchmarks/pgo`](../pgo) and
-[`benchmarks/slam`](../slam). What is local to this benchmark is its problem:
+timing rules, table and core pin as the other benchmarks;
+[benchmarks/README.md](../README.md) lists the variables they share and the
+GPU builds. What is local to this benchmark is its problem:
 one scene generator, one reference cost function every system is validated
 against, and a cross-checked initial cost.
 
@@ -13,10 +14,10 @@ against, and a cross-checked initial cost.
 
 In SLAM the landmarks are optimized, so the Hessian fills in (each landmark
 couples every pose that sees it) -- a bundle-adjustment structure. In
-**localization the landmarks are constants**: the bearing factors hit fixed
+localization the landmarks are constants: the bearing factors hit fixed
 points, so they contribute no pose-to-pose coupling, and the only thing that
-couples poses is the **consecutive odometry**. The Hessian is therefore
-**block-tridiagonal** -- a band. With 6-DOF poses laid out consecutively the
+couples poses is the consecutive odometry. The Hessian is therefore
+block-tridiagonal -- a band. With 6-DOF poses laid out consecutively the
 half-bandwidth is `kd = 2*6 - 1 = 11`, and arael solves it with its band
 Cholesky (`solve_band`), matching `loc_demo`. A fixed map also removes the
 gauge freedom, so absolute pose errors are meaningful and no GPS is needed.
@@ -33,7 +34,7 @@ Gaussian: this is the outlier-free scenario, so `loc_demo`'s robust
 `gamma*atan` kernel is omitted (with no outliers it has no benefit, and its
 saturation manufactures spurious minima different solvers fall into).
 
-- **arael** (f64 + f32) -- band Cholesky (`kd=11`); `LOC_ARAEL_SOLVER=faer`
+- arael (f64 + f32) -- band Cholesky (`kd=11`); `LOC_ARAEL_SOLVER=faer`
   switches to the general sparse solver for comparison. Both roots use
   `#[arael(root, fast_atan)]`: the bearing residuals go through the fast
   polynomial atan2 (max error < 1e-6 rad), which is why the shared
@@ -41,34 +42,26 @@ saturation manufactures spurious minima different solvers fall into).
   relative, the exact systems ~1e-16). The validation gates (cost
   within 1%, pose RMSE < 5 cm) are orders of magnitude above the
   approximation.
-- **factrs** -- Rust, dual-number autodiff, its own LM.
-- **tiny-solver** -- Rust, dual-number autodiff. Excluded from the default
+- factrs -- Rust, dual-number autodiff, its own LM.
+- tiny-solver -- Rust, dual-number autodiff. Excluded from the default
   output for being an order of magnitude slower than the field; `RUN_TINY=1`
   brings it back, and the harness runs and validates it exactly as it does
   the others.
-- **Ceres** (3 linear solvers), **g2o**, **GTSAM**, **SymForce** (f64 + f32) --
+- Ceres (3 linear solvers), g2o, GTSAM, SymForce (f64 + f32) --
   C++: analytic Jacobians (g2o/GTSAM), autodiff (Ceres), or code-generated
   linearization (SymForce, from `symforce_gen.py`). Each is cross-checked to
   the reference cost; g2o/GTSAM are additionally Jacobian-verified against
   finite differences (`G2O_VERIFY_JAC=1`, `GTSAM_VERIFY_JAC=1`).
 
-The bearing factor is **single-variable** (the fixed landmark carries no
+The bearing factor is single-variable (the fixed landmark carries no
 derivatives): a remote block on the pose in arael, a unary edge/factor in
 g2o/GTSAM.
 
 ## What is measured
 
-**One iteration.** Linearize, assemble, factorize, solve -- the pipeline every
-system runs on every step, over the identical validated cost function. It is
-measured as t(2 iterations) - t(1 iteration), so the one-time setup (first
-assembly, ordering, symbolic factorization) cancels out, and it is reported
-only when the first iteration was one accepted step, so a rejected step's
-wasted factorization cannot leak into it.
-
-This is the number that compares across systems.\* **Total time and iteration
-count do not**, and reading them as a ranking will mislead you: they are set by
-each system's damping schedule.
-
+One iteration (full-iter, t(2 iterations) - t(1 iteration)) is the number
+that compares across systems;\* [benchmarks/README.md](../README.md#reading-a-table)
+explains it and the other columns.
 
 \* Ceres's `iterative_schur` uses a different algorithm, so its iterations
 cannot be compared one on one.
@@ -88,28 +81,8 @@ nor this one is the whole story on its own.
 
 ## Results (2026-10-04, Apple M4 Pro, single core enforced by the harness, min of 32 interleaved rounds)
 
-What each column means:
-
-| column | meaning |
-|--------|---------|
-| **total ms** | the whole solve: setup plus every iteration, retries included. |
-| **iters** | `accepted(attempts)`. An attempt is one linear solve; a rejected step raises the damping and costs a factorization. |
-| **ms/iter** | total ms divided by attempts -- an average, and it carries the one-time setup amortized over however many iterations the solver took. |
-| **full-iter** | one complete iteration: linearize, assemble, factorize, solve. Measured as t(2 iterations) - t(1 iteration), so the setup cancels. The durable cross-system number. |
-| **full-norm** | the same full-iter normalized to the arael f64 row on that dataset (= 1.000) -- the row's per-iteration cost in units of an arael-f64 iteration. |
-| **1st-iter ms** | one iteration plus the setup the others do not pay again (first assembly, ordering, symbolic factorization). |
-| **peak MB** | process high-water mark (`VmHWM`), each solver measured in a process of its own. |
-| **final cost** | evaluated by the one reference cost function for every system, so the values are directly comparable. |
-
-full-iter, full-norm and 1st-iter are dropped ("-") for any system whose first iteration
-was not a single accepted step: such an iteration is mostly wasted
-factorizations, and every number derived from it inherits that.
-
-full-iter and full-norm are dropped for Ceres's `iterative_schur` as well.
-Conjugate gradients does a variable amount of work per outer step, because the
-inner solve gets harder as the outer one converges, so one iteration does not
-stand for the rest and differencing two of them measures neither. That row is
-read on total ms and ms/iter.
+full-norm is relative to `arael LM f64`; Ceres's `iterative_schur` is the
+conjugate gradient row.
 
 t(1) and t(2) are each minimized over rounds before being subtracted, so a
 row whose t(2) happened to sample unusually well reads a full-iter below what
@@ -176,8 +149,8 @@ the shared tolerance).
 
 | system                  | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-------------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| **arael LM f32 (band)** |    57.36 |   3(3) |   19.12 |     18.79 |     0.674 |       19.59 |     2.7 |  3274.6021 |
-| **arael LM f64 (band)** |    84.21 |   3(3) |   28.07 |     27.90 |     1.000 |       28.49 |     3.3 |  3274.6021 |
+| arael LM f32 (band) |    57.36 |   3(3) |   19.12 |     18.79 |     0.674 |       19.59 |     2.7 |  3274.6021 |
+| arael LM f64 (band) |    84.21 |   3(3) |   28.07 |     27.90 |     1.000 |       28.49 |     3.3 |  3274.6021 |
 | factrs LM               |  1168.05 |   3(3) |  389.35 |    340.56 |    12.205 |      481.15 |     7.3 |  3274.6021 |
 
 The four tables above, drawn as one iteration plus the setup it pays once, one
@@ -208,12 +181,12 @@ and re-run.
 Pose covariance at the solution, `Sigma = 2 H^-1`. The map is fixed, so `H` is
 block-tridiagonal over the pose chain, and three arael methods apply:
 
-- **`TriDiagonal`** runs the band forward/backward Schur recursion, no
+- `TriDiagonal` runs the band forward/backward Schur recursion, no
   factorization -- the last pose (the localization query) falls out of the
   forward pass the solve already computes.
-- **`PerQuery`** factors `H` and solves per query; **`AllMarginals`** is one bulk
+- `PerQuery` factors `H` and solves per query; `AllMarginals` is one bulk
   selected inverse over the factor.
-- **Ceres** (`SPARSE_QR`), **GTSAM** (`Marginals`) and **g2o** (`computeMarginals`)
+- Ceres (`SPARSE_QR`), GTSAM (`Marginals`) and g2o (`computeMarginals`)
   recover the same marginals for comparison; Ceres and GTSAM build cold, g2o reuses
   the factor from the solve it just ran (warm). All agree on the std devs to four
   figures.
@@ -231,7 +204,7 @@ spread N poses over the trajectory.
 | GTSAM Marginals | 22.5 (215) | 23.5 (211) | 23.1 (214) | 22.9 (218) | 23.1 (216) | 24.2 (206) |
 | g2o computeMarginals | 1.1 (2000) | 0.2 (2000) | 0.6 (2000) | 1.0 (2000) | 1.1 (2000) | 1.3 (2000) |
 
-`LOC_COV=1 cargo run --release` reproduces this (`LOC_POSES` sets the size,
+`BENCH_COV=1 cargo run --release` reproduces this (`LOC_POSES` sets the size,
 `COV_BUDGET_S` the per-cell budget).
 
 ## Running
@@ -241,40 +214,41 @@ cmake -B cpp/build cpp && cmake --build cpp/build   # Ceres, g2o, GTSAM
 # g2o needs libg2o-dev + cholmod; GTSAM needs libgtsam-dev (+ libtbb-dev)
 # add -DSYMFORCE_DIR=/path/to/symforce for the SymForce runner -- a checkout
 #   that has been BUILT, since its libraries are read from build/temp.*
-export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1     # before load; see below
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1     # before load; see ../README.md
 ROUNDS=10 cargo run --release                       # 60 poses (default)
 LOC_POSES=300 ROUNDS=5 cargo run --release          # larger tier
-LOC_COV=1 cargo run --release                       # covariance recovery (above)
+BENCH_COV=1 cargo run --release                     # covariance recovery (above)
 RUN_TINY=1 cargo run --release                      # include tiny-solver (off by default)
 VERBOSE=1 cargo run --release                       # arael per-iteration trace
 G2O_VERIFY_JAC=1 cpp/build/g2o_loc scene.txt lm out.txt     # check g2o Jacobians
 GTSAM_VERIFY_JAC=1 cpp/build/gtsam_loc scene.txt lm out.txt # check GTSAM Jacobians
 ```
 
+On a GPU ([benchmarks/README.md](../README.md#on-a-gpu) has the other
+runtimes): the arael rows take it on the `faer` and `narrow_band` backends.
+The default `band` backend has no GPU route, and a run with it stops when
+`ARAEL_GPU`, `ARAEL_F32_FACTOR` or an `ARAEL_BLOCK_SUPERNODAL` variable is set.
+
+```sh
+ARAEL_GPU=cuda LOC_ARAEL_SOLVER=faer cargo run --release --features gpu-cuda
+```
+
 The run prints all of its settings in a header, so a pasted result carries
-what produced it.
+what produced it. The variables of loc alone, and loc's values of the shared
+ones:
 
 | env | effect |
 |-----|--------|
 | `LOC_POSES` | scene size (60 default; landmarks scale as 4N) |
-| `LOC_COV` | covariance-recovery benchmark instead of the solve (`COV_BUDGET_S`, `COV_CELL_CAP_S`) |
-| `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
-| `BENCH_MAX_ITERS` | every row's full solve held to this many iterations (damping retries included), the probes unchanged: a diagnostic, not a table |
-| `BENCH_SOLVE_ONLY` | every row runs its full solve alone, without the warmup and the probes. With `BENCH_MAX_ITERS=1` one attempt, for a trace or a probed run |
-| `RUN_TINY` | include tiny-solver (off by default: an order of magnitude slower than the field) |
-| `LOC_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
-| `LOC_ARAEL_SOLVER` | `band` (default, `kd=11`) or `faer` (arael's general sparse solver) |
-| `ARAEL_LAMBDA0`, `CERES_RADIUS0`, `G2O_LAMBDA_INIT`, `GTSAM_LAMBDA0`, `SYMFORCE_LAMBDA0`, `TINY_RADIUS0` | initial damping, per system |
-| `DRIVER=nielsen` | arael's gain-ratio damping driver instead of the fixed ladder |
-| `CERES_SOLVERS` | comma list of Ceres linear solvers (Ceres's own names; the table shows the short one) |
-| `VERBOSE` | arael's per-iteration solver trace |
-| `TIMING` | arael's per-solve phase breakdown (assembly, linear solve) |
+| `LOC_ARAEL_SOLVER` | `band` (default, `kd=11`), `faer` (arael's general sparse solver) or `narrow_band` (the block band Cholesky on the whole system) |
 | `LOC_PHASES` | arael f64-vs-f32 per-phase steady-state table, instead of the benchmark |
-| `LOC_NO_MEM` | skip the peak-memory pass |
-
-The thread caps must be exported **before** the process starts: OpenBLAS sizes
-its pool when its shared library loads, ahead of any code that could set them,
-and those early threads escape the single-core pin.
+| `RUN_TINY` | include tiny-solver (off by default: an order of magnitude slower than the field) |
+| `CERES_SOLVERS` | comma list of Ceres linear solvers (Ceres's own names; the table shows the short one) |
+| `CERES_RADIUS0`, `G2O_LAMBDA_INIT`, `GTSAM_LAMBDA0`, `SYMFORCE_LAMBDA0`, `TINY_RADIUS0` | initial damping of the other systems |
+| `ROUNDS` | 3 |
+| `ARAEL_LAMBDA0` | 1e-8; the f32 row 1e-7 up to 60 poses |
+| `DRIVER` | `fixed`; `nielsen` is the gain-ratio driver |
+| `COV_CAP` | 2000 |
 
 The C++ runners execute as subprocesses over an exported copy of the scene;
 they are skipped with a warning if their binary is absent. `G2O_VERIFY_JAC=1`

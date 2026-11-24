@@ -266,21 +266,14 @@ fn extract_f32(path: &PathF) -> Solution {
 // the default (this well-initialized graph needs no adaptive driver -- no
 // step is ever rejected, so a gain-ratio schedule only over-damps and
 // inflates the step count; see benchmarks/pgo's fairness rules). The
-// gain-ratio Nielsen driver is selected via SLAM_DRIVER=nielsen.
+// gain-ratio Nielsen driver is selected via DRIVER=nielsen.
 fn nielsen() -> bool {
-    std::env::var("SLAM_DRIVER").map_or(false, |v| v == "nielsen")
+    bench_harness::arael::nielsen::<Path>()
 }
 
+// The config of the memory pass's and the covariance benchmark's solves; the
+// timed rows take bench_harness::arael::config.
 fn cfg(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
-    // SLAM_WC=1: use the well_conditioned preset (low lambda + gradient stop)
-    // instead of the hand-tuned config, to evaluate it as the default.
-    if std::env::var("SLAM_WC").map_or(false, |v| v == "1") {
-        let cfg = arael::simple_lm::LmConfig::well_conditioned()
-            .with_max_iters(max_iters)
-            .with_verbose(std::env::var("SLAM_VERBOSE").map_or(false, |v| v == "1"))
-            .with_gather_timing(std::env::var("SLAM_TIMING").map_or(false, |v| v == "1"));
-        return if nielsen() { cfg.with_nielsen() } else { cfg };
-    }
     let cfg = arael::simple_lm::LmConfig {
         abs_precision: 1e-5,
         rel_precision: 1e-5,
@@ -290,9 +283,9 @@ fn cfg(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
         // (converges by step 2) would pad the count with noise iterations.
         min_iters: 1,
         max_iters,
-        initial_lambda: std::env::var("SLAM_LAMBDA0").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-8),
-        verbose: std::env::var("SLAM_VERBOSE").map_or(false, |v| v == "1"),
-        gather_timing: std::env::var("SLAM_TIMING").map_or(false, |v| v == "1"),
+        initial_lambda: bench_harness::arael::lambda0_override().unwrap_or(1e-8),
+        verbose: bench_harness::env::verbose(),
+        gather_timing: bench_harness::env::timing(),
         ..Default::default()
     };
     if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
@@ -312,89 +305,28 @@ fn narrow_band_enabled() -> bool {
     std::env::var("SLAM_NARROW_BAND").map_or(false, |v| v == "1")
 }
 
-// ARAEL_BLOCK_SUPERNODAL picks when the supernodal block Cholesky
-// factorizes instead of the scalar faer route (the library default is
-// Auto: supernodal on sequential solves). `0`/`off`/`scalar` restores the
-// scalar route, `1`/`always` forces the supernodal even threaded, unset
-// keeps Auto. A typo is rejected rather than silently ignored.
-fn block_supernodal() -> arael::simple_lm::BlockSupernodalMode {
-    use arael::simple_lm::BlockSupernodalMode as M;
-    match std::env::var("ARAEL_BLOCK_SUPERNODAL").ok().as_deref() {
-        None | Some("auto") => M::Auto,
-        Some("1") | Some("always") => M::Always,
-        Some("0") | Some("off") | Some("scalar") => M::Never,
-        Some(other) => panic!(
-            "ARAEL_BLOCK_SUPERNODAL={}: expected auto, 1/always, or 0/off/scalar",
-            other
-        ),
-    }
-}
+use bench_harness::arael::{block_supernodal, block_supernodal_batch, block_supernodal_lean};
 
-// ARAEL_BLOCK_SUPERNODAL_BATCH tunes the supernodal route's update batching:
-// a ratio (e.g. 1.5), or 0/off to disable. Unset keeps the library default.
-// A typo is rejected rather than silently ignored.
-fn block_supernodal_batch() -> Option<f64> {
-    match std::env::var("ARAEL_BLOCK_SUPERNODAL_BATCH").ok().as_deref() {
-        None => arael::simple_lm::SparseFaerOptions::auto().block_supernodal_batch,
-        Some("0") | Some("off") => None,
-        Some(v) => Some(v.parse().unwrap_or_else(|_| {
-            panic!("ARAEL_BLOCK_SUPERNODAL_BATCH={}: expected a ratio, or 0/off", v)
-        })),
-    }
-}
-
-/// ARAEL_BLOCK_SUPERNODAL_LEAN=1 uses the memory-lean amalgamation on the
-/// supernodal route (SparseFaer::with_block_supernodal_memory_lean).
-
-fn block_supernodal_lean() -> bool {
-    std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
-}
-
-// SLAM_ENVELOPE=auto|always|never picks how the reduced Schur system is
-// factored. A typo here would silently benchmark the other route, so an
-// unknown value is an error rather than a fallback.
-//
-// The default is arael's own `auto`, so the published tables measure the route
-// a user gets without asking. On this problem the gate declines the envelope
-// and the reduced system goes to the block supernodal Cholesky; `always` pins
-// the envelope to measure it against.
+// How the reduced Schur system is factored: ARAEL_ENVELOPE
+// (bench_harness::arael::envelope), arael's own `auto` when unset, so the
+// published tables measure the route a user gets without asking. On this
+// problem the gate declines the envelope and the reduced system goes to the
+// block supernodal Cholesky; `always` pins the envelope to measure it against.
 pub fn envelope_mode() -> arael::simple_lm::EnvelopeMode {
-    use arael::simple_lm::EnvelopeMode;
-    match std::env::var("SLAM_ENVELOPE").as_deref() {
-        Err(_) | Ok("auto") => EnvelopeMode::Auto,
-        Ok("always") => EnvelopeMode::Always,
-        Ok("never") => EnvelopeMode::Never,
-        Ok(other) => panic!("SLAM_ENVELOPE: expected auto, always or never, got {:?}", other),
-    }
+    bench_harness::arael::envelope()
 }
 
-// SLAM_SCHUR=auto|force|never picks whether the landmarks are marginalized.
-// `auto` (the default) prices both routes. A typo is an error, not a silent
-// fallback.
+// Whether the landmarks are marginalized: ARAEL_SCHUR
+// (bench_harness::arael::schur_policy), `auto` when unset (prices both
+// routes).
 pub fn schur_policy() -> arael::simple_lm::SchurPolicy {
-    use arael::simple_lm::SchurPolicy;
-    match std::env::var("SLAM_SCHUR").as_deref() {
-        Err(_) | Ok("auto") => SchurPolicy::default(),
-        Ok("force") => SchurPolicy::Force,
-        Ok("never") => SchurPolicy::Never,
-        Ok(other) => panic!("SLAM_SCHUR: expected auto, force or never, got {:?}", other),
-    }
+    bench_harness::arael::schur_policy().unwrap_or_default()
 }
 
-// SLAM_ORDERING=auto|amd|nd|natural|marginalize-first orders whichever system
-// is factorized. `auto` (the default) is arael's own rule. A typo is an error.
+// The ordering of whichever system is factorized: ARAEL_ORDERING
+// (bench_harness::arael::ordering), arael's own rule when unset.
 pub fn ordering() -> arael::simple_lm::SolveOrdering {
-    use arael::simple_lm::SolveOrdering as O;
-    match std::env::var("SLAM_ORDERING").as_deref() {
-        Err(_) | Ok("auto") => O::Auto,
-        Ok("amd") => O::Amd,
-        Ok("nd") => O::NestedDissection,
-        Ok("natural") => O::Natural,
-        Ok("marginalize-first") => O::MarginalizeFirst,
-        Ok(other) => panic!(
-            "SLAM_ORDERING: expected auto, amd, nd, natural or marginalize-first, got {:?}",
-            other),
-    }
+    bench_harness::arael::ordering().unwrap_or(arael::simple_lm::SolveOrdering::Auto)
 }
 
 // SLAM_PANEL_WIDTH=N sets the envelope factorization's super-panel width,
@@ -504,20 +436,13 @@ pub fn write_hessian_bitmap(scene: &Scene, out: &str) {
 }
 
 fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
-    if std::env::var("SLAM_WC").map_or(false, |v| v == "1") {
-        let cfg = arael::simple_lm::LmConfig::well_conditioned()
-            .with_max_iters(max_iters)
-            .with_verbose(std::env::var("SLAM_VERBOSE").map_or(false, |v| v == "1"))
-            .with_gather_timing(std::env::var("SLAM_TIMING").map_or(false, |v| v == "1"));
-        return if nielsen() { cfg.with_nielsen() } else { cfg };
-    }
     // Problem-appropriate initial damping, per pose count. At the small
     // (60-pose) size the f32 solution lands a hair above the 1e-5 stop
     // threshold at 1e-8 and then bounces in the f32 noise floor (a
     // termination/precision interaction, not divergence); a slightly
     // heavier 1e-7 makes the last step small enough to stop cleanly. The
     // larger sizes are clean at 1e-8 (1e-7 would grind there instead --
-    // there is no single value clean at every size). SLAM_LAMBDA0 overrides.
+    // there is no single value clean at every size). ARAEL_LAMBDA0 overrides.
     let default_lambda = if poses <= 60 { 1e-7 } else { 1e-8 };
     let cfg = arael::simple_lm::LmConfig {
         abs_precision: 1e-5,
@@ -525,10 +450,9 @@ fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
         patience: 1,
         min_iters: 1,
         max_iters,
-        initial_lambda: std::env::var("SLAM_LAMBDA0").ok()
-            .and_then(|v| v.parse().ok()).unwrap_or(default_lambda),
-        verbose: std::env::var("SLAM_VERBOSE").map_or(false, |v| v == "1"),
-        gather_timing: std::env::var("SLAM_TIMING").map_or(false, |v| v == "1"),
+        initial_lambda: bench_harness::arael::lambda0_override().map_or(default_lambda, |l| l as f32),
+        verbose: bench_harness::env::verbose(),
+        gather_timing: bench_harness::env::timing(),
         ..Default::default()
     };
     if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
@@ -616,8 +540,8 @@ pub enum Route {
     /// Factorized -- the default, and what the published tables measure.
     Factorize,
     /// Solved by preconditioned conjugate gradients instead, on a reduced
-    /// system that is still formed explicitly. SLAM_CG_TOL sets the inner
-    /// tolerance, SLAM_CG_MAXITER the iteration cap, SLAM_CG_RESTART the
+    /// system that is still formed explicitly. ARAEL_CG_TOL sets the inner
+    /// tolerance, ARAEL_CG_MAXITER the iteration cap, ARAEL_CG_RESTART the
     /// true-residual recompute interval.
     Cg,
 }
@@ -629,15 +553,7 @@ pub enum Route {
 // costs more per iteration without saving an LM step -- and looser converges
 // to a worse cost.
 pub fn cg_options() -> arael::simple_lm::CgParams {
-    let d = arael::simple_lm::CgParams::default();
-    fn env<T: std::str::FromStr>(k: &str) -> Option<T> {
-        std::env::var(k).ok().and_then(|v| v.parse().ok())
-    }
-    arael::simple_lm::CgParams {
-        tol: env("SLAM_CG_TOL").unwrap_or(1e-4),
-        max_iters: env("SLAM_CG_MAXITER").unwrap_or(d.max_iters),
-        restart_every: env("SLAM_CG_RESTART").unwrap_or(d.restart_every),
-    }
+    bench_harness::arael::cg(1e-4)
 }
 
 impl Route {
@@ -756,20 +672,10 @@ pub fn run_f32(p: &Problem) -> RunOut { bench_harness::arael::run::<PathF>(p) }
 
 use arael::covariance::{CovMode, CovOptions, CovOrdering, Covariance};
 
-// SLAM_COV_ORDERING=auto|amd|nd|natural orders the covariance factorization.
-// `auto` (the default) is arael's own rule. A typo is an error.
+// The covariance factorization's ordering: ARAEL_COV_ORDERING
+// (bench_harness::arael::cov_ordering), arael's own rule when unset.
 fn cov_opts() -> CovOptions {
-    let ordering = match std::env::var("SLAM_COV_ORDERING").as_deref() {
-        Err(_) | Ok("auto") => CovOrdering::Auto,
-        Ok("amd") => CovOrdering::Amd,
-        Ok("nd") => CovOrdering::NestedDissection,
-        Ok("natural") => CovOrdering::Natural,
-        Ok(other) => panic!(
-            "SLAM_COV_ORDERING: expected auto, amd, nd or natural, got {:?}",
-            other
-        ),
-    };
-    CovOptions::auto().with_ordering(ordering)
+    CovOptions::auto().with_ordering(bench_harness::arael::cov_ordering().unwrap_or(CovOrdering::Auto))
 }
 
 /// One covariance-scaling run: `(N, median_ms, reps)` per query count, for poses

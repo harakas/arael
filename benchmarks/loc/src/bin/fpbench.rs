@@ -25,6 +25,7 @@ fn bench<F: FnMut() -> f64>(name: &str, mut f: F) {
 const N: usize = 2_000_000;
 
 fn main() {
+    bench_harness::env::check(&[]);
     let xs64: Vec<f64> = (0..N).map(|i| 0.1 + (i % 997) as f64 * 0.013).collect();
     let ys64: Vec<f64> = (0..N).map(|i| -3.0 + (i % 991) as f64 * 0.0061).collect();
     let xs32: Vec<f32> = xs64.iter().map(|&v| v as f32).collect();

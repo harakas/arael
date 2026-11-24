@@ -66,7 +66,6 @@ impl<S> Row<S> {
         self
     }
 
-    /// What the row's solve did on its GPU ([`Self::gpu`]).
     pub fn gpu(mut self, gpu: Option<String>) -> Self {
         self.gpu = gpu;
         self
@@ -252,7 +251,7 @@ impl<'a, G: Geometry> Table<'a, G> {
             if row.solve_ms < prev.solve_ms {
                 prev.report = row.report;
             }
-            // What the GPU did is the same every round: the first one's.
+            // The GPU line is the first round's.
             if prev.gpu.is_none() {
                 prev.gpu = row.gpu;
             }

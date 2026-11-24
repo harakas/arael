@@ -14,6 +14,7 @@
 //
 // Run: cargo run -r --bin rot_compare3        (ROUNDS env overrides, default 20)
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../g2o3.rs"]
 mod g2o3;
 
@@ -54,7 +55,7 @@ fn cfg32(max_iters: usize, initial_lambda: f32) -> arael::simple_lm::LmConfig<f3
 // Initial damping, problem-appropriate for the 3D datasets (matches
 // arael_runner3.rs::lambda0_3d; env ARAEL_LAMBDA0 overrides).
 fn lambda0_3d() -> f64 {
-    std::env::var("ARAEL_LAMBDA0").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-10)
+    bench_harness::arael::lambda0_override().unwrap_or(1e-10)
 }
 
 // Each parameterization is one generic model (the pose's rotation
@@ -487,8 +488,9 @@ struct Best {
 }
 
 fn main() {
+    bench_harness::env::check(&[]);
     let bench_dir = std::env::current_dir().unwrap();
-    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    let rounds = bench_harness::env::rounds(20);
     let lambda0 = lambda0_3d();
 
     let datasets = [

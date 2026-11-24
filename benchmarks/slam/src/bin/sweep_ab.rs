@@ -5,11 +5,15 @@
 //! sequential sweep, without the scatter that follows it), the indexed
 //! scatter and the cost sweep, as min and median over the calls in
 //! microseconds. One line per run, fixed format, for a driver to collect.
+//! The sweeps run on BENCH_THREADS threads (1 by default), pinned as the
+//! benchmark is.
 //!
-//!     THREADS=1 CALLS=100 SLAM_POSES=2400 taskset -c 7 ./target/release/sweep_ab
+//!     BENCH_THREADS=1 CALLS=100 SLAM_POSES=2400 ./target/release/sweep_ab
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../scene.rs"]
 mod scene;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
@@ -34,7 +38,9 @@ fn stats(v: &mut Vec<f64>) -> (f64, f64) {
 }
 
 fn main() {
-    let threads: usize = std::env::var("THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    bench_harness::env::check(&[]);
+    bench_harness::pin::enforce_cores();
+    let threads = bench_harness::pin::threads();
     let calls: usize = std::env::var("CALLS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
     let poses: usize = std::env::var("SLAM_POSES").ok().and_then(|v| v.parse().ok()).unwrap_or(2400);
     let cfg = SceneConfig {

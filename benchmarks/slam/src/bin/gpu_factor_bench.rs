@@ -5,10 +5,13 @@
 //!     SLAM_POSES=1000 ROUNDS=20 cargo run -r --features gpu-cuda --bin gpu_factor_bench
 //!     ARAEL_GPU=hip SLAM_POSES=300 cargo run -r --features gpu-hip --bin gpu_factor_bench
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../scene.rs"]
 mod scene;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../reduced.rs"]
 mod reduced;
 
@@ -16,6 +19,7 @@ use arael_faer::SparseIndex;
 use scene::SceneConfig;
 
 fn main() {
+    bench_harness::env::check(&[]);
     let mut cfg = SceneConfig::default();
     if let Some(n) = std::env::var("SLAM_POSES").ok().and_then(|v| v.parse().ok()) {
         cfg.num_poses = n;

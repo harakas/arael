@@ -16,10 +16,17 @@
 /// After [`enforce_cores`] this is the RESOLVED count: it rewrites BENCH_THREADS
 /// with the number actually pinned, so 0 reads back as the real core count.
 pub fn threads() -> usize {
-    std::env::var("BENCH_THREADS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1)
+    threads_or(1)
+}
+
+/// BENCH_THREADS, `default` when unset, for a tool that does not pin
+/// ([`enforce_cores`]). A value that is not a count stops the run.
+///
+/// ```ignore
+/// let cpu_threads = bench_harness::pin::threads_or(8);
+/// ```
+pub fn threads_or(default: usize) -> usize {
+    crate::env::parsed("BENCH_THREADS", "a thread count").unwrap_or(default)
 }
 
 /// Whether the run pins to cores: BENCH_PIN, on unless it says 0.
@@ -62,18 +69,24 @@ pub fn enforce_cores() {
     // benchmark that lands there shares its core with kernel housekeeping.
     // Linux only: the other platforms have no affinity call, so the thread
     // caps above are all the budget there is.
+    // The cores are counted in the set the process may run on, so a run
+    // started under `taskset` stays inside it.
     #[cfg(target_os = "linux")]
     if pinned() {
         unsafe {
+            let size = std::mem::size_of::<libc::cpu_set_t>();
+            let mut allowed_set: libc::cpu_set_t = std::mem::zeroed();
+            assert_eq!(libc::sched_getaffinity(0, size, &mut allowed_set), 0, "cannot read the allowed cores");
+            let allowed: Vec<usize> = (0..libc::CPU_SETSIZE as usize).filter(|&c| libc::CPU_ISSET(c, &allowed_set)).collect();
             let mut set: libc::cpu_set_t = std::mem::zeroed();
             libc::CPU_ZERO(&mut set);
-            for c in (total - n)..total {
+            for &c in last_cores(&allowed, n) {
                 libc::CPU_SET(c, &mut set);
             }
             assert_eq!(
-                libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set),
+                libc::sched_setaffinity(0, size, &set),
                 0,
-                "cannot pin to the last {n} of {total} cores"
+                "cannot pin to the last {n} of the allowed cores {allowed:?}"
             );
         }
     }
@@ -97,9 +110,25 @@ pub fn cpus_allowed() -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
+/// The last `n` of the `allowed` cores (ascending), all of them when there
+/// are fewer.
+fn last_cores(allowed: &[usize], n: usize) -> &[usize] {
+    &allowed[allowed.len().saturating_sub(n)..]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::pin_from;
+    use super::{last_cores, pin_from};
+
+    /// The pinned cores are the last of the allowed set, not the last core
+    /// numbers: under `taskset -c 7` the one core is 7.
+    #[test]
+    fn the_pinned_cores_are_the_last_allowed_ones() {
+        assert_eq!(last_cores(&[0, 1, 2, 3, 4, 5, 6, 7], 4), &[4, 5, 6, 7]);
+        assert_eq!(last_cores(&[7], 1), &[7]);
+        assert_eq!(last_cores(&[2, 5, 9], 2), &[5, 9]);
+        assert_eq!(last_cores(&[2, 5], 4), &[2, 5]);
+    }
 
     #[test]
     fn the_pin_is_on_unless_bench_pin_says_zero() {

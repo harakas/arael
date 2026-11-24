@@ -37,16 +37,27 @@ fn ceres_label(solver: &str) -> String {
 /// The settings this run used, printed before anything else: a pasted result has
 /// to carry them. Values come from the objects the run actually uses, so the
 /// header cannot drift from what ran.
+/// The shared environment variables loc does not read
+/// (`bench_harness::env::check`).
+const NOT_READ: &[&str] = &[
+    "ARAEL_ORDERING",
+    "ARAEL_SCHUR",
+    "ARAEL_ENVELOPE",
+    "ARAEL_CG_TOL",
+    "ARAEL_CG_MAXITER",
+    "ARAEL_CG_RESTART",
+    "ARAEL_COV_ORDERING",
+];
+
 fn print_header(scene: &Scene, cfg: &SceneConfig, rounds: usize, skip_tiny: bool,
-                systems_filter: &Option<String>, ceres_solvers: &[String]) {
+                ceres_solvers: &[String]) {
     use bench_harness::header::{on_off, Header};
     let arael_cfg = bench_harness::arael::config::<arael_runner::Path>(scene, 0);
     Header::new("loc-bench")
         .rounds(rounds)
         .line("scene", format!("{} poses, {} landmarks (fixed), seed {} [LOC_POSES]",
             cfg.num_poses, cfg.num_landmarks, cfg.seed))
-        .line("systems", format!("{} [LOC_SYSTEMS]",
-            systems_filter.as_deref().unwrap_or("all")))
+        .systems()
         .line("optional systems", format!("tiny-solver {} [RUN_TINY]", on_off(skip_tiny)))
         .line("ceres solvers", format!("{} [CERES_SOLVERS]", ceres_solvers.join(", ")))
         .line("arael lambda0", format!("{:e} (f64), {:e} (f32) [ARAEL_LAMBDA0]",
@@ -55,16 +66,14 @@ fn print_header(scene: &Scene, cfg: &SceneConfig, rounds: usize, skip_tiny: bool
         .line("arael damping", format!("{} [DRIVER: fixed|nielsen]",
             if bench_harness::arael::nielsen::<arael_runner::Path>() { "Nielsen gain-ratio driver" }
             else { "fixed ladder (default driver)" }))
-        .line("arael backend", format!("{} [LOC_ARAEL_SOLVER: band|faer]",
+        .line("arael backend", format!("{} [LOC_ARAEL_SOLVER: band|faer|narrow_band]",
             arael_runner::backend()))
         .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",
             arael_cfg.abs_precision, arael_cfg.rel_precision,
             arael_cfg.patience, arael_cfg.min_iters))
-        .line("solver verbose", format!("{} [VERBOSE], per-solve timing {} [TIMING]",
-            if arael_cfg.verbose { "on" } else { "off" },
-            if std::env::var("TIMING").is_ok() { "on" } else { "off" }))
-        .line("memory pass", format!("{} [LOC_NO_MEM]",
-            if std::env::var("LOC_NO_MEM").is_err() { "on" } else { "off" }))
+        .gpu()
+        .verbose()
+        .memory()
         .core()
         .print();
 }
@@ -80,8 +89,7 @@ fn mem_pass() -> bool {
     let scene = scene::generate(&config());
     // The peak is reached in the first factorization, so a capped solve
     // measures the same high-water mark as the full one, faster.
-    let iters: usize = std::env::var("LOC_MEM_ITERS").ok()
-        .and_then(|v| v.parse().ok()).unwrap_or(3);
+    let iters = bench_harness::env::mem_iters();
     match which.as_str() {
         "arael LM f64" => { std::hint::black_box(arael_runner::run_capped(&scene, iters)); }
         "arael LM f32" => { std::hint::black_box(arael_runner::run_f32_capped(&scene, iters)); }
@@ -156,6 +164,8 @@ fn phase_timing(scene: &Scene, rounds: usize) {
 }
 
 fn main() {
+    bench_harness::env::check(NOT_READ);
+    arael_runner::check_route();
     bench_harness::pin::enforce_cores();
     if mem_pass() {
         return;
@@ -163,7 +173,7 @@ fn main() {
 
     let cfg = config();
     let scene = scene::generate(&cfg);
-    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let rounds = bench_harness::env::rounds(3);
     let ceres_solvers: Vec<String> = std::env::var("CERES_SOLVERS")
         .unwrap_or_else(|_| "sparse_normal_cholesky,sparse_schur,iterative_schur".into())
         .split(',').map(|s| s.to_string()).collect();
@@ -172,11 +182,10 @@ fn main() {
     // systems are read on. The harness runs and validates it exactly as it does
     // the others.
     let skip_tiny = std::env::var("RUN_TINY").is_err();
-    // LOC_SYSTEMS=<comma-separated substrings> runs only the matching rows (e.g.
-    // LOC_SYSTEMS=arael). Unset runs everything. A filtered run validates only
-    // against whatever ran -- for iterating, not publishing.
-    let systems_filter = std::env::var("LOC_SYSTEMS").ok();
-    print_header(&scene, &cfg, rounds, skip_tiny, &systems_filter, &ceres_solvers);
+    // BENCH_SYSTEMS picks the rows; a filtered run validates only against
+    // whatever ran.
+    bench_harness::env::note_filtered();
+    print_header(&scene, &cfg, rounds, skip_tiny, &ceres_solvers);
 
     let init_sol = initial_solution(&scene);
     let initial_cost = scene::reference_cost(&scene, &init_sol);
@@ -200,7 +209,7 @@ fn main() {
         println!("{} initial cost matches reference to {:.2e}", name, rel);
     }
 
-    if std::env::var("LOC_COV").is_ok() {
+    if bench_harness::env::cov() {
         cov_benchmark(&scene);
         return;
     }
@@ -237,15 +246,7 @@ fn main() {
         eprintln!("WARNING: cpp/build/gtsam_loc missing (needs libgtsam-dev); skipping GTSAM");
     }
 
-    let want = |label: &str| -> bool {
-        systems_filter.as_deref().is_none_or(|f| {
-            f.split(',').any(|pat| label.contains(pat.trim()))
-        })
-    };
-    if systems_filter.is_some() {
-        eprintln!("LOC_SYSTEMS={} -- partial run, cross-system validation is not meaningful",
-            systems_filter.as_deref().unwrap_or(""));
-    }
+    let want = bench_harness::env::wants;
     // Interleaved rounds: the table keeps the minimum of each cell, so a system
     // cannot be charged for a disturbance that hit only its part of the run.
     let n_poses = scene.poses.len();
@@ -296,7 +297,7 @@ fn main() {
         }
     }
 
-    if std::env::var("LOC_NO_MEM").is_err() {
+    if bench_harness::env::memory_pass() {
         let poses = n_poses.to_string();
         for label in ["arael LM f64", "arael LM f32", "tiny-solver LM", "factrs LM"] {
             if !want(label) || (skip_tiny && label == "tiny-solver LM") {
@@ -367,7 +368,7 @@ fn run_gtsam(scene_path: &str, n_poses: usize) -> Ext {
         &[scene_path, "lm", sol_out], sol_out, n_poses)
 }
 
-// ---- Covariance-scaling benchmark (LOC_COV=1) ------------------------------
+// ---- Covariance-scaling benchmark (BENCH_COV=1) ----------------------------
 
 use bench_harness::cov::{fmt_cell, print_table, run_cov_cpp};
 
@@ -377,9 +378,12 @@ use bench_harness::cov::{fmt_cell, print_table, run_cov_cpp};
 fn cov_benchmark(scene: &Scene) {
     let budget: f64 = std::env::var("COV_BUDGET_S").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
     let cap: usize = std::env::var("COV_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
-    let ceres = std::path::Path::new("cpp/build/ceres_loc").exists();
-    let gtsam = std::path::Path::new("cpp/build/gtsam_loc").exists();
-    let g2o = std::path::Path::new("cpp/build/g2o_loc").exists();
+    // BENCH_SYSTEMS selects the comparison systems here as in the solve table.
+    let wanted = bench_harness::env::wants;
+    let built = |bin: &str| std::path::Path::new(&format!("cpp/build/{bin}")).exists();
+    let ceres = wanted("ceres") && built("ceres_loc");
+    let gtsam = wanted("gtsam") && built("gtsam_loc");
+    let g2o = wanted("g2o") && built("g2o_loc");
     let scene_path = "/tmp/loc_scene.txt";
     scene::write_scene(scene, scene_path);
 
@@ -388,8 +392,8 @@ fn cov_benchmark(scene: &Scene) {
     println!("`1 (last)` is the last pose, the localization query; other columns spread N poses over the trajectory.");
     println!("TriDiagonal is a band forward/backward pass, no factorization; PerQuery, AllMarginals, Ceres and GTSAM factor cold; g2o reuses its solve factor (warm).");
     println!("cells: median ms (reps); budget {budget}s [COV_BUDGET_S]; - not covered; * over the {cap_s:.0}s cap [COV_CELL_CAP_S].");
-    for (ok, name) in [(ceres, "ceres_loc"), (gtsam, "gtsam_loc"), (g2o, "g2o_loc")] {
-        if !ok {
+    for (row, name) in [("ceres", "ceres_loc"), ("gtsam", "gtsam_loc"), ("g2o", "g2o_loc")] {
+        if wanted(row) && !built(name) {
             eprintln!("WARNING: cpp/build/{name} missing; skipping it");
         }
     }

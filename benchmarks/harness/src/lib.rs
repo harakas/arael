@@ -12,12 +12,24 @@
 
 pub mod arael;
 pub mod cov;
+pub mod env;
 pub mod external;
 pub mod header;
 #[cfg(feature = "factrs")]
 pub mod factrs;
 #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-metal"))]
 pub mod gpu_factor;
+/// The GPU factor comparison of a build without a GPU runtime: it stops,
+/// so `gpu_factor_bench` builds with every feature set.
+#[cfg(not(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-metal")))]
+pub mod gpu_factor {
+    /// Stops the run: the comparison needs the feature `gpu-cuda`,
+    /// `gpu-hip` or `gpu-metal`.
+    pub fn compare(what: &str, _a: &arael_faer::bsc::SparseBlockColMat<arael_faer::SparseIndex, f64>, _rhs: &[f64]) {
+        eprintln!("{what}: the GPU factor comparison needs the feature gpu-cuda, gpu-hip or gpu-metal");
+        std::process::exit(2);
+    }
+}
 pub mod mem;
 pub mod pin;
 pub mod probe;

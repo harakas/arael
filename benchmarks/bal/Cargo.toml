@@ -2,6 +2,8 @@
 name = "bal-bench"
 version = "0.1.0"
 edition = "2021"
+# plain `cargo run` is the benchmark; the other binaries take --bin
+default-run = "bal-bench"
 publish = false
 
 # Standalone workspace, same pattern as benchmarks/pgo.
@@ -12,13 +14,13 @@ publish = false
 # WARNING: cholmod-gpl links CHOLMOD's GPL-licensed Supernodal module; the
 # resulting binary is subject to the GPL.
 cholmod-gpl = ["arael/cholmod-gpl"]
-# The supernodal block route on a GPU (ARAEL_GPU=cuda, hip, metal).
+# A GPU for the arael rows (ARAEL_GPU=cuda, hip or metal; see ../README.md).
 gpu-cuda = ["arael/gpu-cuda", "bench-harness/gpu-cuda"]
 gpu-hip = ["arael/gpu-hip", "bench-harness/gpu-hip"]
+gpu-metal = ["arael/gpu-metal", "bench-harness/gpu-metal"]
 # The CPU device (ARAEL_GPU=cpu) and the device trace (ARAEL_GPU_TRACE), for tools/devmap.
 gpu-cpu = ["arael/gpu-cpu", "bench-harness/gpu-cpu"]
 gpu-trace = ["arael/gpu-trace", "bench-harness/gpu-trace"]
-gpu-metal = ["arael/gpu-metal", "bench-harness/gpu-metal"]
 
 [dependencies]
 arael = { path = "../..", features = ["threads"] }

@@ -14,8 +14,10 @@
 //! 4. The near-plane observations at the initial point and at the optimum:
 //!    how many, how deep, and what their residuals do in f32.
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../bal.rs"]
 mod bal;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
@@ -441,6 +443,7 @@ fn near_plane(label: &str, ds: &Dataset, s: &Solution) {
 }
 
 fn main() {
+    bench_harness::env::check(&[]);
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!("usage: f32_floor <dataset> <lambda0> [max_iters]");

@@ -243,9 +243,13 @@ const BAND_KD: usize = 11;
 
 // LOC_ARAEL_SOLVER selects the backend: band (default -- scalar LAPACK-band
 // Cholesky, kd=11), faer (general sparse), or narrow_band (block band Cholesky
-// on the whole banded Hessian, via SparseFaerOptions::with_narrow_band).
+// on the whole banded Hessian, via SparseFaerOptions::with_narrow_band). Any
+// other value stops the run.
 fn solver_kind() -> String {
-    std::env::var("LOC_ARAEL_SOLVER").unwrap_or_else(|_| "band".to_string())
+    let kind = std::env::var("LOC_ARAEL_SOLVER").unwrap_or_else(|_| "band".to_string());
+    assert!(["band", "faer", "narrow_band"].contains(&kind.as_str()),
+        "LOC_ARAEL_SOLVER={kind}: expected band, faer or narrow_band");
+    kind
 }
 
 /// The backend this run resolved to, for the config header.
@@ -257,46 +261,43 @@ pub fn backend() -> String {
     }
 }
 
+/// The shared solver options the band route does not take: only the faer
+/// and narrow_band routes read them.
+const SPARSE_ONLY: &[&str] = &[
+    "ARAEL_GPU",
+    "ARAEL_GPU_WIDE",
+    "ARAEL_GPU_STAGING",
+    "ARAEL_F32_FACTOR",
+    "ARAEL_REFINE_TOL",
+    "ARAEL_BLOCK_SUPERNODAL",
+    "ARAEL_BLOCK_SUPERNODAL_BATCH",
+    "ARAEL_BLOCK_SUPERNODAL_LEAN",
+];
+
+/// Stops the run when the band route is selected and an option of
+/// [`SPARSE_ONLY`] is set, so the option is not ignored.
+pub fn check_route() {
+    if let Some(message) = band_refusal(&solver_kind(), |name| std::env::var_os(name).is_some()) {
+        eprintln!("{message}");
+        std::process::exit(2);
+    }
+}
+
+/// What [`check_route`] prints for the route `kind`, `None` when the run
+/// may go on.
+fn band_refusal(kind: &str, is_set: impl Fn(&str) -> bool) -> Option<String> {
+    if kind != "band" {
+        return None;
+    }
+    let set: Vec<&str> = SPARSE_ONLY.iter().copied().filter(|name| is_set(name)).collect();
+    (!set.is_empty()).then(|| {
+        format!("{} set: the band route does not read it; set LOC_ARAEL_SOLVER=faer or narrow_band", set.join(", "))
+    })
+}
+
 type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFailure<T>>;
 
-// ARAEL_BLOCK_SUPERNODAL picks when the supernodal block Cholesky
-// factorizes on the faer and narrow_band routes (the library default is
-// Auto: supernodal on sequential solves). `0`/`off`/`scalar` restores the
-// scalar route, `1`/`always` forces the supernodal even threaded, unset
-// keeps Auto. The default `band` route is a different solver entirely and
-// does not read it. A typo is rejected rather than silently ignored.
-fn block_supernodal() -> arael::simple_lm::BlockSupernodalMode {
-    use arael::simple_lm::BlockSupernodalMode as M;
-    match std::env::var("ARAEL_BLOCK_SUPERNODAL").ok().as_deref() {
-        None | Some("auto") => M::Auto,
-        Some("1") | Some("always") => M::Always,
-        Some("0") | Some("off") | Some("scalar") => M::Never,
-        Some(other) => panic!(
-            "ARAEL_BLOCK_SUPERNODAL={}: expected auto, 1/always, or 0/off/scalar",
-            other
-        ),
-    }
-}
-
-// ARAEL_BLOCK_SUPERNODAL_BATCH tunes the supernodal route's update batching:
-// a ratio (e.g. 1.5), or 0/off to disable. Unset keeps the library default.
-// A typo is rejected rather than silently ignored.
-fn block_supernodal_batch() -> Option<f64> {
-    match std::env::var("ARAEL_BLOCK_SUPERNODAL_BATCH").ok().as_deref() {
-        None => arael::simple_lm::SparseFaerOptions::auto().block_supernodal_batch,
-        Some("0") | Some("off") => None,
-        Some(v) => Some(v.parse().unwrap_or_else(|_| {
-            panic!("ARAEL_BLOCK_SUPERNODAL_BATCH={}: expected a ratio, or 0/off", v)
-        })),
-    }
-}
-
-/// ARAEL_BLOCK_SUPERNODAL_LEAN=1 uses the memory-lean amalgamation on the
-/// supernodal route (SparseFaerOptions::with_block_supernodal_memory_lean).
-
-fn block_supernodal_lean() -> bool {
-    std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
-}
+use bench_harness::arael::{block_supernodal, block_supernodal_batch, block_supernodal_lean};
 
 // Every route solves through the harness's context, so a `par` root's
 // stores are built once per row and reused across its probes.
@@ -310,7 +311,8 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
                 .with_block_supernodal(block_supernodal())
                 .with_block_supernodal_batching(block_supernodal_batch())
                 .with_block_supernodal_memory_lean(block_supernodal_lean())
-                .with_mixed_precision(bench_harness::arael::mixed_precision())),
+                .with_mixed_precision(bench_harness::arael::mixed_precision())
+                .with_gpu(bench_harness::arael::gpu())),
             path, cfg, ctx),
         "narrow_band" => arael::simple_lm::lm_solve_with_context(
             params,
@@ -319,7 +321,8 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
                 .with_block_supernodal(block_supernodal())
                 .with_block_supernodal_batching(block_supernodal_batch())
                 .with_block_supernodal_memory_lean(block_supernodal_lean())
-                .with_mixed_precision(bench_harness::arael::mixed_precision())),
+                .with_mixed_precision(bench_harness::arael::mixed_precision())
+                .with_gpu(bench_harness::arael::gpu())),
             path, cfg, ctx),
         _ => arael::simple_lm::lm_solve_with_context(
             params, &mut arael::simple_lm::Band::new(BAND_KD), path, cfg, ctx),
@@ -336,7 +339,8 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
                 .with_block_supernodal(block_supernodal())
                 .with_block_supernodal_batching(block_supernodal_batch())
                 .with_block_supernodal_memory_lean(block_supernodal_lean())
-                .with_mixed_precision(bench_harness::arael::mixed_precision())),
+                .with_mixed_precision(bench_harness::arael::mixed_precision())
+                .with_gpu(bench_harness::arael::gpu())),
             path, cfg, ctx),
         "narrow_band" => arael::simple_lm::lm_solve_with_context(
             params,
@@ -345,7 +349,8 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
                 .with_block_supernodal(block_supernodal())
                 .with_block_supernodal_batching(block_supernodal_batch())
                 .with_block_supernodal_memory_lean(block_supernodal_lean())
-                .with_mixed_precision(bench_harness::arael::mixed_precision())),
+                .with_mixed_precision(bench_harness::arael::mixed_precision())
+                .with_gpu(bench_harness::arael::gpu())),
             path, cfg, ctx),
         _ => arael::simple_lm::lm_solve_with_context(
             params, &mut arael::simple_lm::Band::new(BAND_KD), path, cfg, ctx),
@@ -556,4 +561,19 @@ fn timed_once<M: bench_harness::arael::Model<Input = Scene>>(
         .expect("timed solve failed")
         .timing
         .expect("gather_timing is on")
+}
+
+#[cfg(test)]
+mod tests {
+    /// The band route refuses the sparse routes' options; the sparse
+    /// routes take them, and an unset option is no reason to stop.
+    #[test]
+    fn the_band_route_refuses_the_sparse_options() {
+        assert_eq!(super::band_refusal("band", |_| false), None);
+        let gpu = |name: &str| name == "ARAEL_GPU";
+        let message = super::band_refusal("band", gpu).unwrap();
+        assert!(message.starts_with("ARAEL_GPU set: the band route"), "{message}");
+        assert_eq!(super::band_refusal("faer", gpu), None);
+        assert_eq!(super::band_refusal("narrow_band", gpu), None);
+    }
 }

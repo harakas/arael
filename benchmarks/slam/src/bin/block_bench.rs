@@ -5,8 +5,10 @@
 //!
 //!     SLAM_POSES=300 ROUNDS=20 cargo run -r --bin block_bench
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../scene.rs"]
 mod scene;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
@@ -44,7 +46,7 @@ fn min_ms<R>(rounds: usize, mut f: impl FnMut() -> R) -> (f64, R) {
 }
 
 fn main() {
-
+    bench_harness::env::check(&[]);
     let mut ctx = arael::threads::Context::new();
     pin_single_core();
     let mut cfg = SceneConfig::default();
@@ -53,7 +55,7 @@ fn main() {
             cfg.num_poses = n; cfg.num_landmarks = 4 * n;
         }
     }
-    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    let rounds = bench_harness::env::rounds(20);
     let scene = scene::generate(&cfg);
 
     let mut path = arael_runner::build(&scene);

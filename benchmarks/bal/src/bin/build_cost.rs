@@ -8,8 +8,10 @@
 //!     CALLS=50 BAL_DATASET=datasets/problem-372-47423-pre.txt \
 //!         taskset -c 7 ./target/release/build_cost
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../bal.rs"]
 mod bal;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
@@ -44,6 +46,7 @@ fn med(v: &mut Vec<f64>) -> f64 {
 }
 
 fn main() {
+    bench_harness::env::check(&[]);
     let calls: usize = std::env::var("CALLS").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
     let path = std::env::var("BAL_DATASET")
         .unwrap_or_else(|_| "datasets/problem-372-47423-pre.txt".to_string());

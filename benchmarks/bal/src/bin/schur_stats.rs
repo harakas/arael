@@ -5,13 +5,20 @@
 //! where it stops winning.
 //!
 //!     cargo run -r --bin schur_stats
+//!
+//! The reduction runs on BENCH_THREADS threads (1 by default), pinned as
+//! the benchmark is; SCHUR_CHUNK=w walks each thread's columns w at a time
+//! (0, the default, all at once). ARAEL_LAMBDA0 damps the Hessian's
+//! diagonal by 1 + lambda (1e-4 when unset); BAL_ONLY picks the datasets.
 
 // The included modules are the benchmark's, and expose more than this binary
 // calls.
 #![allow(dead_code)]
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../bal.rs"]
 mod bal;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
@@ -75,13 +82,15 @@ fn min_ms<R>(rounds: usize, mut f: impl FnMut() -> R) -> (f64, R) {
 }
 
 fn main() {
+    bench_harness::env::check(&[]);
+    bench_harness::pin::enforce_cores();
     let datasets = [
         ("Ladybug-49", "datasets/problem-49-7776-pre.txt"),
         ("Ladybug-138", "datasets/problem-138-19878-pre.txt"),
         ("Ladybug-372", "datasets/problem-372-47423-pre.txt"),
         ("Ladybug-1723", "datasets/problem-1723-156502-pre.txt"),
     ];
-    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let rounds = bench_harness::env::rounds(3);
 
     println!("{:<14} {:>7} {:>8} {:>9} {:>7} {:>8} {:>10} {:>9} {:>9} {:>9} {:>8} {:>8}",
         "dataset", "cams", "S n", "S dens%", "pairs", "L_S MB", "reduce ms", "sym ms", "numer ms",
@@ -133,10 +142,7 @@ fn main() {
         // Gauss-Newton Hessian is singular at the initial estimate
         // (points behind cameras, unconstrained gauge).
         let nblk = partition.len() - 1;
-        let lambda: f64 = std::env::var("BAL_LAMBDA0")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1e-4);
+        let lambda = bench_harness::arael::lambda0_override().unwrap_or(1e-4);
         // the structure once: cloned per block, it made this quadratic
         let hs = h.symbolic().clone();
         for b in 0..nblk {
@@ -175,10 +181,8 @@ fn main() {
         let sym = schur_symbolic(h.symbolic(), &eliminated).unwrap();
         let mut s = sym.alloc_s::<f64>();
         let mut ctx = SchurContext::new();
-        // SCHUR_THREADS and SCHUR_CHUNK as in slam's schur_bench.
-        ctx.set_threads(
-            std::env::var("SCHUR_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
-        );
+        // BENCH_THREADS and SCHUR_CHUNK as in slam's schur_bench.
+        ctx.set_threads(bench_harness::pin::threads());
         ctx.set_chunk_columns(
             std::env::var("SCHUR_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
         );

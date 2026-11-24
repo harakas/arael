@@ -8,10 +8,13 @@
 //!
 //!     SLAM_POSES=300 ROUNDS=20 cargo run -r --bin sfactor_bench
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../scene.rs"]
 mod scene;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../reduced.rs"]
 mod reduced;
 
@@ -86,6 +89,7 @@ fn dump_s(name: &str, nk: usize, col_ptr: &[usize], row_idx: &[usize], vals: &[f
 }
 
 fn main() {
+    bench_harness::env::check(&[]);
     pin_single_core();
     let mut cfg = SceneConfig::default();
     if let Ok(n) = std::env::var("SLAM_POSES") {
@@ -94,7 +98,7 @@ fn main() {
             cfg.num_landmarks = 4 * n;
         }
     }
-    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    let rounds = bench_harness::env::rounds(20);
 
     // ---- build S exactly as the solver backend does ----------------------
     let reduced::Reduced { sym, s, rhs, h } = reduced::reduced_system::<usize>(&cfg);

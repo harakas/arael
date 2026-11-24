@@ -1,17 +1,19 @@
 //! Blocked Schur reduction cost on the slam problem: one-time symbolic
 //! analysis, per-iteration schur_reduce (S + reduced rhs), and the
 //! S -> scalar CSC handoff, on the block-CSC H the two-scan assembly
-//! builds. Single core, min over ROUNDS (default 20). At 60 poses the
-//! result is verified against a dense reference reduction.
+//! builds. Min over ROUNDS (default 20). At 60 poses the result is
+//! verified against a dense reference reduction.
 //!
 //!     SLAM_POSES=300 ROUNDS=20 cargo run -r --bin schur_bench
 //!
-//! SCHUR_THREADS=n runs the reduction and the back-substitution on n
-//! threads, unpinned. SCHUR_CHUNK=w walks each thread's columns w at a
-//! time (0, the default, all at once).
+//! BENCH_THREADS=n runs the reduction and the back-substitution on n
+//! threads (1 by default), pinned as the benchmark is. SCHUR_CHUNK=w walks
+//! each thread's columns w at a time (0, the default, all at once).
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../scene.rs"]
 mod scene;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
@@ -21,21 +23,6 @@ use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockCo
 use arael_faer::schur::{schur_backsub, schur_reduce, schur_symbolic, SchurContext};
 use scene::SceneConfig;
 use std::time::Instant;
-
-fn pin_single_core() {
-    for var in ["RAYON_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS"] {
-        std::env::set_var(var, "1");
-    }
-    // Linux only: the other platforms have no affinity call.
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let core = std::thread::available_parallelism().map(|n| n.get() - 1).unwrap_or(0);
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_ZERO(&mut set);
-        libc::CPU_SET(core, &mut set);
-        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-    }
-}
 
 fn min_ms<R>(rounds: usize, mut f: impl FnMut() -> R) -> (f64, R) {
     let mut best = f64::INFINITY;
@@ -50,12 +37,10 @@ fn min_ms<R>(rounds: usize, mut f: impl FnMut() -> R) -> (f64, R) {
 }
 
 fn main() {
+    bench_harness::env::check(&[]);
+    bench_harness::pin::enforce_cores();
     let mut hctx = arael::threads::Context::new();
-    let threads: usize =
-        std::env::var("SCHUR_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
-    if threads <= 1 {
-        pin_single_core();
-    }
+    let threads = bench_harness::pin::threads();
     let mut cfg = SceneConfig::default();
     if let Ok(n) = std::env::var("SLAM_POSES") {
         if let Ok(n) = n.parse() {
@@ -63,7 +48,7 @@ fn main() {
             cfg.num_landmarks = 4 * n;
         }
     }
-    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    let rounds = bench_harness::env::rounds(20);
     let scene = scene::generate(&cfg);
 
     let mut path = arael_runner::build(&scene);

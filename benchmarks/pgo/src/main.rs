@@ -118,7 +118,7 @@ fn run_g2o(ds_path: &str, kind: &str, weighted: bool, n_poses: usize)
     let poses_out = format!("/tmp/g2o_poses_{}.txt", kind);
     let mut cmd = std::process::Command::new("cpp/build/g2o_bench");
     cmd.args([ds_path, kind, &poses_out, if weighted { "info" } else { "unit" }]);
-    // g2o's own initial chi2 equals the reference cost bit-for-bit (the edges
+    // g2o's own initial chi2 equals the reference cost to rounding (the edges
     // carry the conjugated information); the 2D table checks it in the runner.
     cmd.env("G2O_LAMBDA_INIT", g2o_lambda(ds_path));
     run_external(cmd, &poses_out, n_poses)
@@ -323,10 +323,12 @@ fn run_dataset3(name: &str, path: &str, rounds: usize) {
 
     // Only the selected systems, as in the 2D path: a filtered run must not
     // solve the others for their memory figure.
-    let mem_labels: Vec<&str> = ["arael LM f64", "arael LM f32", "factrs GN", "factrs LM"]
-        .into_iter().filter(|l| system_selected(l)).collect();
-    for (label, mb) in measure_in_process_memory(path, true, true, &mem_labels) {
-        t.set_peak_mb(&label, mb);
+    if bench_harness::env::memory_pass() {
+        let mem_labels: Vec<&str> = ["arael LM f64", "arael LM f32", "factrs GN", "factrs LM"]
+            .into_iter().filter(|l| system_selected(l)).collect();
+        for (label, mb) in measure_in_process_memory(path, true, true, &mem_labels) {
+            t.set_peak_mb(&label, mb);
+        }
     }
     t.print();
 }
@@ -350,80 +352,59 @@ fn skip_isam() -> bool {
     std::env::var("RUN_ISAM").is_err()
 }
 
-// The run's configuration, printed at startup so a pasted result carries the
-// settings that produced it. Values are read back from the actual config
-// objects and env accessors the runners use, so the header cannot drift from
-// what was run; the env var that changes each one is named in brackets.
-fn print_header(rounds: usize, only: &Option<String>) {
-    let c64 = bench_harness::arael::config::<arael_runner::Graph>(&g2o::Dataset::default(), 0);
-    let nielsen = bench_harness::arael::nielsen::<arael_runner::Graph>();
-    let ordering = arael_runner::ordering();
+/// The shared environment variables pgo does not read
+/// (`bench_harness::env::check`): its memory pass runs the full solve, and
+/// it has no covariance benchmark, envelope or conjugate gradient rows.
+const NOT_READ: &[&str] = &[
+    "BENCH_MEM_ITERS",
+    "BENCH_COV",
+    "ARAEL_ENVELOPE",
+    "ARAEL_CG_TOL",
+    "ARAEL_CG_MAXITER",
+    "ARAEL_CG_RESTART",
+    "ARAEL_COV_ORDERING",
+];
 
-    println!("=== pgo-bench configuration ===");
-    println!("rounds            : {}", bench_harness::header::rounds_value(rounds));
-    println!("datasets          : {} [PGO_ONLY]",
-        only.as_deref().unwrap_or("all"));
-    println!("systems           : {} [PGO_SYSTEMS]",
-        std::env::var("PGO_SYSTEMS").unwrap_or_else(|_| "all".to_string()));
-    let on_off = |skipped: bool| if skipped { "skipped" } else { "run" };
-    println!("optional systems  : tiny-solver {} [RUN_TINY], isam {} [RUN_ISAM], g2o PCG {} [RUN_PCG]",
-        on_off(skip_tiny()), on_off(skip_isam()), on_off(skip_pcg()));
-    println!("arael lambda0     : {:e} (2D), {:e} (3D) [ARAEL_LAMBDA0]",
-        arael_runner::LAMBDA0_2D,
-        arael_runner3::LAMBDA0_3D);
-    println!("arael damping     : {} [PGO_DRIVER: fixed|nielsen]",
-        if nielsen { "Nielsen gain-ratio driver" } else { "fixed ladder (default driver)" });
+// The run's configuration, printed at startup so a pasted result carries the
+// settings that produced it.
+fn print_header(rounds: usize, only: &Option<String>) {
+    use bench_harness::header::{on_off, Header};
+    let c64 = bench_harness::arael::config::<arael_runner::Graph>(&g2o::Dataset::default(), 0);
+    let ordering = arael_runner::ordering();
     // Auto is not a third ordering -- on a pose graph there is nothing to
     // marginalize, so there is no reduced system and it factorizes under AMD.
     let resolves_to = match ordering {
         arael::simple_lm::SolveOrdering::Auto => " -- AMD here (no marginalizable blocks)",
         _ => "",
     };
-    println!("arael ordering    : {:?}{} [PGO_ORDERING: auto|nd]", ordering, resolves_to);
-    println!("arael schur       : {:?} [PGO_SCHUR: auto|force|never]",
-        arael_runner::schur_policy());
-    println!("arael termination : abs {:e}, rel {:e}, patience {}, min_iters {}",
-        c64.abs_precision, c64.rel_precision, c64.patience, c64.min_iters);
-    println!("arael gpu         : {}", bench_harness::arael::gpu_value());
-    println!("arael f32 factor  : {}", bench_harness::arael::f32_factor_value());
-    println!("solver verbose    : {} [VERBOSE], per-solve timing {} [TIMING]",
-        if c64.verbose { "on" } else { "off" },
-        if std::env::var("TIMING").is_ok() { "on" } else { "off" });
-    println!("{}", core_line(bench_harness::pin::threads()));
+    let lambda0 = |default: f64| bench_harness::arael::lambda0_override().unwrap_or(default);
+    Header::new("pgo-bench")
+        .rounds(rounds)
+        .line("datasets", format!("{} [PGO_ONLY]", only.as_deref().unwrap_or("all")))
+        .systems()
+        .line("optional systems", format!("tiny-solver {} [RUN_TINY], isam {} [RUN_ISAM], g2o PCG {} [RUN_PCG]",
+            on_off(skip_tiny()), on_off(skip_isam()), on_off(skip_pcg())))
+        .line("arael lambda0", format!("{:e} (2D), {:e} (3D) [ARAEL_LAMBDA0]",
+            lambda0(arael_runner::LAMBDA0_2D), lambda0(arael_runner3::LAMBDA0_3D)))
+        .line("arael damping", format!("{} [DRIVER: fixed|nielsen]",
+            if bench_harness::arael::nielsen::<arael_runner::Graph>() { "Nielsen gain-ratio driver" }
+            else { "fixed ladder (default driver)" }))
+        .line("arael ordering", format!("{}{} [ARAEL_ORDERING]",
+            bench_harness::arael::ordering_name(ordering), resolves_to))
+        .line("arael schur", format!("{} [ARAEL_SCHUR: auto|force|never]",
+            bench_harness::arael::schur_policy_name(&arael_runner::schur_policy())))
+        .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",
+            c64.abs_precision, c64.rel_precision, c64.patience, c64.min_iters))
+        .gpu()
+        .verbose()
+        .memory()
+        .core()
+        .print();
 }
 
-/// The pin line. Takes the resolved count instead of reading it here so a
-/// test can hold it fixed.
-fn core_line(threads: usize) -> String {
-    let core = std::env::var("BENCH_CORE").unwrap_or_else(|_| "?".to_string());
-    if bench_harness::pin::pinned() {
-        format!("pinned to core    : {} (every thread pool capped at {}) [BENCH_THREADS, BENCH_PIN]", core, threads)
-    } else {
-        format!("pinned to core    : no, BENCH_PIN=0 (cpus allowed {}; every thread pool capped at {}) [BENCH_THREADS]", core, threads)
-    }
-}
-
-#[cfg(test)]
-mod header_tests {
-    /// The line claimed every pool was forced to 1 whatever BENCH_THREADS
-    /// resolved to, which mislabels every threaded run.
-    #[test]
-    fn the_header_reports_the_resolved_thread_count() {
-        let line = super::core_line(4);
-        assert!(line.contains("capped at 4"), "{line}");
-        assert!(!line.contains("forced to 1"), "{line}");
-    }
-}
-
-// PGO_SYSTEMS=<substr>[,<substr>...] runs only the systems whose label
-// contains one of the substrings (default: all). Pairs with PGO_ONLY for
-// datasets -- e.g. `PGO_SYSTEMS=arael PGO_ONLY=M3500` for a fast
-// arael-only comparison.
+/// Whether the row `label` runs under BENCH_SYSTEMS.
 fn system_selected(label: &str) -> bool {
-    match std::env::var("PGO_SYSTEMS") {
-        Ok(v) => v.split(',').map(str::trim).any(|s| !s.is_empty() && label.contains(s)),
-        Err(_) => true,
-    }
+    bench_harness::env::wants(label)
 }
 
 // Peak memory for the in-process rows.
@@ -481,6 +462,7 @@ fn measure_in_process_memory(path: &str, weighted: bool, three_d: bool, labels: 
 }
 
 fn main() {
+    bench_harness::env::check(NOT_READ);
     bench_harness::pin::enforce_cores();
     if mem_pass() {
         return;
@@ -494,11 +476,11 @@ fn main() {
         ("M3500", bench_dir.join("datasets/input_M3500_g2o.g2o"), true),
         ("city10000", bench_dir.join("datasets/city10000.g2o"), true),
     ];
-    let rounds: usize = std::env::var("ROUNDS").ok()
-        .and_then(|v| v.parse().ok()).unwrap_or(5);
+    let rounds = bench_harness::env::rounds(5);
     // PGO_ONLY=<substring> runs only the datasets whose name contains it.
     let only = std::env::var("PGO_ONLY").ok();
     let selected = |name: &str| only.as_deref().map_or(true, |f| name.contains(f));
+    bench_harness::env::note_filtered();
     print_header(rounds, &only);
     let python = gtsam_available();
     if python.is_none() {
@@ -624,10 +606,12 @@ fn main() {
         // best solution) -- the cost surface has near-flat directions
         // where a plateau 0.9% above the optimum can sit meters away
         // geometrically (observed with g2o LM on the weighted M3500).
-        let mem_labels: Vec<&str> = ["arael LM f64", "arael LM f32", "factrs GN", "factrs LM"]
-            .into_iter().filter(|l| system_selected(l)).collect();
-        for (label, mb) in measure_in_process_memory(path, *weighted, false, &mem_labels) {
-            t.set_peak_mb(&label, mb);
+        if bench_harness::env::memory_pass() {
+            let mem_labels: Vec<&str> = ["arael LM f64", "arael LM f32", "factrs GN", "factrs LM"]
+                .into_iter().filter(|l| system_selected(l)).collect();
+            for (label, mb) in measure_in_process_memory(path, *weighted, false, &mem_labels) {
+                t.set_peak_mb(&label, mb);
+            }
         }
         t.print();
     }

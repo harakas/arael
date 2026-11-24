@@ -15,7 +15,7 @@ use scene::{Scene, SceneConfig, Solution, Trajectory};
 /// to carry them. Values come from the objects the run actually uses, so the
 /// header cannot drift from what ran.
 fn print_header(problem: &arael_runner::Problem, cfg: &SceneConfig, rounds: usize, skip_tiny: bool,
-                systems_filter: &Option<String>, ceres_solvers: &[String]) {
+                ceres_solvers: &[String]) {
     use bench_harness::header::{on_off, Header};
     let arael_cfg = bench_harness::arael::config::<arael_runner::Path>(problem, 0);
     let cg = arael_runner::cg_options();
@@ -29,8 +29,7 @@ fn print_header(problem: &arael_runner::Problem, cfg: &SceneConfig, rounds: usiz
                 Trajectory::Loop => "closed loop, landmark visibility wraps",
                 Trajectory::Eight => "figure-8, landmarks shared at the crossing",
             }))
-        .line("systems", format!("{} [SLAM_SYSTEMS]",
-            systems_filter.as_deref().unwrap_or("all")))
+        .systems()
         .line("optional systems", format!("tiny-solver {} [RUN_TINY]", on_off(skip_tiny)))
         .line("ceres solvers", format!("{} [CERES_SOLVERS]", ceres_solvers.join(", ")))
         .line("arael lambda0", format!("{:e} (f64), {:e} (f32) [ARAEL_LAMBDA0]",
@@ -41,10 +40,13 @@ fn print_header(problem: &arael_runner::Problem, cfg: &SceneConfig, rounds: usiz
             else { "fixed ladder (default driver)" }))
         .line("arael backend", format!("{} [SLAM_ARAEL_SOLVER: schur|faer|cholmod]",
             std::env::var("SLAM_ARAEL_SOLVER").unwrap_or_else(|_| "schur".to_string())))
-        .line("arael envelope", format!("{:?} [SLAM_ENVELOPE: auto|always|never]",
+        .line("arael LM rows", format!("schur {} [ARAEL_SCHUR], ordering {} [ARAEL_ORDERING], \
+            envelope {:?} [ARAEL_ENVELOPE: auto|always|never]",
+            bench_harness::arael::schur_policy_name(&arael_runner::schur_policy()),
+            bench_harness::arael::ordering_name(arael_runner::ordering()),
             arael_runner::envelope_mode()))
         .line("arael CG rows", format!("tol {:e}, max_iters {}, restart every {} \
-            [SLAM_CG_TOL, SLAM_CG_MAXITER, SLAM_CG_RESTART]",
+            [ARAEL_CG_TOL, ARAEL_CG_MAXITER, ARAEL_CG_RESTART]",
             cg.tol, if cg.max_iters == 0 { "system dimension".to_string() }
                     else { cg.max_iters.to_string() },
             cg.restart_every))
@@ -52,22 +54,17 @@ fn print_header(problem: &arael_runner::Problem, cfg: &SceneConfig, rounds: usiz
             arael_cfg.abs_precision, arael_cfg.rel_precision,
             arael_cfg.patience, arael_cfg.min_iters))
         .gpu()
-        .line("solver verbose", format!("{} [VERBOSE], per-solve timing {} [TIMING]",
-            if arael_cfg.verbose { "on" } else { "off" },
-            if std::env::var("TIMING").is_ok() { "on" } else { "off" }))
-        .line("memory pass", format!("{} [SLAM_NO_MEM]",
-            if std::env::var("SLAM_NO_MEM").is_err() { "on" } else { "off" }))
+        .verbose()
+        .memory()
         .core()
         .print();
 }
 
 fn config() -> SceneConfig {
     let mut cfg = SceneConfig::default();
-    if let Ok(n) = std::env::var("SLAM_POSES") {
-        if let Ok(n) = n.parse() {
-            cfg.num_poses = n;
-            cfg.num_landmarks = 4 * n;
-        }
+    if let Some(n) = bench_harness::env::parsed("SLAM_POSES", "a pose count") {
+        cfg.num_poses = n;
+        cfg.num_landmarks = 4 * n;
     }
     // SLAM_SPAN=N caps every landmark to a narrow visibility span (and drops
     // the wide fraction), making the reduced Schur system narrow-banded -- the
@@ -105,8 +102,7 @@ fn mem_pass() -> bool {
     let scene = scene::generate(&config());
     // The peak fill-in is reached in the first factorization, so a capped solve
     // measures the same high-water mark as the full one, faster.
-    let iters: usize = std::env::var("SLAM_MEM_ITERS").ok()
-        .and_then(|v| v.parse().ok()).unwrap_or(3);
+    let iters = bench_harness::env::mem_iters();
     match which.as_str() {
         "arael LM f64" => { std::hint::black_box(arael_runner::run_capped(&scene, iters)); }
         "arael LM f32" => { std::hint::black_box(arael_runner::run_f32_capped(&scene, iters)); }
@@ -127,12 +123,14 @@ fn mem_pass() -> bool {
 }
 
 fn main() {
+    // slam reads every shared variable
+    bench_harness::env::check(&[]);
     bench_harness::pin::enforce_cores();
     if mem_pass() {
         return;
     }
     let cfg = config();
-    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let rounds = bench_harness::env::rounds(3);
     // Ceres calls it SPARSE_NORMAL_CHOLESKY; the table says what it is.
     fn ceres_label(solver: &str) -> String {
         let short = solver.strip_prefix("sparse_normal_").map_or(solver, |_| "sparse_cholesky");
@@ -146,16 +144,15 @@ fn main() {
     // systems are read on. The harness runs and validates it exactly as it does
     // the others.
     let skip_tiny = std::env::var("RUN_TINY").is_err();
-    // SLAM_SYSTEMS=<comma-separated substrings> runs only the matching rows
-    // (e.g. SLAM_SYSTEMS=arael). Unset runs everything. A filtered run
-    // validates only against whatever ran -- for iterating, not publishing.
-    let systems_filter = std::env::var("SLAM_SYSTEMS").ok();
+    // BENCH_SYSTEMS picks the rows; a filtered run validates only against
+    // whatever ran.
+    bench_harness::env::note_filtered();
 
     // Shared by every arael row: the same scene down more than one linear route.
     let scene = std::rc::Rc::new(scene::generate(&cfg));
     let factorized = arael_runner::Problem::new(&scene, arael_runner::Route::Factorize);
     let cg = arael_runner::Problem::new(&scene, arael_runner::Route::Cg);
-    print_header(&factorized, &cfg, rounds, skip_tiny, &systems_filter, &ceres_solvers);
+    print_header(&factorized, &cfg, rounds, skip_tiny, &ceres_solvers);
 
     let init_sol = initial_solution(&scene);
     let initial_cost = scene::reference_cost(&scene, &init_sol);
@@ -184,7 +181,7 @@ fn main() {
         factrs_init, initial_cost, rel);
     println!("factrs initial cost matches reference to {:.2e}", rel);
 
-    if std::env::var("SLAM_COV").is_ok() {
+    if bench_harness::env::cov() {
         cov_benchmark(&scene);
         return;
     }
@@ -224,15 +221,7 @@ fn main() {
         eprintln!("WARNING: cpp/build/gtsam_slam missing (needs libgtsam-dev); skipping GTSAM");
     }
 
-    let want = |label: &str| -> bool {
-        systems_filter.as_deref().is_none_or(|f| {
-            f.split(',').any(|pat| label.contains(pat.trim()))
-        })
-    };
-    if systems_filter.is_some() {
-        eprintln!("SLAM_SYSTEMS={} -- partial run, cross-system validation is not meaningful",
-            systems_filter.as_deref().unwrap_or(""));
-    }
+    let want = bench_harness::env::wants;
     for _ in 0..rounds {
         if want("arael LM f64") {
         let a = arael_runner::run(&factorized);
@@ -297,7 +286,7 @@ fn main() {
         }
     }
 
-    if std::env::var("SLAM_NO_MEM").is_err() {
+    if bench_harness::env::memory_pass() {
         let poses = scene.poses.len().to_string();
         for label in ["arael LM f64", "arael LM f32", "arael CG f64", "arael CG f32",
                       "tiny-solver LM", "factrs LM"] {
@@ -363,7 +352,7 @@ fn run_gtsam(scene_path: &str, n_poses: usize, n_landmarks: usize) -> Ext {
         &[scene_path, "lm", sol_out], sol_out, n_poses, n_landmarks)
 }
 
-// ---- Covariance-scaling benchmark (SLAM_COV=1) -----------------------------
+// ---- Covariance-scaling benchmark (BENCH_COV=1) ----------------------------
 
 use bench_harness::cov::{fmt_cell, print_table, run_cov_cpp};
 
@@ -373,14 +362,10 @@ use bench_harness::cov::{fmt_cell, print_table, run_cov_cpp};
 fn cov_benchmark(scene: &Scene) {
     let budget: f64 = std::env::var("COV_BUDGET_S").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
     let cap: usize = std::env::var("COV_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
-    // SLAM_SYSTEMS selects rows here as it does in the solve table, so a run
+    // BENCH_SYSTEMS selects rows here as it does in the solve table, so a run
     // that only wants arael's numbers does not spend the per-cell cap on the
-    // comparison systems. Unset runs everything.
-    let filter = std::env::var("SLAM_SYSTEMS").ok();
-    let wanted = |row: &str| match &filter {
-        Some(f) => f.split(',').any(|s| row.contains(s.trim())),
-        None => true,
-    };
+    // comparison systems.
+    let wanted = bench_harness::env::wants;
     let built = |bin: &str| std::path::Path::new(&format!("cpp/build/{bin}")).exists();
     let ceres = wanted("ceres") && built("ceres_slam");
     let gtsam = wanted("gtsam") && built("gtsam_slam");
@@ -396,9 +381,6 @@ fn cov_benchmark(scene: &Scene) {
         if wanted(row) && !built(bin) {
             eprintln!("WARNING: cpp/build/{bin} missing; skipping it");
         }
-    }
-    if let Some(f) = &filter {
-        eprintln!("SLAM_SYSTEMS={f} -- partial run, the cross-system std-dev check covers only what ran");
     }
 
     let ar = arael_runner::cov_bench(scene, budget, cap);

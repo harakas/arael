@@ -1,10 +1,8 @@
-// The configuration header every benchmark prints at startup.
+// The configuration header a benchmark prints at startup: one line per
+// setting, with the environment variable that changes it in brackets.
 //
-// A pasted result has to carry the settings that produced it. Values come from
-// the objects the run actually uses, not from re-reading the environment and
-// re-applying defaults in the printing code -- that is how a header drifts from
-// the run it describes. Each line names the env var that changes it, so the
-// header doubles as the knob list.
+// The values are read from the objects the run uses, not from the
+// environment again, so the header says what ran.
 
 pub struct Header {
     title: String,
@@ -21,26 +19,40 @@ impl Header {
         self
     }
 
-    /// The one line every benchmark has ([`rounds_value`]).
+    /// The `rounds` line ([`rounds_value`]).
     pub fn rounds(self, rounds: usize) -> Self {
         self.line("rounds", rounds_value(rounds))
     }
 
-    /// The GPU the arael rows are given and their single-precision factor
+    /// The `systems` line: the row filter ([`crate::env::systems_value`]).
+    pub fn systems(self) -> Self {
+        self.line("systems", crate::env::systems_value())
+    }
+
+    /// The `arael gpu` and `arael f32 factor` lines
     /// ([`crate::arael::gpu_value`], [`crate::arael::f32_factor_value`]).
     pub fn gpu(self) -> Self {
         self.line("arael gpu", crate::arael::gpu_value()).line("arael f32 factor", crate::arael::f32_factor_value())
     }
 
-    /// And the pin, which every timing depends on.
+    /// The `solver verbose` line: VERBOSE and TIMING.
+    pub fn verbose(self) -> Self {
+        let on_off = |on: bool| if on { "on" } else { "off" };
+        self.line(
+            "solver verbose",
+            format!("{} [VERBOSE], per-solve timing {} [TIMING]", on_off(crate::env::verbose()), on_off(crate::env::timing())),
+        )
+    }
+
+    /// The `memory pass` line: BENCH_NO_MEM.
+    pub fn memory(self) -> Self {
+        self.line("memory pass", format!("{} [BENCH_NO_MEM]", if crate::env::memory_pass() { "on" } else { "off" }))
+    }
+
+    /// The `pinned to core` line ([`core_value`]).
     pub fn core(self) -> Self {
-        let n = crate::pin::threads();
         let core = std::env::var("BENCH_CORE").unwrap_or_else(|_| "?".to_string());
-        if crate::pin::pinned() {
-            self.line("pinned to core", format!("{} (every thread pool capped at {}) [BENCH_THREADS, BENCH_PIN]", core, n))
-        } else {
-            self.line("pinned to core", format!("no, BENCH_PIN=0 (cpus allowed {}; every thread pool capped at {}) [BENCH_THREADS]", core, n))
-        }
+        self.line("pinned to core", core_value(&core, crate::pin::threads(), crate::pin::pinned()))
     }
 
     pub fn print(&self) {
@@ -49,6 +61,17 @@ impl Header {
         for (key, value) in &self.lines {
             println!("{:<w$} : {}", key, value, w = w);
         }
+    }
+}
+
+/// The pin line's value: the cores the run is held to (`core`, as the
+/// kernel names them), or that it is not pinned, and the thread count
+/// every thread pool is capped at.
+fn core_value(core: &str, threads: usize, pinned: bool) -> String {
+    if pinned {
+        format!("{core} (every thread pool capped at {threads}) [BENCH_THREADS, BENCH_PIN]")
+    } else {
+        format!("no, BENCH_PIN=0 (cpus allowed {core}; every thread pool capped at {threads}) [BENCH_THREADS]")
     }
 }
 
@@ -75,4 +98,18 @@ pub fn rounds_value(rounds: usize) -> String {
 /// "run" or "skipped", for an optional system.
 pub fn on_off(skipped: bool) -> &'static str {
     if skipped { "skipped" } else { "run" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::core_value;
+
+    /// The pin line names the thread count the run resolved to, pinned or
+    /// not.
+    #[test]
+    fn the_pin_line_reports_the_resolved_thread_count() {
+        assert_eq!(core_value("12-15", 4, true), "12-15 (every thread pool capped at 4) [BENCH_THREADS, BENCH_PIN]");
+        let free = core_value("0-15", 4, false);
+        assert!(free.starts_with("no, BENCH_PIN=0") && free.contains("capped at 4"), "{free}");
+    }
 }

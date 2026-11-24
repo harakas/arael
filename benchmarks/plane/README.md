@@ -6,14 +6,14 @@ The plane representation and the observation residual follow g2o's
 `slam3d_addons` plane types, and the g2o runner uses the shipped vertex and
 edge; the scene is generated here. It runs on the shared
 [`benchmarks/harness`](../harness) -- the same probes, timing rules, table and
-core pin as [`benchmarks/pgo`](../pgo), [`benchmarks/loc`](../loc) and
-[`benchmarks/slam`](../slam). What is local to this benchmark is its problem:
+core pin as the other benchmarks; [benchmarks/README.md](../README.md) lists
+the variables they share and the GPU builds. What is local to this benchmark is its problem:
 one scene generator, one reference cost function every system is validated
 against, and a cross-checked initial cost.
 
 ## Why plane landmarks are their own benchmark
 
-A plane landmark is **a direction on S^2 plus a scalar** -- 3 numbers carrying
+A plane landmark is a direction on S^2 plus a scalar -- 3 numbers carrying
 2 rotational degrees of freedom and one distance. Every system has to pick a
 chart for the direction, and they pick different ones, which is the point of
 the benchmark: the same problem exercises six parameterizations of the same
@@ -37,12 +37,12 @@ error accumulates around the loop and the closure is what the observations have
 to pull shut. Each plane starts from the first observation of it.
 
 Planes are mutually uncoupled, so the Hessian admits a Schur reduction. On this
-scene arael's auto gate prices both routes and **declines** it -- the reduced
+scene arael's auto gate prices both routes and declines it -- the reduced
 system is denser than the whole one. `PLANE_SHARED=1` switches to a degenerate
 6-plane room where every pose sees every plane; there the reduced system is
 fully dense, and it exists as the gate's stress case.
 
-`PLANE_SCHUR=force` reduces anyway, for studying the reduced system on this
+`ARAEL_SCHUR=force` reduces anyway, for studying the reduced system on this
 model rather than solving it fastest. The path is a closed loop, so that system
 carries the loop's coupling: at 60 poses it stays naturally ordered and has an
 envelope to factor under, and above that it takes a fill-reducing ordering
@@ -73,11 +73,11 @@ Every runner minimizes the same whitened residuals, so the initial costs must
 agree (the parity gate; `scene_cost` in `src/scene.rs` is the independent
 evaluator):
 
-- **plane observation** -- g2o `Plane3D::ominus` of the predicted local plane
+- plane observation -- g2o `Plane3D::ominus` of the predicted local plane
   against the measurement: azimuth and elevation of the measured normal in the
   frame aligning the predicted normal with e1, plus the distance difference.
   The g2o runner uses the shipped `EdgeSE3PlaneSensorCalib` for this.
-- **odometry** -- `err_t = R_a^T (t_b - t_a) - t_m`,
+- odometry -- `err_t = R_a^T (t_b - t_a) - t_m`,
   `err_r = vee((R_m^T R_a^T R_b - transpose)/2)`. A custom edge in each runner:
   the shipped g2o `EdgeSE3` uses the error-quaternion vector part instead, a
   slightly different objective.
@@ -87,15 +87,15 @@ instead, zero at the start point.
 
 ## Methodology
 
-- **One termination class.** Every system stops when a step improves the cost
+- One termination class. Every system stops when a step improves the cost
   by less than 1e-7, absolute or relative (`PLANE_TOL`). Tighter than the
   sibling benchmarks because these costs are large: 1e-5 relative at a cost of
   12000 stops once a step gains less than 0.12, short of the 5 cm agreement
   gate.
-- **A separate class for single precision**, 1e-5 (`PLANE_TOL_F32`). f32
+- A separate class for single precision, 1e-5 (`PLANE_TOL_F32`). f32
   epsilon is 1.2e-7, so the f64 class sits below the noise floor and a solver
   asked to chase it spends its iterations on steps that cannot register.
-- **Problem-appropriate initial damping for every LM**, as on the sibling
+- Problem-appropriate initial damping for every LM, as on the sibling
   benchmarks: arael 1e-8, Ceres trust region 1e7, g2o 2e-3, SymForce 3e-3. Each
   is the value that clears the first iteration on the long loops and changes
   nothing below 300 poses. factrs keeps its default -- its `LevenMarquardt`
@@ -103,16 +103,9 @@ instead, zero at the start point.
 
 ## What is measured
 
-**One iteration.** Linearize, assemble, factorize, solve -- the pipeline every
-system runs on every step, over the identical validated cost function. It is
-measured as t(2 iterations) - t(1 iteration), so the one-time setup (first
-assembly, ordering, symbolic factorization) cancels out, and it is reported
-only when the first iteration was one accepted step, so a rejected step's
-wasted factorization cannot leak into it.
-
-This is the number that compares across systems. **Total time and iteration
-count do not**, and reading them as a ranking will mislead you: they are set by
-each system's damping schedule.
+One iteration (full-iter, t(2 iterations) - t(1 iteration)) is the number
+that compares across systems; [benchmarks/README.md](../README.md#reading-a-table)
+explains it and the other columns.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.9.0/plane-setup-dark.svg">
@@ -127,23 +120,7 @@ fifth of the bill, and on a long-running estimator it rounds to nothing.
 
 ## Results (2026-10-04, Apple M4 Pro, single core enforced by the harness, min of 128 interleaved rounds; 64 at 900 poses)
 
-What each column means:
-
-| column | meaning |
-|--------|---------|
-| **total ms** | the whole solve: setup plus every iteration, retries included. |
-| **iters** | `accepted(attempts)`. An attempt is one linear solve; a rejected step raises the damping and costs a factorization. |
-| **ms/iter** | total ms divided by attempts -- an average, carrying the one-time setup amortized over however many iterations the solver took. |
-| **full-iter** | one complete iteration, setup cancelled. The durable cross-system number. |
-| **full-norm** | the same full-iter normalized to the arael f64 row on that dataset (= 1.000) -- the row's per-iteration cost in units of an arael-f64 iteration. |
-| **1st-iter ms** | one iteration plus the setup the others do not pay again. |
-| **peak MB** | process high-water mark (`VmHWM`), each solver measured in a process of its own. |
-| **final cost** | evaluated by the one reference cost function for every system, so the values are directly comparable. |
-
-full-iter, full-norm and 1st-iter are dropped ("-") for any system whose first iteration
-was not a single accepted step.
-
-All eight rows reach the common optimum at all four sizes.
+full-norm is relative to `arael LM f64`. All eight rows reach the common optimum at all four sizes.
 
 ### 60 poses (24 planes, 59 odometry pairs, 312 observations, 426 parameters)
 
@@ -221,36 +198,36 @@ cmake -B cpp/build cpp && cmake --build cpp/build   # Ceres, g2o, GTSAM
 # g2o needs libg2o-dev + cholmod; GTSAM needs libgtsam-dev (+ libtbb-dev)
 # add -DSYMFORCE_DIR=/path/to/symforce for the SymForce runner -- a checkout
 #   that has been BUILT, since its libraries are read from build/temp.*
-export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1     # before load, see below
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1     # before load, see ../README.md
 ROUNDS=10 cargo run --release                       # 64 poses (default)
 PLANE_POSES=900 ROUNDS=64 cargo run --release       # largest tier
 PLANE_SHARED=1 cargo run --release                  # degenerate 6-plane room
 VERBOSE=1 cargo run --release                       # arael per-iteration trace
 ```
 
+On a GPU ([benchmarks/README.md](../README.md#on-a-gpu) has the other
+runtimes); both arael rows take it:
+
+```sh
+ARAEL_GPU=cuda PLANE_POSES=900 cargo run --release --features gpu-cuda
+```
+
 The run prints all of its settings in a header, so a pasted result carries what
-produced it.
+produced it. The variables of plane alone, and plane's values of the shared
+ones:
 
 | env | effect |
 |-----|--------|
 | `PLANE_POSES` | scene size (64 default; planes and observations scale with it) |
-| `PLANE_SHARED` | the degenerate 6-plane room instead of local landmarks |
-| `PLANE_SCHUR` | `auto` (default, declines here), `force` (marginalize the planes anyway) or `never` |
-| `PLANE_ENVELOPE` | `auto` (default), `always` or `never` -- how a reduced system is factored; needs `PLANE_SCHUR=force` to bite |
-| `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
-| `BENCH_MAX_ITERS` | every row's full solve held to this many iterations (damping retries included), the probes unchanged: a diagnostic, not a table |
-| `BENCH_SOLVE_ONLY` | every row runs its full solve alone, without the warmup and the probes. With `BENCH_MAX_ITERS=1` one attempt, for a trace or a probed run |
-| `PLANE_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
+| `PLANE_SHARED` | set: the degenerate 6-plane room instead of local landmarks |
+| `PLANE_OPEN` | set: an open half-turn arc instead of the closed loop |
 | `PLANE_TOL`, `PLANE_TOL_F32` | the termination class, f64 and f32 |
-| `ARAEL_LAMBDA0`, `CERES_RADIUS0`, `G2O_LAMBDA_INIT`, `SYMFORCE_LAMBDA0` | initial damping, per system |
-| `DRIVER` | `nielsen` (default) or `fixed` -- arael's damping driver |
-| `VERBOSE` | arael's per-iteration solver trace |
-| `TIMING` | arael's per-solve phase breakdown (assembly, linear solve) |
-| `PLANE_NO_MEM` | skip the peak-memory pass |
-
-The thread caps must be exported **before** the process starts: OpenBLAS sizes
-its pool when its shared library loads, ahead of any code that could set them,
-and those early threads escape the single-core pin.
+| `CERES_RADIUS0`, `G2O_LAMBDA_INIT`, `SYMFORCE_LAMBDA0` | initial damping of the other systems |
+| `ROUNDS` | 3 |
+| `ARAEL_LAMBDA0` | 1e-8 |
+| `DRIVER` | `nielsen`; `fixed` is the ladder |
+| `ARAEL_SCHUR` | `auto` (declines here); `force` marginalizes the planes anyway |
+| `ARAEL_ENVELOPE` | `auto`; needs `ARAEL_SCHUR=force` to bite |
 
 ### SymForce
 

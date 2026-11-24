@@ -7,8 +7,10 @@
 //!
 //!     CALLS=100 SLAM_POSES=2400 taskset -c 7 ./target/release/build_cost
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../scene.rs"]
 mod scene;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
@@ -44,6 +46,7 @@ fn med(v: &mut Vec<f64>) -> f64 {
 }
 
 fn main() {
+    bench_harness::env::check(&[]);
     let calls: usize = std::env::var("CALLS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
     let poses: usize = std::env::var("SLAM_POSES").ok().and_then(|v| v.parse().ok()).unwrap_or(2400);
     let cfg = SceneConfig {

@@ -15,8 +15,10 @@
 //!
 //! Usage: `wide_cost <dataset> [repeats]`
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../bal.rs"]
 mod bal;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
@@ -168,6 +170,7 @@ where
 }
 
 fn main() {
+    bench_harness::env::check(&[]);
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("usage: wide_cost <dataset> [repeats]");

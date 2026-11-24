@@ -152,8 +152,8 @@ pub enum Route {
     Schur,
     /// The same reduction, but the reduced camera system solved by
     /// preconditioned conjugate gradients instead of factorized -- what Ceres
-    /// calls iterative_schur. BAL_CG_TOL sets the inner tolerance,
-    /// BAL_CG_MAXITER the iteration cap, BAL_CG_RESTART the true-residual
+    /// calls iterative_schur. ARAEL_CG_TOL sets the inner tolerance,
+    /// ARAEL_CG_MAXITER the iteration cap, ARAEL_CG_RESTART the true-residual
     /// recompute interval.
     SchurCg,
     /// The same conjugate gradients on a reduced system that is never built:
@@ -181,61 +181,24 @@ impl Route {
     }
 }
 
-/// Elimination ordering for the reduced camera system:
-/// `BAL_ORDERING=nd|auto|amd|natural`. Nested dissection (`nd`) by
-/// default: a 3D point makes a clique of the cameras that see it, and AMD
-/// drowns in cliques -- at Ladybug-1723 it factorizes S in 1508 ms against
-/// AMD's 4730. `auto` is arael's own rule (on the CPU the natural order
-/// where S is dense or banded, AMD otherwise; on a GPU the device's);
-/// `amd` and `natural` name one. A typo is an error.
+/// Elimination ordering of the schur rows' reduced camera system:
+/// ARAEL_ORDERING ([`bench_harness::arael::ordering`]), nested dissection
+/// when unset. A 3D point makes a clique of the cameras that see it, and
+/// AMD drowns in cliques -- at Ladybug-1723 it factorizes S in 1508 ms
+/// against AMD's 4730.
 pub fn schur_ordering() -> arael::simple_lm::SolveOrdering {
-    use arael::simple_lm::SolveOrdering as O;
-    match std::env::var("BAL_ORDERING").as_deref() {
-        Err(_) | Ok("nd") => O::NestedDissection,
-        Ok("auto") => O::Auto,
-        Ok("amd") => O::Amd,
-        Ok("natural") => O::Natural,
-        Ok(other) => panic!("BAL_ORDERING: expected nd, auto, amd or natural, got {:?}", other),
-    }
+    bench_harness::arael::ordering().unwrap_or(arael::simple_lm::SolveOrdering::NestedDissection)
 }
 
-/// ARAEL_BLOCK_SUPERNODAL picks when the supernodal block Cholesky
-/// factorizes instead of the scalar faer route (the library default is
-/// Auto: supernodal on sequential solves). `0`/`off`/`scalar` restores the
-/// scalar route, `1`/`always` forces the supernodal even threaded, unset
-/// keeps Auto. A typo is rejected rather than silently ignored.
-pub fn block_supernodal() -> arael::simple_lm::BlockSupernodalMode {
-    use arael::simple_lm::BlockSupernodalMode as M;
-    match std::env::var("ARAEL_BLOCK_SUPERNODAL").ok().as_deref() {
-        None | Some("auto") => M::Auto,
-        Some("1") | Some("always") => M::Always,
-        Some("0") | Some("off") | Some("scalar") => M::Never,
-        Some(other) => panic!(
-            "ARAEL_BLOCK_SUPERNODAL={}: expected auto, 1/always, or 0/off/scalar",
-            other
-        ),
-    }
+/// Whether the schur rows reduce: ARAEL_SCHUR
+/// ([`bench_harness::arael::schur_policy`]), `force` when unset, so the
+/// benchmark measures the reduction itself rather than the policy's
+/// verdict about it.
+pub fn schur_policy() -> arael::simple_lm::SchurPolicy {
+    bench_harness::arael::schur_policy().unwrap_or(arael::simple_lm::SchurPolicy::Force)
 }
 
-/// ARAEL_BLOCK_SUPERNODAL_BATCH tunes the supernodal route's update
-/// batching: a ratio (e.g. 1.5), or 0/off to disable. Unset keeps the
-/// library default. A typo is rejected rather than silently ignored.
-pub fn block_supernodal_batch() -> Option<f64> {
-    match std::env::var("ARAEL_BLOCK_SUPERNODAL_BATCH").ok().as_deref() {
-        None => arael::simple_lm::SparseFaerOptions::auto().block_supernodal_batch,
-        Some("0") | Some("off") => None,
-        Some(v) => Some(v.parse().unwrap_or_else(|_| {
-            panic!("ARAEL_BLOCK_SUPERNODAL_BATCH={}: expected a ratio, or 0/off", v)
-        })),
-    }
-}
-
-/// ARAEL_BLOCK_SUPERNODAL_LEAN=1 uses the memory-lean amalgamation on the
-/// supernodal route (SparseFaerOptions::with_block_supernodal_memory_lean).
-
-pub fn block_supernodal_lean() -> bool {
-    std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
-}
+use bench_harness::arael::{block_supernodal, block_supernodal_batch, block_supernodal_lean};
 
 // Damping floor (env ARAEL_LAMBDA_FLOOR, library default 1e-12). Under
 // the fixed schedule bundle adjustment needed a raised floor against
@@ -243,9 +206,7 @@ pub fn block_supernodal_lean() -> bool {
 // ratio never marches lambda into that regime, so the floor is moot
 // (measured identical at 1e-12 and 1e-6) and stays at the default.
 fn lambda_floor() -> f64 {
-    std::env::var("ARAEL_LAMBDA_FLOOR").ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1e-12)
+    bench_harness::env::parsed("ARAEL_LAMBDA_FLOOR", "a lambda").unwrap_or(1e-12)
 }
 
 type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFailure<T>>;
@@ -272,18 +233,10 @@ fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>,
 
 fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>, ctx: &mut arael::threads::Context) -> Solved<f64> {
     // No hint: the eliminable blocks are detected from the model's coupling
-    // graph. Forced, so the benchmark measures the reduction itself rather
-    // than the policy's verdict about it.
-    // BAL_SCHUR_POLICY=auto gates the reduction on the fill analysis
-    // instead of forcing it (see SchurPolicy).
-    let policy = if std::env::var("BAL_SCHUR_POLICY").as_deref() == Ok("auto") {
-        arael::simple_lm::SchurPolicy::default()
-    } else {
-        arael::simple_lm::SchurPolicy::Force
-    };
+    // graph.
     let ordering = schur_ordering();
     let mut solver = arael::simple_lm::SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
-        .with_policy(policy)
+        .with_policy(schur_policy())
         .with_ordering(ordering)
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
@@ -303,19 +256,11 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
 /// knob because the trade between inner accuracy and outer steps is per
 /// problem; only `tol` departs from arael's own default, see below.
 pub fn cg_options() -> arael::simple_lm::CgParams {
-    fn env<T: std::str::FromStr>(k: &str) -> Option<T> {
-        std::env::var(k).ok().and_then(|v| v.parse().ok())
-    }
-    let d = arael::simple_lm::CgParams::default();
     // 1e-3, not the library's 1e-6: measured on Ladybug-372 and -1723 it halves
     // the CG work for two or three extra outer steps, and reaches a lower cost
     // on both. Intermediate values are worse than either end -- 1e-4 and 1e-5
     // cost 3-5x the outer steps of 1e-3.
-    arael::simple_lm::CgParams {
-        tol: env("BAL_CG_TOL").unwrap_or(1e-3),
-        max_iters: env("BAL_CG_MAXITER").unwrap_or(d.max_iters),
-        restart_every: env("BAL_CG_RESTART").unwrap_or(d.restart_every),
-    }
+    bench_harness::arael::cg(1e-3)
 }
 
 fn solve64_schur_cg(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>, ctx: &mut arael::threads::Context) -> Solved<f64> {
@@ -386,7 +331,7 @@ fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>
 fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
     let ordering = schur_ordering();
     let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
-        .with_policy(arael::simple_lm::SchurPolicy::Force)
+        .with_policy(schur_policy())
         .with_ordering(ordering)
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
@@ -485,9 +430,9 @@ pub struct CovScaling {
 // marginals are 6-DOF poses; points are 3-DOF. PerQuery times the full cold cost
 // (assemble H + factor + query N marginals) each rep; AllMarginals is the bulk
 // selected inverse over the whole factor (every camera and point at once).
-// BAL_COV_ORDERING=auto|amd|nd|natural orders the covariance factorization and
-// BAL_COV_SUPERNODAL=auto|always|never picks block or scalar form. A typo is an
-// error.
+// ARAEL_COV_ORDERING orders the covariance factorization
+// (bench_harness::arael::cov_ordering) and BAL_COV_SUPERNODAL=auto|always|never
+// picks block or scalar form. A typo is an error.
 //
 // Minimum degree by default, not arael's `auto`: a BAL block graph is mostly
 // 3-DOF points -- 47423 of them at Ladybug-372 -- and minimum degree wins the
@@ -496,15 +441,7 @@ pub struct CovScaling {
 fn cov_opts() -> arael::covariance::CovOptions {
     use arael::covariance::{CovOptions, CovOrdering};
     use arael::simple_lm::BlockSupernodalMode;
-    let ordering = match std::env::var("BAL_COV_ORDERING").as_deref() {
-        Err(_) | Ok("amd") => CovOrdering::Amd,
-        Ok("auto") => CovOrdering::Auto,
-        Ok("nd") => CovOrdering::NestedDissection,
-        Ok("natural") => CovOrdering::Natural,
-        Ok(other) => {
-            panic!("BAL_COV_ORDERING: expected auto, amd, nd or natural, got {:?}", other)
-        }
-    };
+    let ordering = bench_harness::arael::cov_ordering().unwrap_or(CovOrdering::Amd);
     let supernodal = match std::env::var("BAL_COV_SUPERNODAL").as_deref() {
         Err(_) | Ok("auto") => BlockSupernodalMode::Auto,
         Ok("always") => BlockSupernodalMode::Always,

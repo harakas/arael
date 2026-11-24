@@ -6,8 +6,10 @@
 //!
 //!     SCHUR_DUMP_DIR=/tmp/mtx cargo run -r --bin dump_h
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../g2o.rs"]
 mod g2o;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../g2o3.rs"]
 mod g2o3;
 
@@ -55,6 +57,7 @@ struct Graph {
 }
 
 fn main() {
+    bench_harness::env::check(&[]);
     let dir = std::env::var("SCHUR_DUMP_DIR").expect("set SCHUR_DUMP_DIR");
     for (name, path) in [
         ("pgo-m3500", "datasets/input_M3500_g2o.g2o"),

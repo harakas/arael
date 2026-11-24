@@ -154,71 +154,26 @@ pub fn parameter_count(raw: &RawScene) -> usize {
     params.len()
 }
 
-/// PLANE_SCHUR=auto|force|never picks whether the planes are marginalized.
+/// Whether the planes are marginalized: ARAEL_SCHUR
+/// ([`bench_harness::arael::schur_policy`]), `auto` when unset.
 ///
-/// `auto` (the default) prices both routes and, on this scene, declines: the
-/// planes are few next to the poses, so reducing barely shrinks the system
-/// while filling in the pose block. `force` reduces anyway -- what to set to
+/// `auto` prices both routes and, on this scene, declines: the planes are
+/// few next to the poses, so reducing barely shrinks the system while
+/// filling in the pose block. `force` reduces anyway -- what to set to
 /// study the reduced system on this model rather than to solve it fastest.
-/// An unknown value is an error, not a silent fallback.
 pub fn schur_policy() -> SchurPolicy {
-    match std::env::var("PLANE_SCHUR").as_deref() {
-        Err(_) | Ok("auto") => SchurPolicy::default(),
-        Ok("force") => SchurPolicy::Force,
-        Ok("never") => SchurPolicy::Never,
-        Ok(other) => panic!("PLANE_SCHUR: expected auto, force or never, got {:?}", other),
-    }
+    bench_harness::arael::schur_policy().unwrap_or_default()
 }
 
-/// ARAEL_BLOCK_SUPERNODAL picks when the supernodal block Cholesky
-/// factorizes instead of the scalar faer route (the library default is
-/// Auto: supernodal on sequential solves). `0`/`off`/`scalar` restores the
-/// scalar route, `1`/`always` forces the supernodal even threaded, unset
-/// keeps Auto. A typo is rejected rather than silently ignored.
-pub fn block_supernodal() -> arael::simple_lm::BlockSupernodalMode {
-    use arael::simple_lm::BlockSupernodalMode as M;
-    match std::env::var("ARAEL_BLOCK_SUPERNODAL").ok().as_deref() {
-        None | Some("auto") => M::Auto,
-        Some("1") | Some("always") => M::Always,
-        Some("0") | Some("off") | Some("scalar") => M::Never,
-        Some(other) => panic!(
-            "ARAEL_BLOCK_SUPERNODAL={}: expected auto, 1/always, or 0/off/scalar",
-            other
-        ),
-    }
-}
+use bench_harness::arael::{block_supernodal, block_supernodal_batch, block_supernodal_lean};
 
-/// ARAEL_BLOCK_SUPERNODAL_BATCH tunes the supernodal route's update
-/// batching: a ratio (e.g. 1.5), or 0/off to disable. Unset keeps the
-/// library default. A typo is rejected rather than silently ignored.
-pub fn block_supernodal_batch() -> Option<f64> {
-    match std::env::var("ARAEL_BLOCK_SUPERNODAL_BATCH").ok().as_deref() {
-        None => arael::simple_lm::SparseFaerOptions::auto().block_supernodal_batch,
-        Some("0") | Some("off") => None,
-        Some(v) => Some(v.parse().unwrap_or_else(|_| {
-            panic!("ARAEL_BLOCK_SUPERNODAL_BATCH={}: expected a ratio, or 0/off", v)
-        })),
-    }
-}
-
-/// ARAEL_BLOCK_SUPERNODAL_LEAN=1 uses the memory-lean amalgamation on the
-/// supernodal route (SparseFaerOptions::with_block_supernodal_memory_lean).
-
-pub fn block_supernodal_lean() -> bool {
-    std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
-}
-
-/// PLANE_ENVELOPE=auto|always|never picks how a reduced system is factored.
+/// How a reduced system is factored: ARAEL_ENVELOPE
+/// ([`bench_harness::arael::envelope`]).
 ///
 /// Only bites when there is a reduced system, so on this scene it needs
-/// `PLANE_SCHUR=force` alongside it to have any effect.
+/// `ARAEL_SCHUR=force` alongside it to have any effect.
 pub fn envelope_mode() -> EnvelopeMode {
-    match std::env::var("PLANE_ENVELOPE").as_deref() {
-        Err(_) | Ok("auto") => EnvelopeMode::Auto,
-        Ok("always") => EnvelopeMode::Always,
-        Ok("never") => EnvelopeMode::Never,
-        Ok(other) => panic!("PLANE_ENVELOPE: expected auto, always or never, got {:?}", other),
-    }
+    bench_harness::arael::envelope()
 }
 
 /// Termination class for this benchmark, shared by every system in the
@@ -507,7 +462,7 @@ mod tests {
     }
 
     /// The auto gate declines the reduction on this scene, and Force overrides
-    /// it. Driven through the API, not PLANE_SCHUR: the env is process-global
+    /// it. Driven through the API, not ARAEL_SCHUR: the env is process-global
     /// and these run in parallel.
     #[test]
     fn schur_can_be_forced() {
@@ -528,7 +483,7 @@ mod tests {
         let (auto, auto_ok) = solve_with(SchurPolicy::default());
         assert!(!auto.reduced, "the auto gate is expected to decline here");
         let (forced, forced_ok) = solve_with(SchurPolicy::Force);
-        assert!(forced.reduced, "PLANE_SCHUR=force must reduce");
+        assert!(forced.reduced, "ARAEL_SCHUR=force must reduce");
         assert!(auto_ok && forced_ok, "both routes must still solve");
     }
 

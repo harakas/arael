@@ -1,9 +1,9 @@
 //! A BAL dataset's reduced camera system S: its block supernodal
 //! factorization and solve on a GPU against the CPU's
 //! (`bench_harness::gpu_factor`, whose documentation lists the knobs). S is
-//! the solver's: the Hessian at the initial point, damped by 1 + BAL_LAMBDA0
-//! (1e-4: the Gauss-Newton Hessian is singular there), the points
-//! eliminated.
+//! the solver's: the Hessian at the initial point, damped by 1 + ARAEL_LAMBDA0
+//! (1e-4 when unset: the Gauss-Newton Hessian is singular there), the
+//! points eliminated.
 //!
 //!     BAL_DATASET=372 ROUNDS=20 cargo run -r --features gpu-cuda --bin gpu_factor_bench
 //!
@@ -14,8 +14,10 @@
 // calls.
 #![allow(dead_code)]
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../bal.rs"]
 mod bal;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
@@ -24,6 +26,7 @@ use arael_faer::SparseIndex;
 use arael_faer::schur::{SchurContext, schur_reduce, schur_symbolic};
 
 fn main() {
+    bench_harness::env::check(&[]);
     let cams = std::env::var("BAL_DATASET").unwrap_or_else(|_| "372".to_string());
     let prefix = format!("problem-{cams}-");
     let path = std::fs::read_dir("datasets")
@@ -34,7 +37,7 @@ fn main() {
     let ds = bal::load(path.to_str().unwrap());
     let mut scene = arael_runner::build_f64(&ds);
     let (mut h, grad, partition) = bench_harness::arael::hessian::<SparseIndex, _>(&mut scene);
-    let lambda: f64 = std::env::var("BAL_LAMBDA0").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-4);
+    let lambda = bench_harness::arael::lambda0_override().unwrap_or(1e-4);
     let nblk = partition.len() - 1;
     // the structure once: cloned per block, it made this quadratic
     let hs = h.symbolic().clone();

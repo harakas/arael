@@ -111,16 +111,19 @@ fn label_of(route: Route, f32_row: bool) -> String {
     route.label(if f32_row { "f32" } else { "f64" })
 }
 
+/// The shared environment variables bal does not read
+/// (`bench_harness::env::check`).
+const NOT_READ: &[&str] = &["ARAEL_ENVELOPE"];
+
 /// The settings this run used, printed before anything else: a pasted result has
 /// to carry them. Values come from the objects the run actually uses.
-fn print_header(rounds: usize, only: &Option<String>, systems: &Option<String>,
-                probe: &Problem) {
+fn print_header(rounds: usize, only: &Option<String>, probe: &Problem) {
     use bench_harness::header::Header;
     let cfg = bench_harness::arael::config::<arael_runner::Scene>(probe, 0);
     Header::new("bal-bench")
         .rounds(rounds)
         .line("datasets", format!("{} [BAL_ONLY]", only.as_deref().unwrap_or("all")))
-        .line("systems", format!("{} [BAL_SYSTEMS]", systems.as_deref().unwrap_or("all")))
+        .systems()
         .line("near-plane guard", match bal::guard_z() {
             Some(z) => format!(
                 "observations closer than {:e} to the focal plane, or behind it, dropped by the \
@@ -132,13 +135,13 @@ fn print_header(rounds: usize, only: &Option<String>, systems: &Option<String>,
             + " [BAL_PCG_TOLS, BAL_PCG_ITERS]")
         .line("arael schur-cg", {
             let cg = arael_runner::cg_options();
-            format!("tol {:e} [BAL_CG_TOL], max iters {} [BAL_CG_MAXITER], \
-                     restart {} [BAL_CG_RESTART] (0 = off)",
+            format!("tol {:e} [ARAEL_CG_TOL], max iters {} [ARAEL_CG_MAXITER], \
+                     restart {} [ARAEL_CG_RESTART] (0 = off)",
                 cg.tol, cg.max_iters, cg.restart_every)
         })
-        .line("arael lambda0", match std::env::var("ARAEL_LAMBDA0") {
-            Ok(v) => format!("{} -- ARAEL_LAMBDA0 overrides every dataset", v),
-            Err(_) => format!("per dataset: {} [ARAEL_LAMBDA0]",
+        .line("arael lambda0", match bench_harness::arael::lambda0_override() {
+            Some(v) => format!("{:e} -- ARAEL_LAMBDA0 overrides every dataset", v),
+            None => format!("per dataset: {} [ARAEL_LAMBDA0]",
                 DATASETS.iter().chain(EXPLORATORY.iter())
                     .map(|b| format!("{} {:e}", b.name, b.lambda0))
                     .collect::<Vec<_>>().join(", ")),
@@ -156,22 +159,14 @@ fn print_header(rounds: usize, only: &Option<String>, systems: &Option<String>,
             } else {
                 "fixed ladder"
             }))
-        .line("arael schur ordering", format!("{} [BAL_ORDERING: nd|auto|amd|natural]",
-            match arael_runner::schur_ordering() {
-                arael::simple_lm::SolveOrdering::NestedDissection => "nested dissection",
-                arael::simple_lm::SolveOrdering::Amd => "AMD",
-                arael::simple_lm::SolveOrdering::Natural => "natural order",
-                // the rule names its choice per dataset in the verbose output
-                _ => "arael's rule (CPU: natural where S is dense or banded, else AMD; a GPU: its own)",
-            }))
+        .line("arael schur rows", format!("ordering {} [ARAEL_ORDERING], policy {} [ARAEL_SCHUR]",
+            bench_harness::arael::ordering_name(arael_runner::schur_ordering()),
+            bench_harness::arael::schur_policy_name(&arael_runner::schur_policy())))
         .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",
             cfg.abs_precision, cfg.rel_precision, cfg.patience, cfg.min_iters))
         .gpu()
-        .line("solver verbose", format!("{} [VERBOSE], per-solve timing {} [TIMING]",
-            if cfg.verbose { "on" } else { "off" },
-            if std::env::var("TIMING").is_ok() { "on" } else { "off" }))
-        .line("memory pass", format!("{} [BAL_NO_MEM]",
-            if std::env::var("BAL_NO_MEM").is_err() { "on" } else { "off" }))
+        .verbose()
+        .memory()
         .core()
         .print();
 }
@@ -187,8 +182,7 @@ fn mem_pass() -> bool {
     let path = std::env::var("BAL_MEM_DATASET").expect("BAL_MEM_DATASET");
     let lambda0: f64 = std::env::var("BAL_MEM_LAMBDA0").expect("BAL_MEM_LAMBDA0")
         .parse().expect("BAL_MEM_LAMBDA0");
-    let iters: usize = std::env::var("BAL_MEM_ITERS").ok()
-        .and_then(|v| v.parse().ok()).unwrap_or(3);
+    let iters = bench_harness::env::mem_iters();
     let ds = Rc::new(bal::load(&path));
     for (route, f32_row) in routes() {
         if label_of(route, f32_row) != which {
@@ -229,7 +223,7 @@ fn bench_dir() -> std::path::PathBuf {
 /// when the first iteration was a single accepted step), and on the big problem it
 /// is the difference between seconds and hours.
 ///
-///   BAL_ONLY=1723 BAL_SYSTEMS="f64 schur" BAL_LAMBDAS=1e-4,1e-2,1 cargo run -r
+///   BAL_ONLY=1723 BENCH_SYSTEMS="f64 schur" BAL_LAMBDAS=1e-4,1e-2,1 cargo run -r
 ///
 /// The values are arael's initial lambda. For the external rows the same sweep
 /// runs over their own damping knob -- Ceres's trust-region radius, g2o's initial
@@ -336,6 +330,7 @@ fn report_sweep(label: &str, lambda: f64, one: (f64, usize, usize),
 }
 
 fn main() {
+    bench_harness::env::check(NOT_READ);
     bench_harness::pin::enforce_cores();
     if mem_pass() {
         return;
@@ -343,25 +338,11 @@ fn main() {
 
     let bench_dir = std::env::current_dir().unwrap();
     let only = std::env::var("BAL_ONLY").ok();
-    // BAL_SYSTEMS=<comma-separated substrings> runs only the matching rows (e.g.
-    // BAL_SYSTEMS=schur); a pattern ending in `$` matches a whole label
-    // (BAL_SYSTEMS='arael LM f32 schur$' leaves out the schur-cg rows). Unset
-    // runs everything. A filtered run validates only against whatever ran --
-    // for iterating, not publishing.
-    let systems = std::env::var("BAL_SYSTEMS").ok();
-    let want = |label: &str| -> bool {
-        systems.as_deref().is_none_or(|f| {
-            f.split(',').any(|pat| match pat.trim().strip_suffix('$') {
-                Some(whole) => label == whole,
-                None => label.contains(pat.trim()),
-            })
-        })
-    };
-    if systems.is_some() {
-        eprintln!("BAL_SYSTEMS={} -- partial run, cross-system validation is not meaningful",
-            systems.as_deref().unwrap_or(""));
-    }
-    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+    // BENCH_SYSTEMS picks the rows; a filtered run validates only against
+    // whatever ran.
+    let want = bench_harness::env::wants;
+    bench_harness::env::note_filtered();
+    let rounds = bench_harness::env::rounds(5);
     let sweep: Option<Vec<f64>> = std::env::var("BAL_LAMBDAS").ok().map(|v| {
         v.split(',')
             .map(|t| t.trim().parse().unwrap_or_else(|_| panic!("bad BAL_LAMBDAS value: {}", t)))
@@ -381,9 +362,9 @@ fn main() {
         lambda0: selected.first().map_or(1e-4, |b| b.lambda0),
         route: Route::Sparse,
     };
-    print_header(rounds, &only, &systems, &probe);
+    print_header(rounds, &only, &probe);
 
-    if std::env::var("BAL_COV").is_ok() {
+    if bench_harness::env::cov() {
         cov_benchmark(&selected, &bench_dir);
         return;
     }
@@ -471,7 +452,7 @@ fn main() {
             }
         }
 
-        if std::env::var("BAL_NO_MEM").is_err() {
+        if bench_harness::env::memory_pass() {
             let lambda0 = format!("{:e}", b.lambda0);
             for (route, f32_row) in routes() {
                 let label = label_of(route, f32_row);
@@ -595,19 +576,15 @@ fn run_g2o(path: &str, ds: &Dataset, row: &G2oRow) -> Result<Ext, String> {
     run_ext(cmd, &[path, params_out, mode], params_out, ds)
 }
 
-// ---- Covariance-scaling benchmark (BAL_COV=1) ------------------------------
+// ---- Covariance-scaling benchmark (BENCH_COV=1) ----------------------------
 
 use bench_harness::cov::{fmt_cell, print_table, run_cov_cpp};
 
 fn cov_benchmark(selected: &[&Bench], bench_dir: &std::path::Path) {
-    // BAL_SYSTEMS selects rows here as it does in the solve table, so a run
+    // BENCH_SYSTEMS selects rows here as it does in the solve table, so a run
     // that only wants arael's numbers does not spend the per-cell cap on the
-    // comparison systems. Unset runs everything.
-    let filter = std::env::var("BAL_SYSTEMS").ok();
-    let wanted = |row: &str| match &filter {
-        Some(f) => f.split(',').any(|s| row.contains(s.trim())),
-        None => true,
-    };
+    // comparison systems.
+    let wanted = bench_harness::env::wants;
     let ceres = wanted("ceres") && std::path::Path::new("cpp/build/ceres_bal").exists();
     let g2o = wanted("g2o") && std::path::Path::new("cpp/build/g2o_bal").exists();
     let budget = std::env::var("COV_BUDGET_S").unwrap_or_else(|_| "5".into());
@@ -621,9 +598,6 @@ fn cov_benchmark(selected: &[&Bench], bench_dir: &std::path::Path) {
     }
     if wanted("g2o") && !g2o {
         eprintln!("WARNING: cpp/build/g2o_bal missing; skipping g2o");
-    }
-    if let Some(f) = &filter {
-        eprintln!("BAL_SYSTEMS={f} -- partial run, the cross-system std-dev check covers only what ran");
     }
 
     for b in selected {

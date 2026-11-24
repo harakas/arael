@@ -29,7 +29,7 @@ pub fn run(mut cmd: Command) -> Protocol {
     // split (Ceres prints its full report), and their stderr is passed
     // through instead of swallowed -- otherwise a runner's diagnostics
     // reach nobody on a successful run.
-    let loud = std::env::var("TIMING").is_ok() || std::env::var("VERBOSE").is_ok();
+    let loud = crate::env::timing() || crate::env::verbose();
     if loud {
         cmd.env("CERES_REPORT", "1");
     }

@@ -7,8 +7,9 @@
 //! profiles. A factorization not positive definite in a precision says so
 //! and is timed all the same.
 //!
-//! The environment: ROUNDS (20), BENCH_THREADS (the CPU's threads, 8),
-//! ARAEL_GPU (`cuda`, `hip` or `metal`); GPU_SMALL_Q, GPU_SMALL_FLOPS,
+//! The environment: ROUNDS (20), BENCH_THREADS (the CPU's threads, 8; the
+//! process is not pinned), ARAEL_GPU (`cuda`, the default, `hip` or
+//! `metal`; device 0); GPU_SMALL_Q, GPU_SMALL_FLOPS,
 //! GPU_BIG_PAIR_FLOPS, GPU_WIDE_PAIR_K, GPU_WIDE_PAIR_FLOPS,
 //! GPU_CHAIN_FLOPS_F32, GPU_CHAIN_FLOPS_F64, GPU_CHAIN_ITEMS,
 //! GPU_SOLVE_CHAIN_WORK, GPU_GATHER_WORK, GPU_GEMV_WORK, GPU_BLOCKS_PER_SM,
@@ -187,7 +188,7 @@ fn run<D: Device>(
             Err(FactorizeError::NotPositiveDefinite) => println!("{:<4} {precision:?}: not positive definite in this precision", D::RUNTIME),
             Err(e) => panic!("{precision:?} factorization: {e:?}"),
         }
-        if std::env::var_os("GPU_CHECK_FACTOR").is_some() {
+        if crate::env::flag("GPU_CHECK_FACTOR") {
             if let GpuFactor::F64(g) = &f {
                 check_factor(sn, &g.factor_values().unwrap(), cpu_factor);
             }
@@ -195,7 +196,7 @@ fn run<D: Device>(
         let mut x = rhs.to_vec();
         f.solve(&mut x).unwrap();
         let diff = rel_diff(&x, x_cpu);
-        if std::env::var_os("GPU_CHECK_FACTOR").is_some() && precision == GpuPrecision::F64 {
+        if crate::env::flag("GPU_CHECK_FACTOR") && precision == GpuPrecision::F64 {
             // factorize and solve again and again: an intermittent fault shows
             let (mut worst, mut off) = (0.0f64, 0);
             for _ in 0..50 {
@@ -321,8 +322,8 @@ fn print_levels(sn: &SupernodalSymbolic) {
 /// solve of `rhs`, on the CPU and on the GPU ARAEL_GPU names; `what` heads
 /// the report.
 pub fn compare(what: &str, a: &SparseBlockColMat<SparseIndex, f64>, rhs: &[f64]) {
-    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
-    let threads: usize = std::env::var("BENCH_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    let rounds = crate::env::rounds(20);
+    let threads = crate::pin::threads_or(8);
     let ordering = std::env::var("GPU_ORDER").unwrap_or_else(|_| "amd".to_string());
     let order = match ordering.as_str() {
         "amd" => amd_block_order(a.symbolic()),
@@ -338,7 +339,7 @@ pub fn compare(what: &str, a: &SparseBlockColMat<SparseIndex, f64>, rhs: &[f64])
         sn.factor_val_count(),
         sn.flops()
     );
-    if std::env::var_os("GPU_LEVELS").is_some() {
+    if crate::env::flag("GPU_LEVELS") {
         print_levels(&sn);
     }
     let mut factor = vec![0.0f64; sn.factor_val_count()];
@@ -361,7 +362,7 @@ pub fn compare(what: &str, a: &SparseBlockColMat<SparseIndex, f64>, rhs: &[f64])
         "metal" => {
             let dev = Arc::new(arael::__gpu::metal::MetalDevice::new(0).unwrap());
             let profile = |what: &str, f: &mut dyn FnMut()| metal_profile(&dev, what, f);
-            let profile: Option<&dyn Fn(&str, &mut dyn FnMut())> = if std::env::var_os("GPU_PROFILE").is_some() { Some(&profile) } else { None };
+            let profile: Option<&dyn Fn(&str, &mut dyn FnMut())> = if crate::env::flag("GPU_PROFILE") { Some(&profile) } else { None };
             run(dev.clone(), a, rhs, &sn, &factor, &x_cpu, rounds, profile)
         }
         other => panic!("ARAEL_GPU={other}: not a runtime this binary was built with (features gpu-cuda, gpu-hip, gpu-metal)"),

@@ -8,8 +8,10 @@
 //!     CALLS=100 PGO_DATASET=datasets/city10000.g2o \
 //!         taskset -c 7 ./target/release/build_cost
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../g2o.rs"]
 mod g2o;
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
@@ -46,6 +48,7 @@ fn med(v: &mut Vec<f64>) -> f64 {
 }
 
 fn main() {
+    bench_harness::env::check(&[]);
     let calls: usize = std::env::var("CALLS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
     let path = std::env::var("PGO_DATASET").unwrap_or_else(|_| "datasets/city10000.g2o".to_string());
     let ds = g2o::load(&path, false);

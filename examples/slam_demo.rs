@@ -671,8 +671,11 @@ fn main() {
 
     // The faer solver runs on the machine's GPU when the example was built
     // with its runtime (`--features gpu-cuda`, `gpu-hip`, `gpu-metal`, any
-    // of them together). A GPU without f64 (Metal) factors in f32, and this
-    // f64 solve then refines its steps (mixed precision).
+    // of them together). Of several GPUs it takes the first that
+    // `GpuDevice::available` lists: a discrete GPU before an integrated one,
+    // then CUDA, HIP, Metal. Without a GPU it solves on the CPU. A GPU
+    // without f64 (Metal) factors in f32, and this f64 solve then refines
+    // its steps (mixed precision).
     let gpu = arael::simple_lm::GpuDevice::detect();
     let mixed = gpu.as_ref().is_some_and(|g| !g.has_f64()).then(arael::simple_lm::MixedPrecision::default);
     let faer = arael::simple_lm::SparseFaerOptions::default().with_gpu(gpu).with_mixed_precision(mixed);

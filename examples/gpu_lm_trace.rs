@@ -1,14 +1,18 @@
-//! An LM solve whose loop runs on the GPU (the reduced route with the
-//! device assembly), on a synthetic bundle adjustment, with a marker copy
-//! written at every damped attempt so an API trace can be cut per attempt:
-//! `scripts/gpu_trace.py` then reports each attempt's launches, waits and
-//! copies (the marker's own copy and sync included).
+//! Counts the CUDA launches, waits and copies of each attempt of a bundle
+//! adjustment solved on the GPU. Run it under `scripts/gpu_trace.py`, which
+//! needs NVIDIA's Nsight Systems (`nsys`); build it with
+//! `--features gpu-cuda` and run it on an NVIDIA GPU.
 //!
 //!   cargo build -r --features gpu-cuda --example gpu_lm_trace
 //!   scripts/gpu_trace.py -- target/release/examples/gpu_lm_trace
 //!
-//! `--f32-factor` factors in f32 with refinement. The markers are written
-//! through a CUDA device of their own.
+//! The problem is a synthetic bundle adjustment (300 cameras, 30000
+//! points), solved with the points eliminated (Schur complement) on CUDA
+//! device 0. After each damped attempt it writes a marker copy, which the
+//! script uses to split the trace into attempts; the marker's own copy and
+//! wait are counted too.
+//! The markers go through a CUDA device of their own. `--f32-factor`
+//! factors in f32 and refines the steps.
 
 use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
 use arael::refs::{self, Ref};

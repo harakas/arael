@@ -73,22 +73,31 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
     fn par_timing(_ctx: &arael::threads::Context) -> Option<String> { None }
 }
 
-/// ARAEL_F32_FACTOR=<n> factors in single precision on the supernodal block
-/// route and refines each solve by at most n steps
-/// (SparseFaerOptions::with_mixed_precision); ARAEL_REFINE_TOL sets the
-/// relative residual the refinement stops at (library default otherwise).
-/// Unset keeps the double-precision factor. A typo is rejected rather than
-/// silently ignored.
+/// The mixed precision setting of the arael rows, for
+/// `SparseFaerOptions::with_mixed_precision`: `None` unless
+/// ARAEL_F32_FACTOR is set.
+///
+/// ARAEL_F32_FACTOR=<n> is `MixedPrecision` with at most n refinement
+/// steps (0 for none). ARAEL_REFINE_TOL=<t> is the relative residual the
+/// refinement stops at, the library's default when unset. A value that
+/// does not parse, and ARAEL_REFINE_TOL without ARAEL_F32_FACTOR, stop
+/// the run.
 pub fn mixed_precision() -> Option<arael::simple_lm::MixedPrecision> {
-    let steps = std::env::var("ARAEL_F32_FACTOR").ok()?;
-    let max_refinements = steps.parse().unwrap_or_else(|_| {
-        panic!("ARAEL_F32_FACTOR={}: expected a refinement step count", steps)
-    });
+    mixed_precision_from(std::env::var("ARAEL_F32_FACTOR").ok().as_deref(), std::env::var("ARAEL_REFINE_TOL").ok().as_deref())
+}
+
+/// [`mixed_precision`] of the two variables' values.
+fn mixed_precision_from(steps: Option<&str>, tol: Option<&str>) -> Option<arael::simple_lm::MixedPrecision> {
+    let Some(steps) = steps else {
+        if let Some(tol) = tol {
+            panic!("ARAEL_REFINE_TOL={tol} without ARAEL_F32_FACTOR: there is no refinement for it to stop");
+        }
+        return None;
+    };
+    let max_refinements = steps.parse().unwrap_or_else(|_| panic!("ARAEL_F32_FACTOR={steps}: expected a refinement step count"));
     let mut mp = arael::simple_lm::MixedPrecision { max_refinements, ..Default::default() };
-    if let Ok(t) = std::env::var("ARAEL_REFINE_TOL") {
-        mp.tol = t.parse().unwrap_or_else(|_| {
-            panic!("ARAEL_REFINE_TOL={}: expected a relative residual", t)
-        });
+    if let Some(tol) = tol {
+        mp.tol = tol.parse().unwrap_or_else(|_| panic!("ARAEL_REFINE_TOL={tol}: expected a relative residual"));
     }
     Some(mp)
 }
@@ -142,21 +151,20 @@ fn gpu_value_of(device: Option<&arael::simple_lm::GpuDevice>) -> String {
     format!("{device}, wide {wide}, staging {staging} [ARAEL_GPU, ARAEL_GPU_WIDE, ARAEL_GPU_STAGING]")
 }
 
-/// ARAEL_GPU puts the supernodal block route, and a row's conjugate
-/// gradients on the formed reduced system, on a GPU: `cuda`, `hip` or
-/// `metal`, or any with a device index (`cuda:1`); `cpu` is the CPU device
-/// (feature `gpu-cpu`), which runs the GPU route's kernels on the CPU. With ARAEL_F32_FACTOR
-/// the factor is f32 there, refined the same way (Metal needs it for an
-/// f64 model). ARAEL_GPU_WIDE=df32 keeps the device's wide values in df32
-/// (`GpuWide::Df32`), `f64` in f64, unset the device's default (df32 on
-/// Metal, else f64). ARAEL_GPU_STAGING=pageable stages the device
-/// assembly's image in ordinary memory (`GpuStaging::Pageable`), `pinned`
-/// or unset in pinned memory. An f32 row forms the system it factorizes
-/// in f32, and with ARAEL_F32_FACTOR (0 for no refinement) in the wide
-/// values. The binary needs arael's `gpu-cuda`,
-/// `gpu-hip` or `gpu-metal` feature. Every solver of the process gets a
-/// clone of one device, so they share its stream and memory as repeated
-/// solves in an application would.
+/// The GPU the arael rows are given, for `SparseFaerOptions::with_gpu`:
+/// `None` unless ARAEL_GPU is set. Every call returns a clone of one
+/// device, so the rows of a run share its memory.
+///
+/// - ARAEL_GPU: `cuda`, `hip` or `metal`, with an optional device index
+///   (`cuda:1`), or `cpu`, the CPU device. The binary needs the matching
+///   feature (`gpu-cuda`, `gpu-hip`, `gpu-metal`, `gpu-cpu`).
+/// - ARAEL_GPU_WIDE: `f64` or `df32` (`GpuDevice::with_wide`); unset is
+///   the device's default.
+/// - ARAEL_GPU_STAGING: `pinned` (the default) or `pageable`
+///   (`GpuDevice::with_staging`).
+///
+/// Any other value stops the run. What a row did on the GPU is printed
+/// under it ([`Row::gpu`]).
 pub fn gpu() -> Option<arael::simple_lm::GpuDevice> {
     static DEVICE: std::sync::OnceLock<Option<arael::simple_lm::GpuDevice>> = std::sync::OnceLock::new();
     DEVICE
@@ -188,36 +196,191 @@ pub fn gpu() -> Option<arael::simple_lm::GpuDevice> {
         .clone()
 }
 
-/// ARAEL_LAMBDA0 overrides the model's damping, for experiments.
+/// The first lambda of the arael rows: ARAEL_LAMBDA0, or the model's own
+/// ([`Model::lambda0`]) when unset.
 pub fn lambda0<M: Model>(input: &M::Input) -> f64 {
-    std::env::var("ARAEL_LAMBDA0")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| M::lambda0(input))
+    lambda0_override().unwrap_or_else(|| M::lambda0(input))
 }
 
-/// Which damping driver this run uses. The gain-ratio (Nielsen) driver follows
-/// how well the quadratic model predicted the step actually taken; the fixed
-/// ladder walks lambda up and down by a constant factor. It changes the iteration
-/// count, not the cost per iteration.
-///
-/// DRIVER=nielsen|fixed overrides the problem's own default
-/// ([`Model::NIELSEN`]). `default` is accepted as a synonym for `fixed`:
-/// the fixed ladder is arael's own `DefaultLambdaDriver`, and the headers
-/// spell it that way.
+/// ARAEL_LAMBDA0, when set.
+pub fn lambda0_override() -> Option<f64> {
+    crate::env::parsed("ARAEL_LAMBDA0", "an initial lambda")
+}
+
+/// Whether the arael rows use the gain-ratio (Nielsen) lambda driver
+/// instead of arael's default one: DRIVER=nielsen or DRIVER=fixed
+/// (`default` means `fixed`), or the model's own choice
+/// ([`Model::NIELSEN`]) when unset. Any other value stops the run.
 pub fn nielsen<M: Model>() -> bool {
-    match std::env::var("DRIVER").as_deref() {
-        Ok("nielsen") => true,
-        Ok("fixed") | Ok("default") => false,
-        _ => M::NIELSEN,
+    driver_from(std::env::var("DRIVER").ok().as_deref()).unwrap_or(M::NIELSEN)
+}
+
+/// DRIVER's value as "use the Nielsen driver", `None` when unset.
+fn driver_from(value: Option<&str>) -> Option<bool> {
+    match value? {
+        "nielsen" => Some(true),
+        "fixed" | "default" => Some(false),
+        other => panic!("DRIVER={other}: expected nielsen or fixed"),
     }
 }
 
+/// ARAEL_BLOCK_SUPERNODAL, for `SparseFaerOptions::with_block_supernodal`:
+/// `auto` or unset (arael's default), `1` or `always`, `0`, `off` or
+/// `scalar` (never). Any other value stops the run.
+pub fn block_supernodal() -> arael::simple_lm::BlockSupernodalMode {
+    block_supernodal_from(std::env::var("ARAEL_BLOCK_SUPERNODAL").ok().as_deref())
+}
+
+fn block_supernodal_from(value: Option<&str>) -> arael::simple_lm::BlockSupernodalMode {
+    use arael::simple_lm::BlockSupernodalMode as M;
+    match value {
+        None | Some("auto") => M::Auto,
+        Some("1") | Some("always") => M::Always,
+        Some("0") | Some("off") | Some("scalar") => M::Never,
+        Some(other) => panic!("ARAEL_BLOCK_SUPERNODAL={other}: expected auto, 1/always, or 0/off/scalar"),
+    }
+}
+
+/// ARAEL_BLOCK_SUPERNODAL_BATCH, for
+/// `SparseFaerOptions::with_block_supernodal_batching`: a ratio (1.5),
+/// `0` or `off` for no batching, unset for arael's default. Any other
+/// value stops the run.
+pub fn block_supernodal_batch() -> Option<f64> {
+    block_supernodal_batch_from(std::env::var("ARAEL_BLOCK_SUPERNODAL_BATCH").ok().as_deref())
+}
+
+fn block_supernodal_batch_from(value: Option<&str>) -> Option<f64> {
+    match value {
+        None => arael::simple_lm::SparseFaerOptions::auto().block_supernodal_batch,
+        Some("0") | Some("off") => None,
+        Some(v) => Some(v.parse().unwrap_or_else(|_| panic!("ARAEL_BLOCK_SUPERNODAL_BATCH={v}: expected a ratio, or 0/off"))),
+    }
+}
+
+/// ARAEL_BLOCK_SUPERNODAL_LEAN=1, for
+/// `SparseFaerOptions::with_block_supernodal_memory_lean`.
+pub fn block_supernodal_lean() -> bool {
+    crate::env::flag("ARAEL_BLOCK_SUPERNODAL_LEAN")
+}
+
+/// ARAEL_ORDERING, for `SparseFaerOptions::with_ordering`: `auto`, `amd`,
+/// `nd` (nested dissection), `natural` or `marginalize-first`. `None`
+/// when unset: the benchmark's own choice. Any other value stops the run.
+///
+/// ```ignore
+/// let ordering = bench_harness::arael::ordering().unwrap_or(SolveOrdering::NestedDissection);
+/// ```
+pub fn ordering() -> Option<arael::simple_lm::SolveOrdering> {
+    ordering_from(std::env::var("ARAEL_ORDERING").ok().as_deref())
+}
+
+fn ordering_from(value: Option<&str>) -> Option<arael::simple_lm::SolveOrdering> {
+    use arael::simple_lm::SolveOrdering as O;
+    Some(match value? {
+        "auto" => O::Auto,
+        "amd" => O::Amd,
+        "nd" => O::NestedDissection,
+        "natural" => O::Natural,
+        "marginalize-first" => O::MarginalizeFirst,
+        other => panic!("ARAEL_ORDERING={other}: expected auto, amd, nd, natural or marginalize-first"),
+    })
+}
+
+/// The name of `ordering` as ARAEL_ORDERING spells it, for a header.
+pub fn ordering_name(ordering: arael::simple_lm::SolveOrdering) -> &'static str {
+    use arael::simple_lm::SolveOrdering as O;
+    match ordering {
+        O::Auto => "auto (arael's rule)",
+        O::Amd => "amd",
+        O::NestedDissection => "nd (nested dissection)",
+        O::Natural => "natural",
+        O::MarginalizeFirst => "marginalize-first",
+    }
+}
+
+/// ARAEL_SCHUR, for `SparseFaerOptions::with_policy`: `auto`, `force` or
+/// `never`. `None` when unset: the benchmark's own choice. Any other
+/// value stops the run.
+pub fn schur_policy() -> Option<arael::simple_lm::SchurPolicy> {
+    schur_policy_from(std::env::var("ARAEL_SCHUR").ok().as_deref())
+}
+
+fn schur_policy_from(value: Option<&str>) -> Option<arael::simple_lm::SchurPolicy> {
+    use arael::simple_lm::SchurPolicy;
+    Some(match value? {
+        "auto" => SchurPolicy::default(),
+        "force" => SchurPolicy::Force,
+        "never" => SchurPolicy::Never,
+        other => panic!("ARAEL_SCHUR={other}: expected auto, force or never"),
+    })
+}
+
+/// The name of `policy` as ARAEL_SCHUR spells it, for a header.
+pub fn schur_policy_name(policy: &arael::simple_lm::SchurPolicy) -> &'static str {
+    use arael::simple_lm::SchurPolicy;
+    match policy {
+        SchurPolicy::Force => "force",
+        SchurPolicy::Never => "never",
+        _ => "auto",
+    }
+}
+
+/// ARAEL_ENVELOPE, for `SparseFaerOptions::with_envelope_schur`: `auto`,
+/// `always` or `never`; unset is `auto`. Any other value stops the run.
+pub fn envelope() -> arael::simple_lm::EnvelopeMode {
+    envelope_from(std::env::var("ARAEL_ENVELOPE").ok().as_deref())
+}
+
+fn envelope_from(value: Option<&str>) -> arael::simple_lm::EnvelopeMode {
+    use arael::simple_lm::EnvelopeMode;
+    match value {
+        None | Some("auto") => EnvelopeMode::Auto,
+        Some("always") => EnvelopeMode::Always,
+        Some("never") => EnvelopeMode::Never,
+        Some(other) => panic!("ARAEL_ENVELOPE={other}: expected auto, always or never"),
+    }
+}
+
+/// The conjugate gradient settings of the rows that solve with them, for
+/// `SparseFaerOptions::with_iterative_schur`: ARAEL_CG_TOL (the benchmark's
+/// `default_tol` when unset), ARAEL_CG_MAXITER and ARAEL_CG_RESTART
+/// (arael's defaults when unset).
+pub fn cg(default_tol: f64) -> arael::simple_lm::CgParams {
+    let d = arael::simple_lm::CgParams::default();
+    arael::simple_lm::CgParams {
+        tol: crate::env::parsed("ARAEL_CG_TOL", "a relative tolerance").unwrap_or(default_tol),
+        max_iters: crate::env::parsed("ARAEL_CG_MAXITER", "an iteration count").unwrap_or(d.max_iters),
+        restart_every: crate::env::parsed("ARAEL_CG_RESTART", "an iteration count").unwrap_or(d.restart_every),
+    }
+}
+
+/// ARAEL_COV_ORDERING, for `CovOptions::with_ordering`: `auto`, `amd`,
+/// `nd` or `natural`. `None` when unset: the benchmark's own choice. Any
+/// other value stops the run.
+pub fn cov_ordering() -> Option<arael::covariance::CovOrdering> {
+    cov_ordering_from(std::env::var("ARAEL_COV_ORDERING").ok().as_deref())
+}
+
+fn cov_ordering_from(value: Option<&str>) -> Option<arael::covariance::CovOrdering> {
+    use arael::covariance::CovOrdering as O;
+    Some(match value? {
+        "auto" => O::Auto,
+        "amd" => O::Amd,
+        "nd" => O::NestedDissection,
+        "natural" => O::Natural,
+        other => panic!("ARAEL_COV_ORDERING={other}: expected auto, amd, nd or natural"),
+    })
+}
+
+/// The `LmConfig` of an arael row: the termination every system of the
+/// benchmarks is held to, the first lambda and the driver ([`lambda0`],
+/// [`nielsen`]), the threads ([`crate::pin::threads`]), VERBOSE, and the
+/// model's own settings ([`Model::tune`]).
 pub fn config<M: Model>(input: &M::Input, max_iters: usize) -> LmConfig<M::Scalar> {
     // Float: num::NumCast, so a literal reaches either scalar the same way.
     let f = |v: f64| <M::Scalar as num::NumCast>::from(v).unwrap();
     let mut cfg = LmConfig {
-        verbose: std::env::var("VERBOSE").is_ok(),
+        verbose: crate::env::verbose(),
         gather_timing: true,
         // The same count every other system's pool was capped at (BENCH_THREADS,
         // resolved by pin::enforce_cores), so a threaded run stays a fair race.
@@ -245,15 +408,17 @@ pub fn config<M: Model>(input: &M::Input, max_iters: usize) -> LmConfig<M::Scala
     }
 }
 
-/// TIMING=1 prints arael's internal breakdown for every solve it runs. That
-/// includes the probes, so one round of one system emits several lines: the
-/// discarded warmup plus PROBE_SUBROUNDS passes of the one- and two-iteration
-/// probes, then the real solve.
+/// Prints the phase times of one arael solve to stderr, under TIMING=1
+/// ([`crate::env::timing`]): a `[timing]` line (total, assembly, analysis,
+/// linear solve, cost evaluation), a `[setup]` line (the parts of the
+/// first solve's setup) and, on a GPU, `[gpu]` lines (the time the device
+/// spent on assembly, attempts and conjugate gradients).
 ///
-/// Only the printing is gated. `gather_timing` stays on either way, so the
-/// timing numbers do not depend on whether they are being looked at.
+/// Every solve prints, the warmup and the probes included, so a row
+/// prints several sets. The solver gathers the times whether or not they
+/// are printed.
 pub fn print_timing<T>(r: &LmResult<T>) {
-    if std::env::var("TIMING").is_err() {
+    if !crate::env::timing() {
         return;
     }
     if let Some(t) = &r.timing {
@@ -313,13 +478,14 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
     // context is not, so the block stores carry over. Its phase
     // timing runs only under TIMING, where it is printed.
     let mut ctx = arael::threads::Context::new();
-    ctx.set_timing(std::env::var("TIMING").is_ok());
+    let timing = crate::env::timing();
+    ctx.set_timing(timing);
 
     // REPORT keeps the report of the full solve, for the table to print
     // under the row. The probes are capped solves and are not reported.
     const FULL_ITERS: usize = 100;
     let full_iters = crate::solver::full_iters(FULL_ITERS);
-    let report = std::env::var("REPORT").is_ok();
+    let report = crate::env::report();
     let mut full_report: Option<String> = None;
     // What the full solve did on the GPU it was given, for the table to
     // print under the row whether or not the solver is verbose.
@@ -358,7 +524,7 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
             }
         };
         print_timing(&r);
-        if std::env::var("TIMING").is_ok() {
+        if timing {
             if let Some(par) = M::par_timing(&ctx) {
                 println!("  [par] {}", par);
             }
@@ -455,8 +621,68 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::gpu_value_of;
-    use arael::simple_lm::{GpuDevice, GpuWide};
+    use super::{
+        block_supernodal_batch_from, block_supernodal_from, cov_ordering_from, driver_from, envelope_from, gpu_value_of,
+        mixed_precision_from, ordering_from, schur_policy_from,
+    };
+    use arael::covariance::CovOrdering;
+    use arael::simple_lm::{BlockSupernodalMode, EnvelopeMode, GpuDevice, GpuWide, SchurPolicy, SolveOrdering};
+
+    /// ARAEL_F32_FACTOR turns mixed precision on with its step count, and
+    /// ARAEL_REFINE_TOL sets the tolerance; the tolerance alone is an
+    /// error, as is a value that does not parse.
+    #[test]
+    fn the_refinement_tolerance_needs_the_f32_factor() {
+        assert!(mixed_precision_from(None, None).is_none());
+        let mp = mixed_precision_from(Some("3"), None).unwrap();
+        assert_eq!((mp.max_refinements, mp.tol), (3, arael::simple_lm::MixedPrecision::default().tol));
+        let mp = mixed_precision_from(Some("0"), Some("1e-6")).unwrap();
+        assert_eq!((mp.max_refinements, mp.tol), (0, 1e-6));
+        assert!(std::panic::catch_unwind(|| mixed_precision_from(None, Some("1e-6"))).is_err(), "the tolerance alone was accepted");
+        assert!(std::panic::catch_unwind(|| mixed_precision_from(Some("x"), None)).is_err());
+        assert!(std::panic::catch_unwind(|| mixed_precision_from(Some("2"), Some("x"))).is_err());
+    }
+
+    /// ARAEL_ORDERING and ARAEL_SCHUR: unset leaves the benchmark its own
+    /// choice, a known value names an option, anything else is an error.
+    #[test]
+    fn the_solver_options_parse_or_stop() {
+        assert!(ordering_from(None).is_none() && schur_policy_from(None).is_none());
+        assert!(matches!(ordering_from(Some("nd")), Some(SolveOrdering::NestedDissection)));
+        assert!(matches!(ordering_from(Some("marginalize-first")), Some(SolveOrdering::MarginalizeFirst)));
+        assert!(matches!(schur_policy_from(Some("force")), Some(SchurPolicy::Force)));
+        assert!(matches!(schur_policy_from(Some("auto")), Some(SchurPolicy::Auto { .. })));
+        assert!(std::panic::catch_unwind(|| ordering_from(Some("ND"))).is_err());
+        assert!(std::panic::catch_unwind(|| schur_policy_from(Some("1"))).is_err());
+    }
+
+    /// ARAEL_ENVELOPE, ARAEL_COV_ORDERING and DRIVER: unset is the default
+    /// (or the benchmark's choice), a known value names an option, anything
+    /// else is an error.
+    #[test]
+    fn the_envelope_cov_ordering_and_driver_parse_or_stop() {
+        assert!(matches!(envelope_from(None), EnvelopeMode::Auto));
+        assert!(matches!(envelope_from(Some("always")), EnvelopeMode::Always));
+        assert!(std::panic::catch_unwind(|| envelope_from(Some("on"))).is_err());
+        assert!(cov_ordering_from(None).is_none());
+        assert!(matches!(cov_ordering_from(Some("amd")), Some(CovOrdering::Amd)));
+        assert!(std::panic::catch_unwind(|| cov_ordering_from(Some("marginalize-first"))).is_err());
+        assert_eq!((driver_from(None), driver_from(Some("nielsen")), driver_from(Some("fixed")), driver_from(Some("default"))), (None, Some(true), Some(false), Some(false)));
+        assert!(std::panic::catch_unwind(|| driver_from(Some("gain"))).is_err());
+    }
+
+    /// The block supernodal options: every documented spelling, the
+    /// library's batching default when unset, and an error otherwise.
+    #[test]
+    fn the_block_supernodal_options_parse_or_stop() {
+        assert!(matches!(block_supernodal_from(None), BlockSupernodalMode::Auto));
+        assert!(matches!(block_supernodal_from(Some("1")), BlockSupernodalMode::Always));
+        assert!(matches!(block_supernodal_from(Some("scalar")), BlockSupernodalMode::Never));
+        assert!(std::panic::catch_unwind(|| block_supernodal_from(Some("yes"))).is_err());
+        assert_eq!(block_supernodal_batch_from(None), arael::simple_lm::SparseFaerOptions::auto().block_supernodal_batch);
+        assert_eq!((block_supernodal_batch_from(Some("off")), block_supernodal_batch_from(Some("1.5"))), (None, Some(1.5)));
+        assert!(std::panic::catch_unwind(|| block_supernodal_batch_from(Some("x"))).is_err());
+    }
 
     /// The header's GPU line: none without a device, the CPU device by its
     /// role, a device's wide scalar and staging, and a device the machine

@@ -14,8 +14,9 @@
 // factorization are reported apart -- they establish the sparsity pattern and
 // the symbolic factorization, a one-time structure cost.
 //
-//   cargo run -r --bin rot_compare
+//   SLAM_POSES=60 ROUNDS=30 cargo run -r --bin rot_compare
 
+#[allow(dead_code)] // this tool uses a part of the benchmark's module
 #[path = "../scene.rs"]
 mod scene;
 
@@ -512,14 +513,15 @@ impl Variant {
 }
 
 fn main() {
+    bench_harness::env::check(&[]);
     let mut cfg = scene::SceneConfig::default();
-    cfg.num_poses = std::env::var("POSES").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    cfg.num_poses = bench_harness::env::parsed("SLAM_POSES", "a pose count").unwrap_or(60);
     cfg.num_landmarks = 4 * cfg.num_poses; // scale landmarks with poses, as main.rs does
     let scene = scene::generate(&cfg);
     println!("scene: {} poses, {} landmarks, {} bearings, {} odometry",
         scene.poses.len(), scene.landmarks_init.len(), scene.frines.len(), scene.odo.len());
 
-    let rounds = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    let rounds = bench_harness::env::rounds(30);
     // Warm up all three (page-in, branch predictor, caches).
     { let (mut p, pp) = build_se(&scene); solve_and_time(&mut p, &pp); }
     { let (mut p, pp) = build_eu(&scene); solve_and_time(&mut p, &pp); }
