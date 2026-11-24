@@ -3,9 +3,9 @@
 //
 // H, the gradient and the loop's vectors (the parameters, the trial point,
 // the step, H's diagonal, the damping scale and lambda) are in V, the
-// route's values (wide.h), as the CPU's route keeps them; the partials and
+// solve's values (wide.h), as the host keeps them; the partials and
 // the scalars are words of W, its wide scalar, and the step's and the trial
-// point's sums of squares are summed in W, as the CPU sums them in f64.
+// point's sums of squares are summed in W, as the host sums them in f64.
 // Every kernel runs THREADS threads per block. The scalars slots (S_*), the
 // partials per block (LIN_PARTIALS, ATTEMPT_PARTIALS), NO_FAULT and FIXED
 // come from lm.rs as #defines. A pass leaves partials per block, which the

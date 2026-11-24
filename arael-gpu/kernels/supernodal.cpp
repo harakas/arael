@@ -91,7 +91,7 @@ KERNEL_THREADS(SEED_LANES) void k_seed_f64(GLOBAL const u32* RESTRICT tiles, GLO
 }
 #endif
 
-// The seed from values of the route's wide scalar (wide.h): S formed on the device.
+// The seed from values of the solve's wide scalar (wide.h): S formed on the device.
 KERNEL_THREADS(SEED_LANES) void k_seed_wide(GLOBAL const u32* RESTRICT tiles, GLOBAL const W* RESTRICT vals, GLOBAL F* RESTRICT factor, u32 ntiles) {
     u32 t = block_x();
     if (t < ntiles) seed_tile_lanes<W>(tiles, vals, factor, t, thread_x());

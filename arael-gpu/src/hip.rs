@@ -1,5 +1,6 @@
-//! [`Device`] on HIP: the HIP runtime and hipRTC through our own bindings
-//! (`hip_sys`), both loaded at run time.
+//! [`Device`] on HIP, for AMD GPUs. It needs ROCm's HIP runtime
+//! (`libamdhip64`) and hipRTC, HIP's run-time compiler (`libhiprtc`), both
+//! loaded at run time, so a build needs no ROCm.
 
 use crate::disk::DiskCache;
 use crate::hip_sys::{rt, rtc};

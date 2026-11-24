@@ -1,10 +1,10 @@
-// wide.h: W, the wide scalar of a device route: what an f64 root's values
+// wide.h: W, the wide scalar of a GPU solve: what an f64 model's values
 // (H, the gradient, the step, the LM loop's vectors, the references), the
-// cost and the Schur reduction are kept and summed in (an f32 root's values
-// are f32: V and sin_cos, at the end). `double`, or with ARAEL_WIDE_DF32 defined `df32`, a value as the sum
-// of two floats (about 48 bits of significand, f32's exponent range), for
-// devices without fast f64 (consumer cards, where f64 runs at 1/32 to 1/64
-// of f32) or without f64 at all (Metal).
+// cost and the Schur reduction are kept and summed in (an f32 model's values
+// are f32: V and sin_cos, at the end). `double`, or with ARAEL_WIDE_DF32
+// defined `df32`, a value as the sum of two floats (about 48 bits of
+// significand, f32's exponent range), for devices whose f64 is slow (most
+// consumer cards) or absent (Metal).
 //
 // A kernel is written once over W, with:
 //   W(x)                    an f32 (or, with HAS_F64, an f64 explicitly)
@@ -307,8 +307,8 @@ DEVICE SinCos<W> sin_cos(W x) {
     return SinCos<W>{p.s, p.c};
 }
 
-// V: the scalar of a route's values (H and the gradient), the root's as
-// the CPU's route keeps them: f32 with VALUES_F32 1 (an f32 root's route),
+// V: the scalar of a solve's values (H and the gradient), the model's as
+// the host keeps them: f32 with VALUES_F32 1 (an f32 model's solve),
 // else W. v_fma(acc, x, y): acc + x y in V.
 #ifndef VALUES_F32
 #define VALUES_F32 0

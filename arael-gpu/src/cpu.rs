@@ -1,24 +1,27 @@
 //! The CPU device: arael's GPU kernels compiled by the host's C++ compiler
-//! and run on the CPU, for tests and CI on machines without a GPU.
-//!
-//! A kernel source is compiled as for a GPU, with `kernels/cpu.h` and
-//! `arael_gpu.h`'s CPU branch in front, into a shared library loaded at run
-//! time; every entry point gets a launcher that reads its arguments from
-//! the launch's slots as the GPU drivers do. The launches run in the
-//! runtime (`kernels/cpu_runtime.cpp`), a library loaded once per process:
-//! a launch runs its blocks one after another on the calling thread, each
-//! block's threads as fibers that switch at barriers. Device memory is host
-//! memory; reads and writes are copies, launches finish before they
-//! return, and a graph is the list of the launches it recorded.
+//! and run on the host, for tests and CI on machines without a GPU. It is
+//! slow: a launch runs its blocks one after another on the calling thread
+//! and finishes before it returns.
 //!
 //! The compiler is `ARAEL_CPU_CXX`, else `CXX`, else `c++` (GCC or Clang,
-//! C++17, POSIX `ucontext`, an ELF platform). Compiled libraries are kept
-//! in the kernel cache (`ARAEL_KERNEL_CACHE`) under `cpu`.
+//! C++17, POSIX `ucontext`, an ELF platform); on x86-64 the processor needs
+//! FMA. Kernels are compiled with floating-point contraction, as on a GPU.
+//! Compiled libraries are kept in the kernel cache ([`crate::KernelCache`])
+//! under `cpu`.
 //!
 //! ```ignore
 //! let dev = arael_gpu::cpu::CpuDevice::new(0)?;
 //! let k = dev.compile("KERNEL void k(GLOBAL float* x) { x[global_x()] = 1.0f; }", "", "k")?;
 //! ```
+
+// How it works. A kernel source is compiled as for a GPU, with
+// `kernels/cpu.h` and `arael_gpu.h`'s CPU branch in front, into a shared
+// library loaded at run time; every entry point gets a launcher that reads
+// its arguments from the launch's slots as the GPU drivers do. The launches
+// run in the runtime (`kernels/cpu_runtime.cpp`), a library loaded once per
+// process, each block's threads as fibers that switch at barriers. Device
+// memory is host memory; reads and writes are copies, and a graph is the
+// list of the launches it recorded.
 
 use core::ffi::{c_char, c_void};
 use core::ptr::NonNull;
@@ -298,7 +301,8 @@ impl core::fmt::Debug for CpuDevice {
     }
 }
 
-/// The CPU as a [`Device`].
+/// The host as a [`Device`], with one stream: the side stream's launches
+/// run on it in order.
 pub struct CpuDevice {
     arch: Arch,
     /// Compiled modules by their full source.

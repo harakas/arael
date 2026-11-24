@@ -1,9 +1,9 @@
 //! [`Traced`]: a [`Device`] that does what another does and writes down
 //! what it was asked: every allocation, copy, kernel launch with its
 //! arguments, graph capture and replay, as one JSON object per line of the
-//! trace file. `tools/devmap` turns a trace into a browsable map of a
-//! solve: which kernels run in what order on which sections of device
-//! memory.
+//! trace file. The arael repository's `tools/devmap` turns a trace into a
+//! browsable map of a solve: which kernels run in what order on which
+//! sections of device memory.
 //!
 //! The trace file is the process's: `ARAEL_GPU_TRACE=<path>` in the
 //! environment, or [`start`]. A device is traced by wrapping it
@@ -34,8 +34,9 @@
 //! | `scope`, `end` | `name`: a named scope opens, the last one closes |
 //! | `fork`, `join`, `sync` | |
 //!
-//! A launch's `args` are `{"b": block, "at": byte offset}` or a scalar
-//! (`{"u": 7}`, `{"i": -1}`, `{"f": 0.5}`, `{"d": 0.5}`, `{"bits": "0x.."}`).
+//! A launch's `args` are `{"b": block, "at": byte offset}`, a scalar
+//! (`{"u": 7}`, `{"i": -1}`, `{"f": 0.5}`, `{"d": 0.5}`, `{"bits": "0x.."}`)
+//! or a table ([`Arg::Bytes`]: `{"table": "96 bytes"}`).
 //! An `acc` entry is one section's measured accesses ([`Access`]):
 //! `{"b": block, "s": section index or -1, "r": {...}, "w": {...}}` with
 //! [`Touch`]'s fields.
@@ -58,11 +59,11 @@ static FROM_ENV: OnceLock<()> = OnceLock::new();
 /// Whether the devices wrapped from now on time their launches ([`time`]).
 static TIMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Whether the devices traced from now on time each launch
-/// ([`Device::time_launches`]): a launch event then has its `us`, a replay
-/// its launches'. Also on with `ARAEL_GPU_TRACE_TIME` set (to anything but
-/// 0) in the environment. Timed launches run one at a time, so a timed
-/// trace is for the launches' times, not for the solve's.
+/// Turns launch timing on (`true`) or off for the devices traced from now
+/// on ([`Device::time_launches`]): a launch event then has its `us`, a
+/// replay its launches'. Also on with `ARAEL_GPU_TRACE_TIME` set (to
+/// anything but 0) in the environment. Timed launches run one at a time,
+/// so a timed trace is for the launches' times, not for the solve's.
 pub fn time(on: bool) {
     TIMED.store(on, Ordering::Release);
 }

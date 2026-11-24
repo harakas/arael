@@ -1,26 +1,56 @@
-//! arael's GPU runtime and the kernels of its sparse solvers. The kernels
-//! are written once in a C++ subset (`kernels/`) and compiled at run time
-//! for the device at hand; a thin runtime per vendor runs them behind
-//! [`Device`]: [`cuda::CudaDevice`] (feature `cuda`, NVRTC) and
-//! [`hip::HipDevice`] (feature `hip`, hipRTC). Both load the vendor's
-//! libraries at run time, so a build needs neither the CUDA toolkit nor
-//! ROCm. `cpu::CpuDevice` (feature `cpu`) runs the same kernels on the
-//! CPU, compiled by the host's C++ compiler, for tests without a GPU.
-//! A runtime's `devices()` (`cuda::devices`, `hip::devices`,
-//! `metal::devices`) lists the machine's devices ([`DeviceInfo`]) without
-//! opening one.
+//! The GPU runtime and the sparse solvers of arael on a GPU: the Schur
+//! reduction, the block supernodal Cholesky factorization, preconditioned
+//! conjugate gradients and the vector passes of the Levenberg-Marquardt
+//! (LM) loop. Most programs use it through arael, with one of arael's
+//! features `gpu-cuda`, `gpu-hip`, `gpu-metal` or `gpu-cpu`; this crate is
+//! for running the solvers, or kernels of your own, on a device directly.
 //!
-//! On a device: [`GpuSupernodal`] (the block supernodal Cholesky and its
-//! level-set solve), [`GpuSchur`] (the Schur reduction, the refinement and
-//! the back-substitution around a [`GpuFactor`]), [`GpuCg`] (conjugate
-//! gradients on a reduction's reduced system, in a factor's place) and
-//! [`LmVectors`] (the LM loop's vector passes). H, the gradient, the step and the LM vectors
-//! are in the route's [`Values`] (f32 for an f32 root), the cost and the
-//! reduction in its [`Wide`] scalar. The symbolic analysis stays on the
-//! CPU in arael-faer. A sequence of launches records as a graph with
-//! [`Device::capture`] and runs again with [`Device::replay`]. A device's
-//! work can be traced ([`trace`]), and the CPU device can count every read
-//! and write of its kernels (`cpu::CpuDevice::with_probe`).
+//! A [`Device`] is one GPU with a stream of its own. Each runtime is a
+//! feature:
+//!
+//! | Feature | Device | GPUs | Needed at run time |
+//! |---|---|---|---|
+//! | `cuda` | `cuda::CudaDevice` | NVIDIA | the CUDA driver library (`libcuda`) and NVRTC, CUDA's run-time compiler (`libnvrtc`) |
+//! | `hip` | `hip::HipDevice` | AMD | the HIP runtime (`libamdhip64`) and hipRTC, HIP's run-time compiler (`libhiprtc`), from ROCm |
+//! | `metal` | `metal::MetalDevice` | Apple silicon (M1 on) | nothing: Metal ships with macOS |
+//! | `cpu` | `cpu::CpuDevice` | none: the kernels run on the host, for tests | a C++17 compiler (GCC or Clang) on Linux |
+//!
+//! The libraries are loaded at run time, so a build needs neither the CUDA
+//! toolkit nor ROCm. The kernels are C++ sources (`kernels/`) compiled at
+//! run time for the device at hand and kept on disk between processes
+//! ([`KernelCache`]). A runtime's `devices()` (`cuda::devices`,
+//! `hip::devices`, `metal::devices`) lists the machine's devices
+//! ([`DeviceInfo`]) without opening one.
+//!
+//! The solvers, each built once per sparsity structure from arael-faer's
+//! symbolic analysis, which runs on the host:
+//!
+//! - [`GpuSchur`]: the Schur reduction of a damped system, and a whole
+//!   damped solve around a [`GpuFactor`] with one wait for the result;
+//! - [`GpuSupernodal`], and [`GpuFactor`] for either scalar behind one
+//!   type: the block supernodal Cholesky factorization and its solve, in
+//!   f32 or f64;
+//! - [`GpuCg`]: preconditioned conjugate gradients on a [`GpuSchur`]'s
+//!   reduced system, in place of a factor;
+//! - [`LmVectors`]: the LM loop's vector passes, for a solve whose
+//!   parameters stay on the device.
+//!
+//! H, the gradient, the step and the LM vectors are kept in the solve's
+//! [`Values`]: f32 for an f32 model, else the [`Wide`] scalar, in which the
+//! cost and the reduction are summed.
+//!
+//! ```ignore
+//! use std::sync::Arc;
+//! use arael_gpu::{cuda::CudaDevice, GpuFactor, GpuPrecision, GpuSchur, Wide};
+//!
+//! let dev = Arc::new(CudaDevice::new(0)?);
+//! let mut schur = GpuSchur::new(&dev, &schur_sym, h.symbolic(), Wide::F64)?;
+//! let mut factor = GpuFactor::new(&dev, GpuPrecision::F32, &sn_of_s, &schur_sym.s, &Default::default(), Wide::F64)?;
+//! // reduce, factorize, refine up to 4 steps, back-substitute: one wait
+//! let stats = schur.solve(&mut factor, h.vals(), &rhs, Some((4, 1e-10)), &mut delta)?;
+//! ```
+//!
+//! A kernel of your own:
 //!
 //! ```ignore
 //! use arael_gpu::{cuda::CudaDevice, Arg, Device, Launch};
@@ -31,6 +61,15 @@
 //! dev.launch(&k, Launch::linear(n as u32, 256), &[Arg::Block(&x, 0)])?;
 //! dev.read(&x, 0, bytemuck::cast_slice_mut(&mut host))?;
 //! ```
+//!
+//! The kernels are written for warps of 32 threads. On an AMD GPU with
+//! 64-thread wavefronts (GCN, CDNA), a block of 32 threads fills half a
+//! wavefront.
+//!
+//! A sequence of launches records as a graph ([`Device::capture`]) and runs
+//! again with one call ([`Device::replay`]). A device's work can be traced
+//! ([`trace`]), and the CPU device can count every read and write of its
+//! kernels (`cpu::CpuDevice::with_probe`).
 
 use arael_faer::schur::SchurReal;
 
@@ -99,7 +138,8 @@ pub const WIDE: &str = include_str!("../kernels/wide.h");
 
 /// The kernels a model's device assembly shares (`kernels/assembly.cpp`):
 /// the gather, the rotation caches and the device functions the generated
-/// constraint kernels call. A root's kernels are compiled after it.
+/// constraint kernels call. A model's generated kernels are compiled after
+/// it.
 pub const ASSEMBLY: &str = include_str!("../kernels/assembly.cpp");
 
 /// A fixed parameter's global index in the index tables the kernels read:
@@ -111,17 +151,19 @@ pub const FIXED: u32 = u32::MAX;
 /// writer ([`ASSEMBLY`]'s `TILE_STORE`).
 pub const TILE_STORE: u32 = 1 << 31;
 
-/// The factor's scalar.
+/// The scalar of a [`GpuFactor`]: f32 or f64.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuPrecision {
     F32,
     F64,
 }
 
-/// The wide scalar of a device route: what H, the gradient, the cost, the
-/// Schur reduction and the LM loop's vectors are kept and summed in on the
-/// device. Both forms are 8 bytes; the host reads and writes f64 and
-/// converts at the boundary.
+/// The wide scalar of a device solve: f64, or df32 for a device without
+/// fast f64. The cost, the Schur reduction (without
+/// [`GpuSchurParams::f32_reduction`]) and the refinement are computed and
+/// kept in it on the device, and so are H, the gradient, the step and the
+/// LM vectors of an f64 model ([`Values`]). Both forms are 8 bytes; the
+/// host reads and writes f64 and converts at the boundary.
 ///
 /// ```
 /// use arael_gpu::Wide;
@@ -206,11 +248,11 @@ impl Wide {
     }
 }
 
-/// The scalars of a device route: the values' (`V` in the kernels: H, the
+/// The scalars of a device solve: the values' (`V` in the kernels: H, the
 /// gradient, the step, the LM loop's vectors) and the wide one (`W`,
-/// [`Wide`]). An f32 root's values are f32, as the CPU's route keeps them;
-/// an f64 root's are in the wide scalar. A [`Wide`] converts to the values
-/// of an f64 root.
+/// [`Wide`]). An f32 model's values are f32, as the host keeps them; an f64
+/// model's are in the wide scalar. A [`Wide`] converts to the values of an
+/// f64 model.
 ///
 /// ```
 /// use arael_gpu::{Values, Wide};
@@ -234,13 +276,13 @@ impl From<Wide> for Values {
 }
 
 impl Values {
-    /// f32 values on a route of wide scalar `wide`.
+    /// f32 values on a solve of wide scalar `wide`.
     pub fn f32(wide: Wide) -> Self {
         Values { f32: true, wide }
     }
 
-    /// The values of a root of `scalar_bytes`-byte scalars (4 or 8) on a
-    /// route of wide scalar `wide`.
+    /// The values of a model of `scalar_bytes`-byte scalars (4 or 8) on a
+    /// solve of wide scalar `wide`.
     pub fn of(scalar_bytes: usize, wide: Wide) -> Self {
         Values { f32: scalar_bytes == 4, wide }
     }
@@ -250,7 +292,7 @@ impl Values {
         self.f32
     }
 
-    /// The route's wide scalar.
+    /// The solve's wide scalar.
     pub fn wide(self) -> Wide {
         self.wide
     }
@@ -283,8 +325,8 @@ impl Values {
         self.extend(v.iter().copied(), out);
     }
 
-    /// The values of `v` appended to `out` in one pass, for an upload of
-    /// many values: [`push`](Self::push) per value is several times slower.
+    /// The values of `v` appended to `out` in one pass: for many values, in
+    /// place of a [`push`](Self::push) per value.
     ///
     /// ```ignore
     /// values.extend(hvals.iter().map(|v| v.to_f64()), &mut bytes);
@@ -332,6 +374,7 @@ pub trait Scalar: bytemuck::Pod + Send + Sync + 'static {
     const CPP: &'static str;
     /// `v` rounded to this scalar.
     fn from_f64(v: f64) -> Self;
+    /// This value as an f64.
     fn to_f64(self) -> f64;
 }
 
@@ -355,8 +398,8 @@ impl Scalar for f64 {
     }
 }
 
-/// Who makes a device: the kernel sizes a device takes by default are the
-/// ones measured on its vendor's GPUs ([`GpuSupernodalParams`]'s `*_on`).
+/// Who makes a device. Some kernel sizes default by vendor (the `*_on`
+/// methods of [`GpuSupernodalParams`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Vendor {
@@ -390,6 +433,7 @@ pub struct DeviceInfo {
 pub struct Arch {
     /// The device's name, as its driver reports it.
     pub name: String,
+    /// Who makes the device.
     pub vendor: Vendor,
     /// The compiler's target, e.g. `sm_89` or `gfx1030`.
     pub target: String,
@@ -397,8 +441,9 @@ pub struct Arch {
     pub warp: u32,
     /// Shared memory one block may use, in bytes.
     pub shared_bytes: u32,
-    /// Multiprocessors (CUDA SMs, HIP compute units): how many blocks run
-    /// at once, a few each.
+    /// The device's multiprocessors, each running several blocks at once:
+    /// NVIDIA's streaming multiprocessors (SMs), AMD's compute units,
+    /// Apple's GPU cores; 1 on the CPU device.
     pub multiprocessors: u32,
     /// Whether the device computes in f64.
     pub has_f64: bool,
@@ -433,8 +478,10 @@ pub enum GpuError {
     /// The problem needs more of a resource than the device has, e.g. shared
     /// memory for a supernode's columns.
     Limit(String),
-    /// An operation a graph capture cannot hold: anything but a launch while
-    /// a capture is open, or a capture inside another.
+    /// An operation a graph capture cannot hold: anything but a launch, a
+    /// fork or a join while a capture is open on the device, a capture
+    /// inside another, a capture that ends with a fork not joined, or (on
+    /// CUDA and HIP) a capture that records no launch.
     Capture(String),
     /// A kernel dump asked for (`ARAEL_KERNEL_DUMP`) could not be written.
     Dump(String),
@@ -545,9 +592,11 @@ impl Launch {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Section {
+    /// The section's name, as the tools show it.
     pub name: String,
     /// Byte offset in the block.
     pub at: usize,
+    /// Length in bytes.
     pub bytes: usize,
     /// Bytes of one element.
     pub elem: usize,
@@ -557,6 +606,7 @@ pub struct Section {
     pub role: String,
     /// A label grouping a block's sections (`structure`, `values`), or empty.
     pub group: String,
+    /// What the section holds, in words, or empty.
     pub doc: String,
     /// Elements per record, where the elements come in records (a tile's
     /// base, stride and first index: 3); 1 otherwise.
@@ -584,16 +634,19 @@ impl Section {
         Self::new(name, at, 8 * count, 8, wide.name()).role("W")
     }
 
+    /// The section with [`role`](Section::role) set.
     pub fn role(mut self, role: &str) -> Self {
         self.role = role.to_string();
         self
     }
 
+    /// The section with [`group`](Section::group) set.
     pub fn group(mut self, group: &str) -> Self {
         self.group = group.to_string();
         self
     }
 
+    /// The section with [`doc`](Section::doc) set.
     pub fn doc(mut self, doc: impl Into<String>) -> Self {
         self.doc = doc.into();
         self
@@ -643,23 +696,29 @@ pub(crate) fn plan_sections(words: &[u32], header: usize, slots: &[(usize, &str,
 /// counts it ([`Access`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Touch {
-    /// Accesses, and the bytes they moved.
+    /// Accesses.
     pub n: u64,
+    /// Bytes the accesses moved.
     pub bytes: u64,
     /// Distinct elements touched.
     pub unique: u64,
-    /// The first and the last byte touched, relative to the section.
+    /// The first byte touched, relative to the section.
     pub lo: u64,
+    /// The last byte touched, relative to the section.
     pub hi: u64,
     /// Device threads that touched it.
     pub threads: u64,
     /// Accesses right after the same thread's previous access to the
-    /// section (`seq`), or at its address again (`same`).
+    /// section.
     pub seq: u64,
+    /// Accesses at the address of the same thread's previous access to the
+    /// section.
     pub same: u64,
     /// Threads whose first access is right after the previous thread's
-    /// first (`adjacent`), or at its address (`shared`).
+    /// first.
     pub adjacent: u64,
+    /// Threads whose first access is at the address of the previous
+    /// thread's first.
     pub shared: u64,
     /// The access widths seen, a bit per width: 1, 2, 4, 8, 16 bytes.
     pub sizes: u8,
@@ -683,7 +742,9 @@ pub struct Access {
 /// [`Device::fork`] and the [`Device::join`] after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lane {
+    /// The device's own stream.
     Main,
+    /// The side stream.
     Side,
 }
 
@@ -727,10 +788,14 @@ impl Forks {
 
 /// One GPU, a stream of its own, and the kernels compiled for it.
 ///
-/// Every operation is ordered on the stream. [`Device::read`] and
-/// [`Device::sync`] are the only ones that wait for the device. A device is
-/// shared between threads (solvers hold it in an `Arc`), and what it makes
-/// moves between them.
+/// Every operation is queued on the stream in call order.
+/// [`read`](Device::read), [`read_many`](Device::read_many) and
+/// [`sync`](Device::sync) wait for the device, [`host_mut`](Device::host_mut)
+/// for the copies queued from its host block, and a launch while
+/// [`time_launches`](Device::time_launches) is on for the launch; the
+/// other operations return without waiting. A device is shared between
+/// threads (solvers hold it in an `Arc`), and what it makes moves between
+/// them.
 ///
 /// Launches may also go to a side stream ([`Lane::Side`]) between a
 /// [`fork`](Device::fork) and a [`join`](Device::join), to run alongside
@@ -746,7 +811,7 @@ pub trait Device: Send + Sync {
     /// [`Device::write_from_host`].
     type Host: Send + Sync;
 
-    /// The runtime's name: `cuda`, `hip`.
+    /// The runtime's name: `cuda`, `hip`, `metal` or `cpu`.
     const RUNTIME: &'static str;
 
     /// What this device's kernels are specialised on.
@@ -859,8 +924,10 @@ pub trait Device: Send + Sync {
 
     /// The launches `record` queues, recorded as a graph instead of run.
     ///
-    /// Only launches may be queued while the capture is open: every other
-    /// operation of the device fails with [`GpuError::Capture`]. The graph
+    /// Only launches, forks and joins may be queued while the capture is
+    /// open: every other operation of the device fails with
+    /// [`GpuError::Capture`]. The capture fails too when it ends with a fork
+    /// not joined and, on CUDA and HIP, when it records no launch. The graph
     /// holds the launches' arguments as they were, block addresses included,
     /// so the blocks it uses outlive it, and its inputs change by writing
     /// into those blocks between replays.
@@ -876,7 +943,7 @@ pub trait Device: Send + Sync {
     fn replay(&self, graph: &Self::Graph) -> Result<(), GpuError>;
 
     /// Names `block` and its sections for the tools that inspect a device's
-    /// work: [`trace::Traced`](crate::trace::Traced) records them, the CPU
+    /// work: [`trace::Traced`] records them, the CPU
     /// device's probe counts accesses by them. A device that inspects
     /// nothing ignores the call and does not run `sections`.
     ///
@@ -961,6 +1028,7 @@ pub const STAMPS: usize = 16;
 pub struct Scope<'a, D: Device + ?Sized>(&'a D);
 
 impl<'a, D: Device + ?Sized> Scope<'a, D> {
+    /// Opens the scope `name` on `dev` ([`Device::scope_begin`]).
     pub fn new(dev: &'a D, name: &str) -> Self {
         dev.scope_begin(name);
         Scope(dev)

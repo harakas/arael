@@ -1,66 +1,73 @@
-//! The Levenberg-Marquardt loop's vector work on a [`Device`], for a solve
-//! whose parameters, step and linearization stay there: what the loop
-//! decides on comes back as a few scalars, read with the attempt's result.
-//! The kernels are `kernels/lm.cpp`.
-//!
-//! Per linearization, `k_lin_pass` gathers H's diagonal, writes the
-//! damping scale, and reduces the gradient's largest entry, the Jacobi-
-//! scaled one and the first faulty diagonal entry; per attempt,
-//! `k_attempt_pass` forms the trial point `x - delta` and reduces the
-//! step's and the trial point's squared norms and the predicted
-//! reduction. Both leave partials per block, which `k_combine_lin` and
-//! `k_combine_attempt` fold into the scalars, at the slots below
-//! ([`Scalars`]). [`LmVectors`] holds the blocks and launches the passes.
+//! The vector work of the Levenberg-Marquardt (LM) loop on a [`Device`]
+//! ([`LmVectors`]), for a solve whose parameters, step and linearization
+//! stay there: what the loop decides on comes back as a few scalars
+//! ([`Scalars`]), read with the attempt's result.
 
 use std::sync::Arc;
 
 use crate::{Arg, Device, GpuError, Launch, Layout, Section, Values, WIDE, Wide, define_u32s};
 
-/// The scalars buffer's slots.
+// The slots of the scalars buffer (LmVectors::scalars), a wide value each.
+/// The slot of the cost at the parameters, which the caller writes.
 pub const S_COST_X: usize = 0;
+/// The slot of the cost at the trial point, which the caller writes.
 pub const S_COST_TRY: usize = 1;
+/// The slot of the gradient's largest magnitude
+/// ([`LmVectors::linearized`]).
 pub const S_GRAD_MAX: usize = 2;
+/// The slot of the largest `|g_i| / sqrt(d_i)` over `d_i > 0`, `d` H's
+/// diagonal ([`LmVectors::linearized`]).
 pub const S_GRAD_SCALED: usize = 3;
-/// The first faulty diagonal entry as `4 i + kind` (1 NaN, 2 negative, 3
-/// zero), [`NO_FAULT`] when there is none.
+/// The slot of the first faulty diagonal entry of H, `i`, as `4 i + kind`
+/// (kind 1 not a number, 2 negative, 3 zero), or a value above 1e30 when
+/// there is none ([`LmVectors::linearized`]; [`Scalars::fault`] decodes
+/// it).
 pub const S_FAULT: usize = 4;
+/// The slot of the step's squared norm ([`LmVectors::step`]).
 pub const S_STEP2: usize = 5;
+/// The slot of the trial point's squared norm ([`LmVectors::step`]).
 pub const S_TRY2: usize = 6;
+/// The slot of the predicted cost reduction ([`LmVectors::step`],
+/// [`Scalars::predicted`]).
 pub const S_PREDICTED: usize = 7;
-/// The scalars a solve reads.
+/// The slots of the scalars buffer.
 pub const N_SCALARS: usize = 8;
-/// No faulty diagonal entry.
-pub const NO_FAULT: f64 = 1e300;
-/// Fault codes are below this, and every route's no-fault value above it
-/// ([`NO_FAULT`] in f64, 3e38 in df32).
-pub const FAULT_BELOW: f64 = 1e30;
+/// Fault codes are below this, and every solve's no-fault value (the
+/// kernels' `NO_FAULT`) above it: 1e300 in f64, 3e38 in df32.
+pub(crate) const FAULT_BELOW: f64 = 1e30;
 
-/// Partials per block of each pass.
-pub const LIN_PARTIALS: usize = 3;
-pub const ATTEMPT_PARTIALS: usize = 3;
+/// Partials per block of the linearization's pass.
+pub(crate) const LIN_PARTIALS: usize = 3;
+/// Partials per block of the attempt's pass.
+pub(crate) const ATTEMPT_PARTIALS: usize = 3;
 
-/// A faulty diagonal entry of H, as [`k_lin_pass`] finds it.
+/// A faulty diagonal entry of H, as [`LmVectors::linearized`] finds it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiagFault {
+    /// Not a number.
     Nan,
+    /// Below zero.
     Negative,
+    /// Zero, found only without a damping floor.
     Zero,
 }
 
 /// The scalars buffer decoded: what the loop decides on.
 #[derive(Clone, Copy, Debug)]
 pub struct Scalars {
-    /// The cost at the linearization point and at the trial point.
+    /// The cost at the parameters (the linearization point).
     pub cost_x: f64,
+    /// The cost at the trial point.
     pub cost_try: f64,
-    /// The gradient's largest magnitude and the largest `|g_i| / sqrt(d_i)`
-    /// over `d_i > 0`.
+    /// The gradient's largest magnitude.
     pub grad_max: f64,
+    /// The largest `|g_i| / sqrt(d_i)` over `d_i > 0`, `d` H's diagonal.
     pub grad_scaled: f64,
     /// The first faulty diagonal entry: its parameter and the fault.
     pub fault: Option<(usize, DiagFault)>,
-    /// The squared norms of the step and of the trial point.
+    /// The step's squared norm.
     pub step2: f64,
+    /// The trial point's squared norm.
     pub try2: f64,
     /// The cost reduction the damped model predicts for the step,
     /// `(delta . g + lambda delta . D delta) / 2` with D the diagonal.
@@ -68,7 +75,10 @@ pub struct Scalars {
 }
 
 impl Scalars {
-    /// Decode the [`N_SCALARS`] f64 at the start of `bytes`.
+    /// The scalars from the bytes of an f64 solve's scalars buffer
+    /// ([`LmVectors::scalars`]): [`N_SCALARS`] f64 at the start of
+    /// `bytes`. For a df32 solve, decode the bytes with [`Wide::decode`]
+    /// and call [`from_values`](Self::from_values).
     pub fn decode(bytes: &[u8]) -> Scalars {
         let v: Vec<f64> = (0..N_SCALARS).map(|i| bytemuck::pod_read_unaligned::<f64>(&bytes[8 * i..8 * i + 8])).collect();
         Self::from_values(&v)
@@ -132,12 +142,40 @@ struct Sections {
     scalars: usize,
 }
 
-/// The Levenberg-Marquardt loop's vectors on a [`Device`], in one block:
-/// the parameters `x` and the trial point, H's undamped diagonal, the
-/// damping scale and lambda, in the route's [`Values`], and the
-/// [`Scalars`](crate::lm::Scalars) the loop decides on, in its [`Wide`]
-/// scalar. H, the gradient and the step are the caller's (a
-/// [`GpuSchur`](crate::GpuSchur)'s targets), in the route's values.
+/// The vectors of the LM loop on a [`Device`] and the passes over them, for
+/// a solve whose parameters stay on the device. It holds the parameters
+/// `x`, the trial point, H's undamped diagonal, the damping scale and
+/// lambda, in the solve's [`Values`], and the scalars the loop decides on
+/// ([`Scalars`]), in its [`Wide`] scalar. H, the gradient, the step and the
+/// costs are the caller's: H and the gradient at a
+/// [`GpuSchur`](crate::GpuSchur)'s targets, the costs written into
+/// [`slot`](Self::slot)s by the caller's kernels. Every pass queues
+/// launches and returns without waiting.
+///
+/// ```ignore
+/// use arael_gpu::lm::{LmVectors, N_SCALARS, S_COST_TRY, S_COST_X, Scalars};
+///
+/// let mut vec = LmVectors::new(&dev, &diag_pos, schur.values())?;
+/// vec.write_x(&x0)?;
+/// // per linearization: the caller writes H, the gradient and the cost at x
+/// assemble(vec.x(), schur.h_target(), schur.rhs_target(), vec.slot(S_COST_X))?;
+/// vec.linearized(schur.rhs_target(), schur.h_target(), None)?;
+/// // per attempt
+/// vec.set_lambda(lambda)?;
+/// vec.damp(schur.h_target())?;
+/// schur.launch(&factor, None)?;
+/// vec.step(schur.step_view(), schur.rhs_target())?;
+/// cost(vec.x_try(), vec.slot(S_COST_TRY))?; // the caller's cost at the trial point
+/// let mut bytes = [0u8; 8 * N_SCALARS];
+/// let (block, at) = vec.scalars();
+/// dev.read(block, at, &mut bytes)?; // the wait; read the solve's status with it
+/// let mut values = [0.0; N_SCALARS];
+/// vec.wide().decode(&bytes, &mut values);
+/// let s = Scalars::from_values(&values);
+/// if s.cost_try < s.cost_x {
+///     vec.accept()?; // the trial point becomes the parameters
+/// }
+/// ```
 pub struct LmVectors<D: Device> {
     dev: Arc<D>,
     values: Values,
@@ -155,9 +193,10 @@ fn blocks(n: usize) -> u32 {
 }
 
 impl<D: Device> LmVectors<D> {
-    /// The vectors of `pos.len()` parameters of a route of `values`, H's
-    /// diagonal at `pos` in its values. [`GpuError::Unavailable`] for
-    /// [`Wide::F64`] on a device without f64.
+    /// The vectors of `pos.len()` parameters on `dev`, for a solve of
+    /// `values`: `pos[i]` is the index of parameter `i`'s diagonal entry in
+    /// H's tile values. [`GpuError::Unavailable`] for [`Wide::F64`] on a
+    /// device without f64; a compile or driver error.
     pub fn new(dev: &Arc<D>, pos: &[u32], values: impl Into<Values>) -> Result<Self, GpuError> {
         let values = values.into();
         let wide = values.wide();
@@ -313,14 +352,19 @@ impl<D: Device> LmVectors<D> {
         Arg::Block(&self.block, offset)
     }
 
-    /// The diagonal of H (whose values start at `h`) gathered.
+    /// Queues the gather of H's diagonal from H's tile values at `h` (block,
+    /// byte offset) into [`diag`](Self::diag), without the scalars or the
+    /// damping scale.
     pub fn gather_diag(&self, h: (&D::Block, usize)) -> Result<(), GpuError> {
         let s = &self.sec;
         self.run(&self.k.gather_diag, blocks(self.n), &[Arg::Block(h.0, h.1), self.at(s.pos), self.at(s.diag), Arg::U32(self.n as u32)])
     }
 
-    /// After an assembly into `g` and `h`: the diagonal, the damping scale
-    /// (`max(diag, floor)` with a floor) and the linearization's scalars.
+    /// Queues the linearization's pass, after the caller has written the
+    /// gradient at `g` and H's tile values at `h`: H's undamped diagonal
+    /// into [`diag`](Self::diag), the damping scale (`max(diag, floor)` with
+    /// a `floor`, else the diagonal), and the scalars [`S_GRAD_MAX`],
+    /// [`S_GRAD_SCALED`] and [`S_FAULT`].
     pub fn linearized(&self, g: (&D::Block, usize), h: (&D::Block, usize), floor: Option<f64>) -> Result<(), GpuError> {
         let (s, parts) = (&self.sec, blocks(self.n));
         let args = [
@@ -344,15 +388,19 @@ impl<D: Device> LmVectors<D> {
         self.dev.write(&mut self.block, self.sec.lambda, &self.values.encode(&[lambda]))
     }
 
-    /// H's diagonal damped, `diag + lambda damp`, in its values at `h`.
+    /// Queues the damping of H's tile values at `h`: its diagonal set to
+    /// `diag + lambda damp`, from the undamped diagonal, the damping scale
+    /// and the lambda of [`set_lambda`](Self::set_lambda).
     pub fn damp(&self, h: (&D::Block, usize)) -> Result<(), GpuError> {
         let s = &self.sec;
         let args = [Arg::Block(h.0, h.1), self.at(s.pos), self.at(s.diag), self.at(s.damp), self.at(s.lambda), Arg::U32(self.n as u32)];
         self.run(&self.k.damp, blocks(self.n), &args)
     }
 
-    /// The trial point `x - step` and the attempt's scalars, for the step
-    /// solved at the set lambda against the gradient `g`.
+    /// Queues the attempt's pass for the step at `step`, solved at the set
+    /// lambda, and the gradient at `g`: the trial point `x - step` into
+    /// [`x_try`](Self::x_try), and the scalars [`S_STEP2`], [`S_TRY2`] and
+    /// [`S_PREDICTED`].
     pub fn step(&self, step: (&D::Block, usize), g: (&D::Block, usize)) -> Result<(), GpuError> {
         let (s, parts) = (&self.sec, blocks(self.n));
         let args = [
@@ -369,17 +417,19 @@ impl<D: Device> LmVectors<D> {
         self.run(&self.k.combine_attempt, 1, &[self.at(s.att), Arg::U32(parts), self.at(s.scalars)])
     }
 
-    /// The trial point becomes the parameters: copied, so the sections keep
-    /// their roles (and a captured graph its addresses).
+    /// Queues the copy of the trial point into the parameters. A copy, so
+    /// a captured graph keeps its addresses.
     pub fn accept(&self) -> Result<(), GpuError> {
         let s = &self.sec;
         self.run(&self.k.copy, blocks(self.n), &[self.at(s.x), self.at(s.x_try), Arg::U32(self.n as u32)])
     }
 
-    /// The rotation steps of the parameters zeroed, for `entities`
-    /// entities: each one's three global indices at `idx[at[e]..]` (u32), a
-    /// fixed one ([`FIXED`](crate::FIXED)) left alone; what
-    /// re-centring does to the parameters after an accepted step.
+    /// Queues the zeroing of the parameters that hold rotation increments,
+    /// for `entities` of a model's entities (its objects with a rotation):
+    /// entity `e`'s three parameter indices are the u32 words at
+    /// `idx[at[e]..]`, an index of [`FIXED`](crate::FIXED) skipped. For a
+    /// caller that folds each entity's increment into its rotation after
+    /// an accepted step.
     pub fn zero_steps(&self, idx: (&D::Block, usize), at: (&D::Block, usize), entities: usize) -> Result<(), GpuError> {
         if entities == 0 {
             return Ok(());

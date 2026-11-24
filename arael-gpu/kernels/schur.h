@@ -32,7 +32,7 @@ struct SchurHeader {
 #endif
 
 // R: the scalar the reduction computes in. W itself with SCHUR_F32 0; f32
-// with SCHUR_F32 1, as the CPU's f32 route, for a solve whose factor is f32
+// with SCHUR_F32 1, as the host's f32 solve, for a solve whose factor is f32
 // and that does not refine against S: the inputs (H, the gradient, the kept
 // blocks' solution) are rounded to f32 as read (an f32 root's H and
 // gradient already are), and the eliminated blocks' factors, z, W, S, the
@@ -81,7 +81,7 @@ DEVICE V coupling(GLOBAL const V* h, u32 ca, u32 trans, u32 wo, u32 we, u32 i, u
 // factor at `f`, column-major w x w: D = U P U^T, U unit lower (D's
 // Cholesky factor L with each column divided by its diagonal entry) below
 // the diagonal, P = diag(L_jj^2) as its reciprocals on the diagonal. The
-// CPU's llt_solve_panel up to rounding, at one product a term: solves keep
+// host's llt_solve_panel up to rounding, at one product a term: solves keep
 // S the reduction of a nearby positive definite system where multiplying
 // by D's rounded inverse does not (its error grows with D's condition
 // number, high for a point seen along nearly parallel rays). wide_fma's

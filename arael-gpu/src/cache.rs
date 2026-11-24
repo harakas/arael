@@ -5,9 +5,10 @@
 //! environment variable `ARAEL_KERNEL_CACHE`: a directory, `off` to keep
 //! nothing, or unset for the user's cache directory (`~/.cache/arael/kernels`
 //! on Linux, `$XDG_CACHE_HOME` respected). It is fixed at the first GPU use
-//! of the process. Kernels go to `<runtime>` there (`cuda`, `hip`), one
-//! file per kernel source, found again by the source, the target and the
-//! compiler's version.
+//! of the process. Kernels go to a directory per runtime there (`cuda`,
+//! `hip`, `cpu`), one file per kernel source, found again by the source,
+//! the target and the compiler's version. Metal keeps its own cache of
+//! compiled kernels and does not use this one.
 //!
 //! ```ignore
 //! // ARAEL_KERNEL_CACHE=/var/cache/myapp ./myapp, or in the program:

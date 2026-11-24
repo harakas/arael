@@ -1,6 +1,8 @@
-//! [`GpuSupernodal`]: the block supernodal Cholesky and its level-set
-//! solve on a [`Device`]: the kernels of `kernels/supernodal.cpp` launched
-//! over the plan of [`crate::plan`].
+//! [`GpuSupernodal`]: the block supernodal Cholesky factorization of a
+//! sparse symmetric positive definite matrix on a [`Device`], and the solve
+//! with its factor. Both run level by level of the elimination tree, the
+//! supernodes of a level at once. [`GpuFactor`] holds either scalar behind
+//! one type.
 
 use std::fmt::Write as _;
 use std::marker::PhantomData;
@@ -55,8 +57,9 @@ fn small_shared_bytes(q: usize, fs: usize) -> usize {
 #[derive(Debug)]
 pub enum FactorizeError {
     /// A diagonal pivot was not positive. The factor is unusable; the caller
-    /// raises the damping, as with the CPU factorization.
+    /// raises the damping, as with the host factorization.
     NotPositiveDefinite,
+    /// A device operation failed.
     Device(GpuError),
 }
 
@@ -198,16 +201,17 @@ impl Sections {
     }
 }
 
-/// The device factorization of one sparsity structure on a [`Device`]: the plan built from a [`SupernodalSymbolic`] once, the factor
-/// kept on the device, and the kernels that fill it from a matrix's values
-/// and solve against it.
+/// The Cholesky factorization of one sparsity structure on a [`Device`]:
+/// build it once per structure from arael-faer's supernodal symbolic
+/// analysis, then [`factorize`](Self::factorize) each matrix of that
+/// structure and [`solve`](Self::solve) with its factor, which stays on the
+/// device. The `*_device` methods do the same on values already on the
+/// device, queued without a wait.
 ///
 /// `F` is the factor's scalar, `f32` or `f64`; the matrix handed to
 /// [`factorize`](Self::factorize) and the right-hand side of
 /// [`solve`](Self::solve) may be in either. Every device buffer is made in
-/// [`new`](Self::new): the structure's integer data (the plan, the seed map,
-/// every level's work lists) in one block, uploaded in one copy, and the
-/// factor, the solve's vectors and the uploads in another.
+/// [`new`](Self::new).
 ///
 /// ```ignore
 /// let dev = Arc::new(CudaDevice::new(0)?);
@@ -264,13 +268,24 @@ pub struct GpuSupernodal<F: Scalar, D: Device> {
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
-    /// The device plan of `sn`, the analysis of a matrix with the block
-    /// structure `asym`, uploaded to `dev`, with the factor's buffers and
-    /// the kernels; the vectors it solves and the values a device
-    /// factorization reads are in `wide`. [`GpuError::Limit`] when a
-    /// supernode needs more shared memory than the device gives;
+    /// The factorization on `dev` of a matrix of block structure `asym`, as
+    /// arael-faer's supernodal symbolic analysis `sn` of it orders and
+    /// groups the columns, with the settings `params`: the plan uploaded,
+    /// the device memory allocated, the kernels compiled. The vectors it
+    /// solves and the values a device factorization reads are in `wide`.
+    ///
+    /// # Errors
+    ///
     /// [`GpuError::Unavailable`] for an f64 factor or [`Wide::F64`] on a
-    /// device without f64.
+    /// device without f64; [`GpuError::Limit`] when a solve chain
+    /// ([`GpuSupernodalParams::solve_chain_work`]) needs more shared memory
+    /// than the device has; a compile or driver error.
+    ///
+    /// # Panics
+    ///
+    /// For `params` out of range: `syrk_block`, `trsm_rows`, `syrk_tile`,
+    /// `diag_warps`, `lane_unroll` or `trsv_block` not one of the values
+    /// its field doc allows.
     pub fn new(
         dev: &Arc<D>,
         sn: &SupernodalSymbolic,
@@ -508,9 +523,11 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         &self.dev
     }
 
-    /// Factorize the matrix whose stored tile values are `vals`, in the
-    /// block storage order of the structure the plan was built from, and
-    /// wait for the pivot flag.
+    /// Factorizes the matrix whose stored tile values are `vals`, in the
+    /// block storage order of the structure it was built for, and waits for
+    /// the pivot flag: [`FactorizeError::NotPositiveDefinite`] when a pivot
+    /// is not positive. Panics when `vals` is not the structure's value
+    /// count.
     pub fn factorize<M: SchurReal + 'static>(&mut self, vals: &[M]) -> Result<(), FactorizeError> {
         assert_eq!(vals.len(), self.nvals, "the values of the structure the plan was built from");
         let fail = self.sec.fail;
@@ -641,8 +658,9 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         Ok(())
     }
 
-    /// Solve `A x = rhs` in place through the last factorization, and wait
-    /// for `x`; `rhs` is in the matrix's own ordering and comes back as `x`.
+    /// Solves `A x = rhs` in place through the last factorization, and
+    /// waits for `x`; `rhs` is in the matrix's own ordering and comes back
+    /// as `x`. Panics when `rhs` is not [`dim`](Self::dim) values.
     pub fn solve<M: SchurReal + 'static>(&mut self, rhs: &mut [M]) -> Result<(), GpuError> {
         assert_eq!(rhs.len(), self.n);
         let at = self.sec.rhs;
@@ -662,9 +680,8 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     }
 
     /// [`solve`](Self::solve) on a vector already on the device at `x`
-    /// (block, byte offset), `f64` in the matrix's ordering, in place,
-    /// without waiting: the permutation into the factor's ordering and
-    /// scalar and back, and the level-set solve between.
+    /// (block, byte offset), in the wide scalar given to [`new`](Self::new)
+    /// and in the matrix's ordering, in place, without waiting.
     pub fn solve_device(&self, x: (&D::Block, usize)) -> Result<(), GpuError> {
         self.solve_with(x, (&self.ints, self.on), false)
     }
@@ -734,7 +751,8 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     }
 
     /// The factor's values, panel by panel in the symbolic's layout, read
-    /// back from the device (for tests and inspection).
+    /// back from the device. A test helper, not API.
+    #[doc(hidden)]
     pub fn factor_values(&self) -> Result<Vec<F>, GpuError> {
         let mut v = vec![F::zeroed(); self.factor_vals];
         self.dev.read(&self.work, self.sec.factor, bytemuck::cast_slice_mut(&mut v))?;
@@ -789,10 +807,24 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
     }
 }
 
-/// A [`GpuSupernodal`] of either scalar behind one type, for a caller
-/// whose own scalar is generic.
+/// A [`GpuSupernodal`] of either scalar behind one type, chosen at run
+/// time ([`GpuPrecision`](crate::GpuPrecision)); the factor
+/// [`GpuSchur::solve`](crate::GpuSchur::solve) takes.
+///
+/// ```ignore
+/// use arael_gpu::{FactorizeError, GpuFactor, GpuPrecision, Wide};
+///
+/// let mut f = GpuFactor::new(&dev, GpuPrecision::F32, &sn, a.symbolic(), &Default::default(), Wide::F64)?;
+/// match f.factorize(a.vals()) {
+///     Ok(()) => f.solve(&mut rhs)?, // rhs becomes x
+///     Err(FactorizeError::NotPositiveDefinite) => {} // raise the damping
+///     Err(FactorizeError::Device(e)) => return Err(e.into()),
+/// }
+/// ```
 pub enum GpuFactor<D: Device> {
+    /// An f32 factor.
     F32(GpuSupernodal<f32, D>),
+    /// An f64 factor.
     F64(GpuSupernodal<f64, D>),
 }
 

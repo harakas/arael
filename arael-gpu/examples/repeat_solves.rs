@@ -1,18 +1,23 @@
-//! Repeated solves through the device route, the way a COLMAP-style caller
-//! runs them: several structures of different sizes, each solved several
-//! times by a fresh reduction and factor, each solve a few damped attempts
-//! (reduce, factorize, solve, refine, back-substitute). All solves share one
-//! device, so its pool's blocks serve them all: after each structure the
-//! device's allocations and reserved bytes are printed, and a structure no
-//! larger than about 1.25 times one seen before allocates nothing.
-//! `--device-per-solve` gives every solve a device of its own instead;
-//! `--no-graphs` launches every attempt's kernels instead of replaying the
-//! first one's graph; `--attempts N` sets the attempts per solve (4);
-//! `--hip` runs on HIP device 0 (built with `--features hip`) instead of
-//! CUDA.
+//! Shows how one device's memory pool serves many solves: it prints the
+//! device's allocations and reserved bytes after each of several block
+//! structures of different sizes.
 //!
-//! Between phases it writes a marker copy of a unique size, so an API trace
-//! can be cut into phases: `scripts/gpu_trace.py` reports allocations,
+//! Each structure is solved several times, each solve with a fresh
+//! reduction and factor and a few damped attempts (reduce, factorize,
+//! solve, refine, back-substitute). All solves share one device, so its
+//! pool's blocks serve them all: a structure no larger than about 1.25
+//! times one seen before allocates nothing.
+//!
+//! - `--device-per-solve`: every solve gets a device of its own.
+//! - `--no-graphs`: every attempt launches its kernels instead of replaying
+//!   the first attempt's graph.
+//! - `--attempts N`: the attempts per solve (4).
+//! - `--hip`: HIP device 0 (build with `--features hip`) instead of CUDA
+//!   device 0.
+//!
+//! Between phases it writes a marker copy of a unique size.
+//! `scripts/gpu_trace.py`, which needs NVIDIA's Nsight Systems (`nsys`),
+//! cuts a CUDA run's trace at the markers and reports allocations,
 //! synchronizations, copies and launches per phase.
 //!
 //!   cargo run -r -p arael-gpu --features cuda --example repeat_solves

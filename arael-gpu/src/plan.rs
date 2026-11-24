@@ -1,9 +1,10 @@
-//! The host side of the device factorization: what the kernels need to know
-//! about a [`SupernodalSymbolic`], flattened into integer arrays and cut into
-//! the per-level work lists the launches walk.
-//!
-//! Everything here is built once per symbolic analysis and reused by every
-//! numeric factorization; nothing depends on the matrix values.
+//! The settings of the device factorization ([`GpuSupernodalParams`]).
+
+// The rest is the host side of the factorization's plan: a
+// SupernodalSymbolic flattened into the integer arrays and the per-level
+// work lists the kernels read. The plan is built once per symbolic analysis
+// and reused by every numeric factorization; nothing in it depends on the
+// matrix values.
 
 // Index loops over parallel arrays (pattern blocks beside pattern rows).
 #![allow(clippy::needless_range_loop)]
@@ -18,17 +19,19 @@ pub type SparseIndex = u32;
 
 /// A piece of a small descendant update: at most PAIR_NI of the pair's
 /// rows against PAIR_NJ of its columns, PAIR_EPT elements a thread.
-pub const PAIR_NI: usize = 128;
-pub const PAIR_NJ: usize = 64;
-pub const PAIR_EPT: usize = 4;
+pub(crate) const PAIR_NI: usize = 128;
+pub(crate) const PAIR_NJ: usize = 64;
+pub(crate) const PAIR_EPT: usize = 4;
 /// The descendant's columns staged per pass of the small-update kernel.
-pub const PAIR_KC: usize = 16;
-/// Tile of the big-descendant update and of the panel's trailing update.
-pub const TB: usize = 64;
-/// The k slab of the big-descendant GEMM core.
-pub const TK: usize = 16;
+pub(crate) const PAIR_KC: usize = 16;
+/// Rows and columns of a tile of the big descendant update and of the
+/// panel's trailing update.
+pub(crate) const TB: usize = 64;
+/// The descendant's columns the big descendant update's kernel multiplies
+/// per pass.
+pub(crate) const TK: usize = 16;
 /// The panel step: columns factored per round of the three panel kernels.
-pub const NB: usize = 32;
+pub(crate) const NB: usize = 32;
 
 /// The trailing update (`k_syrk`) of panel step `step` in blocks of
 /// `block` columns, a multiple of [`NB`]: the solved columns from `k0`,
@@ -43,7 +46,7 @@ pub const NB: usize = 32;
 /// assert_eq!(syrk_update(5, 128), (160, 32, 256)); // inside the block [128, 256)
 /// assert_eq!(syrk_update(7, 128), (128, 128, u32::MAX)); // the block's last step
 /// ```
-pub fn syrk_update(step: usize, block: usize) -> (u32, u32, u32) {
+pub(crate) fn syrk_update(step: usize, block: usize) -> (u32, u32, u32) {
     let per = block / NB;
     let b = step / per;
     if step % per == per - 1 {
@@ -62,181 +65,227 @@ pub fn syrk_update(step: usize, block: usize) -> (u32, u32, u32) {
 /// assert_eq!(lookahead_split(7, 128), Some(384)); // the block [128, 256)'s last step
 /// assert_eq!(lookahead_split(5, 128), None);
 /// ```
-pub fn lookahead_split(step: usize, block: usize) -> Option<u32> {
+pub(crate) fn lookahead_split(step: usize, block: usize) -> Option<u32> {
     let (k0, kn, cend) = syrk_update(step, block);
     (cend == u32::MAX).then_some(k0 + kn + block as u32)
 }
-/// Rows of x staged per pass of the backward GEMV.
-pub const XR_CH: usize = 1024;
+/// Rows of x staged per pass of the backward solve's product.
+pub(crate) const XR_CH: usize = 1024;
 
-/// The header of the one `plan` buffer: where each array starts. A kernel
-/// reads the offsets it needs once per unit; they stay out of the kernel's
-/// compile-time identity, so a process compiles each kernel once, not once
-/// per sparsity structure.
-pub const H_SC_START: usize = 0;
-pub const H_PR_D: usize = 1;
-pub const H_PR_R0: usize = 2;
-pub const H_PR_RMAP: usize = 3;
-pub const H_PR_CMAP: usize = 4;
-pub const H_RMAP: usize = 5;
-pub const H_CMAP: usize = 6;
-pub const H_ROW_SC: usize = 7;
-/// The permutation, for the device-side solve: the block elimination order
-/// and the matrix's scalar partition. A permuted block's width is the
-/// distance of its first permuted scalar ([`H_SC_START`]) to the next's.
-pub const H_ORDER: usize = 8;
-pub const H_PART: usize = 9;
+// The header of the one `plan` buffer: where each array starts, a slot
+// (`H_*`) each. A kernel reads the offsets it needs once per unit; they stay
+// out of the kernel's compile-time identity, so a process compiles each
+// kernel once, not once per sparsity structure.
+/// Per permuted block: its first permuted scalar.
+pub(crate) const H_SC_START: usize = 0;
+/// Per pair: the descendant supernode.
+pub(crate) const H_PR_D: usize = 1;
+/// Per pair: its first row in the descendant's panel.
+pub(crate) const H_PR_R0: usize = 2;
+/// Per pair: its offset into the row map.
+pub(crate) const H_PR_RMAP: usize = 3;
+/// Per pair: its offset into the column map.
+pub(crate) const H_PR_CMAP: usize = 4;
+/// Per pair row: the target panel's row.
+pub(crate) const H_RMAP: usize = 5;
+/// Per pair column: the target panel's column.
+pub(crate) const H_CMAP: usize = 6;
+/// Per row below a diagonal block: its index in the solve's vector.
+pub(crate) const H_ROW_SC: usize = 7;
+/// The block elimination order, for the device-side solve: per permuted
+/// block, the original block. A permuted block's width is the distance of
+/// its first permuted scalar ([`H_SC_START`]) to the next's.
+pub(crate) const H_ORDER: usize = 8;
+/// The matrix's scalar partition: per original block, its first scalar.
+pub(crate) const H_PART: usize = 9;
 /// The header of every supernode, [`SN_HEAD`] words: its columns q, its
 /// rows h, its first scalar column, its panel's offset in the factor, the
 /// offset of its rows below in the row map (`H_ROW_SC`), and its first
 /// inverted diagonal tile ([`H_INV_TILES`]; 0 for a supernode of at most
 /// [`NB`] columns, which has none).
-pub const H_SN_HEAD: usize = 10;
-pub const SN_HEAD: usize = 6;
+pub(crate) const H_SN_HEAD: usize = 10;
+/// Words of a supernode's header ([`H_SN_HEAD`]).
+pub(crate) const SN_HEAD: usize = 6;
 
 // The words of a big panel's record in a level's list of them (the panel
 // steps' `k_potf2`, `k_trsm` and `k_syrk`): what the steps need of the
 // supernode, so that finding a block's panel reads no head.
 /// The supernode.
-pub const PANEL_S: usize = 0;
+pub(crate) const PANEL_S: usize = 0;
 /// Its columns.
-pub const PANEL_Q: usize = 1;
+pub(crate) const PANEL_Q: usize = 1;
 /// Its rows.
-pub const PANEL_H: usize = 2;
+pub(crate) const PANEL_H: usize = 2;
 /// Its panel's offset in the factor.
-pub const PANEL_OFF: usize = 3;
-pub const PANEL_REC: usize = 4;
+pub(crate) const PANEL_OFF: usize = 3;
+/// Words of a big panel's record.
+pub(crate) const PANEL_REC: usize = 4;
 /// The inverted 32 x 32 diagonal tiles of the supernodes wider than
 /// [`NB`], 2 words each: the supernode and the tile's first column.
-pub const H_INV_TILES: usize = 11;
+pub(crate) const H_INV_TILES: usize = 11;
 /// Values per inverted diagonal tile: the inverse column-major (for the
 /// forward solve), then row-major (for the backward solve).
-pub const INV_TILE: usize = 2 * 32 * 32;
+pub(crate) const INV_TILE: usize = 2 * 32 * 32;
 /// Words of the header.
-pub const HEADER: usize = 32;
+pub(crate) const HEADER: usize = 32;
 
-/// How the work is cut. The defaults are the measured ones (docs/dev/GPU.md, E3).
+/// The settings of a [`GpuSupernodal`](crate::GpuSupernodal): at what size
+/// a supernode, an update or a solve changes kernel, and how much one block
+/// of a kernel takes. Every field has a default. A field that is `None`
+/// takes a value chosen for the device, which the `*_on` method of the same
+/// name returns.
+///
+/// The terms used below. A supernode is a run of the factor's columns
+/// stored as one dense panel of `q` columns and `h` rows. A descendant
+/// update subtracts an earlier supernode's columns from a later one. A
+/// level is a set of supernodes that the same launches factor. A block is
+/// one group of threads of a launch, a warp 32 threads that run in
+/// lockstep. The panel steps factor a supernode 32 columns at a time over
+/// many blocks: each step factors a diagonal tile, solves the rows below it
+/// and updates the columns after it (the trailing update). Work is counted
+/// in multiply-adds. The field names use the BLAS and LAPACK names of the
+/// steps: potf2 factors a diagonal tile, trsm solves the rows below it,
+/// syrk is the trailing update, trsv a triangular solve and gemv a
+/// matrix-vector product.
+///
+/// ```
+/// use arael_gpu::GpuSupernodalParams;
+/// // a trailing update in groups of 128 columns, the rest as the device has it
+/// let params = GpuSupernodalParams { syrk_block: Some(128), ..Default::default() };
+/// assert_eq!(params.small_q, 96);
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct GpuSupernodalParams {
-    /// Supernodes narrower than this (scalar columns) are factored by the
-    /// one-block small kernel, unless their rows below need more than
-    /// `small_flops`; the others by the batched panel steps. Capped to what
-    /// one block holds: 256 columns, and the device's shared memory.
+    /// Supernodes narrower than this many columns are factored by one block
+    /// each, unless [`small_flops`](Self::small_flops) sends them to the
+    /// panel steps; the others take the panel steps. A value above 257 acts
+    /// as 257 (one block's 256 threads), and the value is lowered to what
+    /// one block's shared memory holds. Default 96.
     pub small_q: u32,
-    /// The most multiply-adds of a small supernode's solve of its rows below
-    /// (`q^2 h / 2`) the one-block kernel takes: a taller supernode goes to
-    /// the panel steps, whose solve runs on many blocks.
+    /// The most multiply-adds, counted as `q^2 h / 2`, of a supernode that
+    /// one block factors: one with more takes the panel steps. Default 3e5.
     pub small_flops: f64,
-    /// A descendant update of at least this many multiply-adds goes through
-    /// the GEMM-core kernel; smaller ones through the small-update kernel, unless
-    /// `wide_pair_k` and `wide_pair_flops` send them there.
+    /// A descendant update of at least this many multiply-adds is a big
+    /// update, cut into 64 x 64 tiles over many blocks; a smaller one is a
+    /// small update, unless [`wide_pair_k`](Self::wide_pair_k) makes it
+    /// big. Default 2e6.
     pub big_pair_flops: f64,
-    /// A descendant at least this many columns wide sends its updates of
-    /// at least `wide_pair_flops` multiply-adds through the GEMM-core
-    /// kernel too: it reuses each k slab across its tile, where the
-    /// small-update kernel computes every element as a dot product of that
-    /// length.
+    /// A descendant at least this many columns wide makes its updates big
+    /// from [`wide_pair_flops`](Self::wide_pair_flops) multiply-adds on.
+    /// Default 64.
     pub wide_pair_k: u32,
+    /// The least multiply-adds of a big update from a descendant of at
+    /// least [`wide_pair_k`](Self::wide_pair_k) columns. Default 1e5.
     pub wide_pair_flops: f64,
-    /// Multiply-adds per block of the solve's gather (`k_fwd_gather`),
-    /// whose blocks also take at most `GATHER_ITEM_ROWS` rows.
+    /// Multiply-adds per block of the forward solve's gather, which
+    /// subtracts the solved supernodes' parts from a level's right-hand
+    /// side: a block takes rows while their work stays within this, at
+    /// least one row and at most 256. Default 65536.
     pub gather_work: usize,
-    /// Multiply-adds per block of the solve's GEMV (`k_bwd_gemv`). `None`
-    /// takes the device's choice ([`Self::gemv_work_on`]).
+    /// Multiply-adds per block of the backward solve's product of the rows
+    /// below a supernode's diagonal block with the solution. `None` (the
+    /// default) takes the device's value ([`Self::gemv_work_on`]).
     pub gemv_work: Option<usize>,
-    /// Loads in flight per iteration of the backward dot products; `None`
-    /// picks 8 for f64 and 4 for f32.
+    /// Loads a thread of the backward solve's dot products issues per loop
+    /// pass: even, at least 2. `None` (the default) takes 8 in an f64
+    /// factor and 4 in an f32 one.
     pub lane_unroll: Option<usize>,
-    /// A run of levels of one small supernode each (a path of the tree),
-    /// without big updates, each of at most `chain_flops_f32` (in an f32
-    /// factor) or `chain_flops_f64` (f64) multiply-adds of small updates and
-    /// factor and `chain_items` update pieces, is factored by one block in
-    /// one launch; 0 turns chains off. In f64 one block's multiply-add rate
-    /// is the limit where f64 is slow.
+    /// In an f32 factor, the most multiply-adds (small updates and factor)
+    /// of a level that joins a chain. A chain is a run of consecutive
+    /// levels that one block factors in one launch: each level one
+    /// supernode, factored by one block, without big updates. 0 turns
+    /// chains off. Default 3e5.
     pub chain_flops_f32: f64,
+    /// [`chain_flops_f32`](Self::chain_flops_f32) for an f64 factor.
+    /// Default 0: no chains.
     pub chain_flops_f64: f64,
+    /// The most small update pieces of a level that joins a chain. Default
+    /// 32.
     pub chain_items: u32,
-    /// A run of levels of one supernode each, each of at most this many
-    /// multiply-adds of solve (its gather, its GEMV, its two trsvs), is
-    /// solved by one block in one launch forward and one backward; 0 turns
-    /// it off.
+    /// The most multiply-adds of a level's solve for the level to join a
+    /// solve chain: a run of consecutive levels of one supernode each,
+    /// solved by one block in one launch forward and one backward. 0 turns
+    /// solve chains off. Default 1e5.
     pub solve_chain_work: f64,
-    /// Blocks per multiprocessor a level's updates are cut to fill: a level
-    /// whose big tiles make fewer blocks has their updates split across
-    /// blocks, which then subtract atomically; the small updates are cut
-    /// into pieces of the level's share of the work.
+    /// Blocks per multiprocessor ([`Arch::multiprocessors`]; `sm` stands for
+    /// NVIDIA's streaming multiprocessor) a level's updates are cut to make:
+    /// big updates that make fewer blocks are split across blocks, and the
+    /// small updates are cut into pieces of the level's share of the work.
+    /// Default 4.
+    ///
+    /// [`Arch::multiprocessors`]: crate::Arch::multiprocessors
     pub blocks_per_sm: u32,
-    /// Columns per block of the panel steps' trailing update
-    /// ([`syrk_update`]), a multiple of [`NB`]: in blocks of [`NB`] every
-    /// step updates everything past it; in wider blocks the trailing part
-    /// is read and written once per block. `None` takes the device's choice
-    /// ([`Self::syrk_block_on`]).
+    /// The column group of the panel steps' trailing update, in columns: a
+    /// multiple of 32. At 32 every step updates all the columns after it.
+    /// At more, a step updates the rest of its group only, and the group's
+    /// last step updates everything after the group. `None` (the default)
+    /// takes the device's value ([`Self::syrk_block_on`]).
     pub syrk_block: Option<u32>,
-    /// Rows per block of the panel steps' `k_trsm`, one thread each: at
-    /// least [`NB`] and a divisor of `NB * NB`. Smaller blocks spread a
-    /// step's rows over more blocks, and every block copies the step's
-    /// diagonal tile. `None` takes the device's choice
+    /// Rows per block of the panel steps' solve of the rows below a
+    /// diagonal tile, a thread per row: at least 32 and a divisor of 1024.
+    /// `None` (the default) takes the device's value
     /// ([`Self::trsm_rows_on`]).
     pub trsm_rows: Option<u32>,
-    /// Rows and columns of the panel steps' `k_syrk` tiles, 32 or 64, a
-    /// block each. The block of a step's first tile also factors the next
-    /// diagonal tile, so smaller tiles shorten each step's critical path
-    /// and spread a step over more blocks. `None` takes the device's
-    /// choice ([`Self::syrk_tile_on`]).
+    /// Rows and columns of a tile of the panel steps' trailing update, a
+    /// block per tile: 32 or 64. `None` (the default) takes the device's
+    /// value ([`Self::syrk_tile_on`]).
     pub syrk_tile: Option<u32>,
-    /// Whether the panel steps factor a diagonal tile of [`NB`] columns
-    /// on one warp ([`diag_warps`](Self::diag_warps) 1, or a tile
-    /// narrower than [`NB`]) with its pivots unrolled and each column
-    /// broadcast through shared memory (`potf2_full`) instead of the loop
-    /// with shuffles; both compute the same factor. `None` takes the
-    /// device's choice ([`Self::potf2_unroll_on`]).
+    /// Whether a warp that factors a 32-column diagonal tile alone runs its
+    /// 32 pivot steps unrolled (`true`) or in a loop (`false`). Without
+    /// effect on a tile that 4 warps factor
+    /// ([`diag_warps`](Self::diag_warps)). `None` (the default) takes the
+    /// device's value ([`Self::potf2_unroll_on`]).
     pub potf2_unroll: Option<bool>,
-    /// The warps that factor a panel step's diagonal tile of [`NB`]
-    /// columns, 1 or 4: on 4 every warp keeps every fourth column and the
-    /// pivots' columns reach them through shared memory (`potf2_4w`); the
-    /// factor is the same. A tile narrower than [`NB`] takes one warp.
-    /// `None` takes the device's choice ([`Self::diag_warps_on`]).
+    /// Warps that factor a panel step's 32-column diagonal tile: 1 or 4. A
+    /// tile narrower than 32 columns takes one. `None` (the default) takes
+    /// the device's value ([`Self::diag_warps_on`]).
     pub diag_warps: Option<u32>,
-    /// The narrowest supernode (columns, more than [`NB`]) whose triangular
-    /// solves run over many blocks, a launch per
-    /// [`trsv_block`](Self::trsv_block) columns; a narrower one is solved
-    /// by one block. A supernode too wide for one block's shared memory
-    /// always takes the many. `None` takes the device's choice
-    /// ([`Self::trsv_wide_on`]).
+    /// The narrowest supernode, in columns (more than 32), whose triangular
+    /// solves run over many blocks, [`trsv_block`](Self::trsv_block)
+    /// columns per launch; one block solves a narrower one. A supernode too
+    /// wide for one block's shared memory always takes many blocks. `None`
+    /// (the default) takes the device's value ([`Self::trsv_wide_on`]).
     pub trsv_wide: Option<u32>,
-    /// Columns per launch of the triangular solves over many blocks, a
-    /// multiple of 32. `None` takes the device's choice
+    /// Columns per launch of the triangular solves over many blocks: a
+    /// multiple of 32. `None` (the default) takes the device's value
     /// ([`Self::trsv_block_on`]).
     pub trsv_block: Option<u32>,
-    /// Whether the big descendant updates are tiled in each pair's own rows
-    /// and columns (`k_big_pair`: dense tiles, every result added into the
-    /// target atomically) instead of in the target's (`k_big_update`: the
-    /// rectangles several pairs put in one target tile, summed in shared
-    /// memory). `None` takes the device's choice ([`Self::pair_tiles_on`]).
+    /// Whether a big descendant update is cut into tiles of its own rows
+    /// and columns, each added into the target atomically (`true`), or into
+    /// the target's 64 x 64 tiles, each summing the parts of several
+    /// updates before it is written (`false`). `None` (the default) takes
+    /// the device's value ([`Self::pair_tiles_on`]).
     pub pair_tiles: Option<bool>,
-    /// Whether the panel steps look ahead: a block's last step updates the
-    /// next block's columns first, and the rest of its update runs on the
-    /// main stream while the next block's steps run on the side stream
-    /// ([`crate::Lane`]), so their chain of small launches overlaps it.
-    /// `None` takes the device's choice ([`Self::lookahead_on`]).
+    /// Whether the panel steps look ahead: the last step of a column group
+    /// ([`syrk_block`](Self::syrk_block)) updates the next group's columns
+    /// first, and the rest of its update runs on the main stream while the
+    /// next group's steps run on the side stream ([`crate::Lane`]). `None`
+    /// (the default) takes the device's value ([`Self::lookahead_on`]).
     pub lookahead: Option<bool>,
 }
 
 impl GpuSupernodalParams {
-    /// [`syrk_block`](Self::syrk_block) on the device `arch` for a factor of
-    /// `fs`-byte scalars, unset: 256 on an Apple GPU; on another integrated
-    /// GPU or the CPU device 256 for an f32 factor, 128 for an f64 one;
-    /// [`NB`] on a discrete GPU. Measured on bundle adjustment and SLAM
-    /// reduced systems: wide blocks are faster on AMD integrated GPUs, whose
-    /// memory bandwidth bounds the update (256 against 128: f32 0.4 to 3%
-    /// faster, f64 the same), and slower on an NVIDIA discrete GPU, where the
-    /// update's launches are bound by latency; on an Apple M4 Pro, whose
-    /// tiles multiply on SIMD-group matrices, blocks of 256 are faster on the
-    /// large bundle adjustment systems and the same on small ones. Discrete
-    /// AMD GPUs are not measured.
+    /// The [`syrk_block`](Self::syrk_block) used on the device `arch` for a
+    /// factor of `fs`-byte scalars (4 or 8): the value set, else 256 on an
+    /// Apple GPU; on another integrated GPU and the CPU device 256 for an
+    /// f32 factor and 128 for an f64 one; 32 on a discrete GPU.
     ///
-    /// ```ignore
-    /// let block = GpuSupernodalParams::default().syrk_block_on(dev.arch(), 4);
+    /// ```
+    /// use arael_gpu::{Arch, GpuSupernodalParams, Vendor};
+    /// let arch = Arch {
+    ///     name: "a discrete GPU".into(),
+    ///     vendor: Vendor::Nvidia,
+    ///     target: "sm_89".into(),
+    ///     warp: 32,
+    ///     shared_bytes: 48 << 10,
+    ///     multiprocessors: 128,
+    ///     has_f64: true,
+    ///     flushes_subnormals: false,
+    ///     integrated: false,
+    /// };
+    /// let params = GpuSupernodalParams::default();
+    /// assert_eq!(params.syrk_block_on(&arch, 4), 32);
+    /// assert_eq!(GpuSupernodalParams { syrk_block: Some(128), ..params }.syrk_block_on(&arch, 4), 128);
     /// ```
     pub fn syrk_block_on(&self, arch: &crate::Arch, fs: usize) -> u32 {
         self.syrk_block.unwrap_or(match arch.vendor {
@@ -247,73 +296,40 @@ impl GpuSupernodalParams {
         })
     }
 
-    /// [`trsm_rows`](Self::trsm_rows) on the device `arch`, unset: 64 on an
-    /// integrated GPU or the CPU device, a warp (at least [`NB`]) on a
-    /// discrete GPU. Measured on bundle adjustment and SLAM reduced systems:
-    /// a warp per block is faster on an NVIDIA discrete GPU, where most
-    /// `k_trsm` launches have fewer blocks than multiprocessors, and 64 rows
-    /// on an AMD integrated GPU, which the launches fill, so the blocks'
-    /// copies of the diagonal tile are the cost. Discrete AMD GPUs are not
-    /// measured.
+    /// The [`trsm_rows`](Self::trsm_rows) used on the device `arch`: the
+    /// value set, else 64 on an integrated GPU and the CPU device, and the
+    /// device's lockstep width ([`Arch::warp`], at least 32) on a discrete
+    /// GPU.
     ///
-    /// ```ignore
-    /// let rows = GpuSupernodalParams::default().trsm_rows_on(dev.arch());
-    /// ```
+    /// [`Arch::warp`]: crate::Arch::warp
     pub fn trsm_rows_on(&self, arch: &crate::Arch) -> u32 {
         self.trsm_rows.unwrap_or(if arch.integrated { 64 } else { arch.warp.max(NB as u32) })
     }
 
-    /// [`gemv_work`](Self::gemv_work) on the device `arch`, unset: 16384 on
-    /// an integrated GPU or the CPU device, 2048 on a discrete GPU.
-    /// Measured on SLAM and pose graph systems: an NVIDIA discrete GPU runs
-    /// the GEMV fastest in blocks of 1024 to 4096 multiply-adds, an AMD
-    /// integrated GPU in blocks of 16384, slower with more, smaller blocks.
-    /// Discrete AMD GPUs are not measured.
-    ///
-    /// ```ignore
-    /// let work = GpuSupernodalParams::default().gemv_work_on(dev.arch());
-    /// ```
+    /// The [`gemv_work`](Self::gemv_work) used on the device `arch`: the
+    /// value set, else 16384 on an integrated GPU and the CPU device, 2048
+    /// on a discrete GPU.
     pub fn gemv_work_on(&self, arch: &crate::Arch) -> usize {
         self.gemv_work.unwrap_or(if arch.integrated { 16384 } else { 2048 })
     }
 
-    /// [`syrk_tile`](Self::syrk_tile) on the device `arch` for a factor of
-    /// `fs`-byte scalars, unset: 32, except 64 for an `f32` factor on an
-    /// integrated GPU or the CPU device. Measured on SLAM and pose graph
-    /// systems: tiles of 32 are faster in both precisions on an NVIDIA
-    /// discrete GPU, and in `f64` on an AMD integrated GPU, where tiles of
-    /// 64 are faster in `f32`. Discrete AMD GPUs are not measured.
-    ///
-    /// ```ignore
-    /// let tile = GpuSupernodalParams::default().syrk_tile_on(dev.arch(), 8);
-    /// ```
+    /// The [`syrk_tile`](Self::syrk_tile) used on the device `arch` for a
+    /// factor of `fs`-byte scalars (4 or 8): the value set, else 64 for an
+    /// f32 factor on an integrated GPU and the CPU device, 32 otherwise.
     pub fn syrk_tile_on(&self, arch: &crate::Arch, fs: usize) -> u32 {
         self.syrk_tile.unwrap_or(if fs == 4 && arch.integrated { 64 } else { 32 })
     }
 
-    /// [`potf2_unroll`](Self::potf2_unroll) on the device `arch`, unset:
-    /// on a discrete GPU, not on an integrated GPU or the CPU device.
-    /// Measured on bundle adjustment and SLAM reduced systems: unrolled is
-    /// faster on an NVIDIA discrete GPU (the slam factor 10 to 20%), slower
-    /// on an AMD integrated GPU (its registers lower the occupancy of every
-    /// `k_syrk` block). Discrete AMD GPUs are not measured.
-    ///
-    /// ```ignore
-    /// let unroll = GpuSupernodalParams::default().potf2_unroll_on(dev.arch());
-    /// ```
+    /// The [`potf2_unroll`](Self::potf2_unroll) used on the device `arch`:
+    /// the value set, else `true` on a discrete GPU, `false` on an
+    /// integrated GPU and the CPU device.
     pub fn potf2_unroll_on(&self, arch: &crate::Arch) -> bool {
         self.potf2_unroll.unwrap_or(!arch.integrated)
     }
 
-    /// [`diag_warps`](Self::diag_warps) on the device `arch`, unset: 4 on
-    /// NVIDIA and AMD GPUs, 1 on Apple GPUs and the CPU device. Measured on
-    /// bundle adjustment reduced systems: 4 is faster on an NVIDIA discrete
-    /// GPU (the f32 factor 1.5 to 11%, f64 under 1%) and on an AMD
-    /// integrated GPU (0.4 to 6%). Apple GPUs are not measured.
-    ///
-    /// ```ignore
-    /// let warps = GpuSupernodalParams::default().diag_warps_on(dev.arch());
-    /// ```
+    /// The [`diag_warps`](Self::diag_warps) used on the device `arch`: the
+    /// value set, else 4 on NVIDIA and AMD GPUs, 1 on Apple GPUs and the
+    /// CPU device.
     pub fn diag_warps_on(&self, arch: &crate::Arch) -> u32 {
         self.diag_warps.unwrap_or(match arch.vendor {
             crate::Vendor::Nvidia | crate::Vendor::Amd => 4,
@@ -321,64 +337,30 @@ impl GpuSupernodalParams {
         })
     }
 
-    /// [`trsv_wide`](Self::trsv_wide) on the device `arch`, unset: 512 on a
-    /// discrete GPU, 1024 on an integrated GPU or the CPU device. Measured
-    /// on bundle adjustment, SLAM and pose graph systems: an NVIDIA discrete
-    /// GPU gains from 512 columns on (the solve of Ladybug-372's reduced
-    /// system about halves), an AMD integrated GPU, with fewer units to
-    /// spread over, only on wider supernodes. Discrete AMD GPUs are not
-    /// measured.
-    ///
-    /// ```ignore
-    /// let wide = GpuSupernodalParams::default().trsv_wide_on(dev.arch());
-    /// ```
+    /// The [`trsv_wide`](Self::trsv_wide) used on the device `arch`: the
+    /// value set, else 512 on a discrete GPU, 1024 on an integrated GPU and
+    /// the CPU device.
     pub fn trsv_wide_on(&self, arch: &crate::Arch) -> u32 {
         self.trsv_wide.unwrap_or(if arch.integrated { 1024 } else { 512 })
     }
 
-    /// [`trsv_block`](Self::trsv_block) on the device `arch`, unset: 128 on
-    /// a discrete GPU, 256 on an integrated GPU or the CPU device, where
-    /// fewer, longer launches measured faster.
-    ///
-    /// ```ignore
-    /// let block = GpuSupernodalParams::default().trsv_block_on(dev.arch());
-    /// ```
+    /// The [`trsv_block`](Self::trsv_block) used on the device `arch`: the
+    /// value set, else 128 on a discrete GPU, 256 on an integrated GPU and
+    /// the CPU device.
     pub fn trsv_block_on(&self, arch: &crate::Arch) -> u32 {
         self.trsv_block.unwrap_or(if arch.integrated { 256 } else { 128 })
     }
 
-    /// [`pair_tiles`](Self::pair_tiles) on the device `arch` for a factor
-    /// of `fs`-byte scalars, unset: on an integrated GPU or the CPU device,
-    /// and on a discrete GPU for an `f64` factor. Measured on bundle
-    /// adjustment, SLAM and pose graph systems: pair tiles execute about
-    /// half the multiply-adds of target tiles, which an AMD integrated GPU
-    /// gains from in both precisions (factors 13 to 29% faster) and an
-    /// NVIDIA discrete GPU in `f64` (5 to 32%); there an `f32` factor's
-    /// multiply-adds are cheap enough that the atomic adds outweigh them
-    /// (slam 4 to 6% slower). Discrete AMD GPUs are not measured.
-    ///
-    /// ```ignore
-    /// let pair_tiles = GpuSupernodalParams::default().pair_tiles_on(dev.arch(), 8);
-    /// ```
+    /// The [`pair_tiles`](Self::pair_tiles) used on the device `arch` for a
+    /// factor of `fs`-byte scalars (4 or 8): the value set, else `true` on
+    /// an integrated GPU and the CPU device, and on a discrete GPU `true`
+    /// for an f64 factor, `false` for an f32 one.
     pub fn pair_tiles_on(&self, arch: &crate::Arch, fs: usize) -> bool {
         self.pair_tiles.unwrap_or(arch.integrated || fs == 8)
     }
 
-    /// [`lookahead`](Self::lookahead) on the device `arch`, unset: off.
-    /// Measured on an Apple M4 Pro: slower on bundle adjustment reduced
-    /// systems, as the two queues' synchronization costs more than the
-    /// overlap gains (Metal has no queue priorities, so the side's small
-    /// launches wait for the update's blocks to leave). On an NVIDIA
-    /// discrete GPU it pays only on the widest supernodes: with `syrk_block`
-    /// 256, Ladybug-1723's reduced system factors 8% faster in f32 and 1% in
-    /// f64, the smaller bundle adjustment systems 3 to 10% slower and SLAM
-    /// systems (up to 12000 poses) up to 1.5% slower; in blocks of 32, the
-    /// default there, it is always slower. On an AMD integrated GPU it is up
-    /// to 1% slower. The CPU device has one stream.
-    ///
-    /// ```ignore
-    /// let lookahead = GpuSupernodalParams::default().lookahead_on(dev.arch());
-    /// ```
+    /// The [`lookahead`](Self::lookahead) used on the device `arch`: the
+    /// value set, else `false` on every device.
     pub fn lookahead_on(&self, arch: &crate::Arch) -> bool {
         let _ = arch;
         self.lookahead.unwrap_or(false)
@@ -718,31 +700,31 @@ pub(crate) struct LevelWork {
 }
 
 /// Words per big update item ([`LevelWork::big_items`]).
-pub const BIG_ITEM: usize = 8;
+pub(crate) const BIG_ITEM: usize = 8;
 
 /// Words per pair tile item ([`LevelWork::pair_tiles`]).
-pub const PAIR_TILE: usize = 8;
+pub(crate) const PAIR_TILE: usize = 8;
 
 /// Words per item of the triangular solves over many blocks
 /// ([`LevelWork::wide_fwd`]).
-pub const TRSV_ITEM: usize = 4;
+pub(crate) const TRSV_ITEM: usize = 4;
 
 /// The most rows of a forward update item of the solves over many blocks:
 /// one a thread of the block.
-pub const TRSV_UPDATE_ROWS: u32 = 256;
+pub(crate) const TRSV_UPDATE_ROWS: u32 = 256;
 
 /// The most columns of a backward update item of the solves over many
 /// blocks, a warp per column.
-pub const TRSV_UPDATE_COLS: u32 = 32;
+pub(crate) const TRSV_UPDATE_COLS: u32 = 32;
 
 /// Words per gather row ([`LevelWork::g_rows`]).
-pub const GATHER_ROW: usize = 3;
+pub(crate) const GATHER_ROW: usize = 3;
 
 /// The most rows of a gather item: one a thread of the gather's block.
-pub const GATHER_ITEM_ROWS: u32 = 256;
+pub(crate) const GATHER_ITEM_ROWS: u32 = 256;
 
 /// Words per small update piece ([`LevelWork::pair_items`]).
-pub const PAIR_ITEM: usize = 11;
+pub(crate) const PAIR_ITEM: usize = 11;
 
 /// The least work (multiply-adds) a small update piece is cut down to.
 const MIN_PAIR_WORK: f64 = 2048.0;

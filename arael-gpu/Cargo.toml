@@ -3,11 +3,11 @@ name = "arael-gpu"
 version.workspace = true
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
-description = "arael's GPU runtime and kernels for CUDA and HIP: the block supernodal Cholesky, the Schur reduction and the LM loop's vector passes"
+description = "arael's GPU runtime and kernels for CUDA, HIP and Metal: the block supernodal Cholesky, the Schur reduction, conjugate gradients and the LM loop's vector passes"
 license = "MIT"
 repository = "https://github.com/harakas/arael"
 readme = "README.md"
-keywords = ["sparse", "cholesky", "gpu", "cuda", "hip"]
+keywords = ["cholesky", "gpu", "cuda", "hip", "metal"]
 categories = ["mathematics", "science", "algorithms"]
 
 [features]

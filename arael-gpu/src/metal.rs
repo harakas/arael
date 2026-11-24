@@ -1,32 +1,32 @@
-//! [`Device`] on Metal: the GPU of an Apple silicon Mac, through
-//! Metal.framework (objc2-metal). Metal ships with macOS, so nothing loads
-//! at run time and a build needs no Xcode.
+//! [`Device`] on Metal: the GPU of an Apple silicon Mac (M1 on), through
+//! Metal.framework. Metal ships with macOS, so nothing is installed for it
+//! and a build needs no Xcode.
 //!
-//! Kernels compile at run time from the same source as on CUDA and HIP,
-//! with arael_gpu.h's Metal branch in front and each entry's parameters
-//! rewritten into Metal's buffer bindings ([`signature`]). Metal has no
-//! f64: a factor is f32 and the wide scalar df32.
-//!
-//! The stream is one command queue, the side stream a second
-//! ([`crate::Lane`]). Launches are encoded into an open command buffer,
-//! committed when the host waits, every [`COMMIT_EVERY`] launches and when
-//! the next launch goes to the other queue. The buffers are untracked: each
-//! queue keeps its work in order with a fence, and a fork or join orders one
-//! queue after the other with an event. Memory is shared between the host
-//! and the GPU: a write when nothing is queued is a copy into the buffer,
-//! otherwise a copy queued behind the work before it, as on a CUDA stream;
-//! a read waits, then copies out of the buffer.
+//! Kernels compile at run time from the same source as on CUDA and HIP.
+//! Metal has no f64: a factor is f32 and the wide scalar df32. Memory is
+//! shared between the host and the GPU. The stream is a command queue, the
+//! side stream ([`crate::Lane`]) a second one.
 //!
 //! [`MetalDevice::time_kernels`] times each launch on the GPU, summed per
-//! kernel, and [`Device::time_launches`] each launch in order: a timed
-//! launch is a command buffer of its own, its GPU start to its end. A
-//! [`Device::stamp`] is a command buffer of one empty dispatch, whose GPU
-//! end marks when the main queue passed it.
+//! kernel; [`Device::time_launches`] times each launch in order.
 //!
 //! ```ignore
 //! let dev = arael_gpu::metal::MetalDevice::new(0)?;
 //! let k = dev.compile("KERNEL void k(GLOBAL float* x) { x[global_x()] = 1.0f; }", "", "k")?;
 //! ```
+
+// How it works. A source compiles with arael_gpu.h's Metal branch in front
+// and each entry's parameters rewritten into Metal's buffer bindings
+// (`signature`). Launches are encoded into an open command buffer,
+// committed when the host waits, every COMMIT_EVERY launches and when the
+// next launch goes to the other queue. The buffers are untracked: each
+// queue keeps its work in order with a fence, and a fork or join orders one
+// queue after the other with an event. A write when nothing is queued is a
+// copy into the buffer, otherwise a copy queued behind the work before it,
+// as on a CUDA stream; a read waits, then copies out of the buffer. A timed
+// launch is a command buffer of its own, its GPU start to its end. A stamp
+// is a command buffer of one empty dispatch, whose GPU end marks when the
+// main queue passed it.
 
 mod signature;
 
@@ -54,7 +54,7 @@ use signature::{Entry, Param};
 
 /// Launches per command buffer before it is committed without a wait, so
 /// the GPU starts while the host still encodes.
-pub const COMMIT_EVERY: usize = 128;
+pub(crate) const COMMIT_EVERY: usize = 128;
 
 /// Every buffer's storage: shared with the host, and untracked, its order
 /// the device's own ([`Stream`]).
@@ -129,8 +129,11 @@ struct Streams {
 /// was on.
 #[derive(Clone, Debug, PartialEq)]
 pub struct KernelTime {
+    /// The kernel's entry point.
     pub name: String,
+    /// Its launches timed.
     pub launches: usize,
+    /// Their GPU time in all, in seconds.
     pub seconds: f64,
 }
 
@@ -146,7 +149,8 @@ struct StampCb(Retained<ProtocolObject<dyn MTLCommandBuffer>>);
 // its stamps.
 unsafe impl Send for StampCb {}
 
-/// One Metal GPU and two command queues of its own ([`Streams`]).
+/// One Metal GPU and two command queues of its own: the stream and the side
+/// stream.
 pub struct MetalDevice {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     arch: Arch,
@@ -606,7 +610,7 @@ impl MetalDevice {
                 shared_bytes: device.maxThreadgroupMemoryLength() as u32,
                 multiprocessors: gpu_cores()?,
                 has_f64: false,
-                // measured: in safe math too (docs/dev/METAL_PLAN.md)
+                // Metal flushes subnormals, in safe math too
                 flushes_subnormals: true,
                 integrated: device.hasUnifiedMemory(),
             };
@@ -632,7 +636,7 @@ impl MetalDevice {
     /// Starts (`true`) or stops (`false`) timing each launch on the GPU,
     /// for [`take_kernel_times`](Self::take_kernel_times). A timed launch
     /// runs in a command buffer of its own, which the host waits for, so
-    /// launches no longer overlap one another or the host's encoding.
+    /// timed launches overlap neither one another nor the host's encoding.
     ///
     /// ```ignore
     /// dev.time_kernels(true);

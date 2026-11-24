@@ -4,10 +4,10 @@
 // The constraint kernels themselves are generated per model by arael's
 // macros and compiled after this source, with wide.h in front of it.
 //
-// The parameters, H and the gradient are in V, the root's scalar (wide.h:
-// f32 for an f32 root, as the CPU's route sums and keeps them), the cost's
-// terms and sums in the root's CACC (V, or W with `cost_f64`), the cost
-// itself and the references in W, the route's wide scalar, and no write is
+// The parameters, H and the gradient are in V, the model's scalar (wide.h:
+// f32 for an f32 model, as the host sums and keeps them), the cost's
+// terms and sums in the model's CACC (V, or W with `cost_f64`), the cost
+// itself and the references in W, the solve's wide scalar, and no write is
 // atomic. A constraint's instance kernel writes, per instance, its
 // residual rows and their derivative rows (a record of RECW values of F,
 // row after row: the residual, then each of its entities' derivatives in
@@ -123,7 +123,7 @@ DEVICE double arael_fast_atan2(double y, double x) { return arael_fast_atan2_t(y
 
 // The arm of n a select's index x picks (arael::utils::SelectIndex): the
 // integer in [0, n) x is, -1 for an integer outside them (the default
-// arm), -2 for a NaN, an infinity or a fraction (where the CPU panics).
+// arm), -2 for a NaN, an infinity or a fraction (where the host panics).
 template <typename T>
 DEVICE int arael_select_index(T x, u32 n) {
     if (isnan(x) || isinf(x) || x != floor(x)) return -2;
@@ -132,7 +132,7 @@ DEVICE int arael_select_index(T x, u32 n) {
 }
 
 // A quiet NaN of the argument's type, its value ignored: a select's value
-// where the CPU's select panics.
+// where the host's select panics.
 DEVICE float arael_nan_of(float) { return __int_as_float(0x7fc00000); }
 #if HAS_F64
 DEVICE double arael_nan_of(double) { return __longlong_as_double(0x7ff8000000000000LL); }
@@ -227,7 +227,7 @@ DEVICE void euler_compose(GLOBAL const T* RESTRICT refr, GLOBAL const F* RESTRIC
 
 // One Euler-angle rotation per thread, values only: what a cost evaluation
 // reads. In T, the reference's scalar: V for an EulerAngleParam (the
-// root's), W for a MixedEulerAngleParam (its wide state); e the thread's
+// model's), W for a MixedEulerAngleParam (its wide state); e the thread's
 // entity.
 template <typename T>
 DEVICE void euler_values(GLOBAL const T* RESTRICT refr, GLOBAL const F* RESTRICT ev, GLOBAL const u32* RESTRICT at,
@@ -729,7 +729,7 @@ KERNEL_THREADS(256) void k_zero_steps(GLOBAL V* RESTRICT x, GLOBAL const u32* RE
     }
 }
 
-// The block's sum of its threads' v into part[b], in C (the root's CACC):
+// The block's sum of its threads' v into part[b], in C (the model's CACC):
 // a shared-memory tree over a block of 256 threads, in `sh` (256 values of
 // the kernel's shared memory); t is the thread, b the block. Every thread
 // of the block calls it.
@@ -885,7 +885,7 @@ DEVICE void reduce_cross(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRIC
     tile_put(h, flip == 0 ? base + cb * stride + ra : base + ra * stride + cb, acc, (sw & TILE_STORE) != 0);
 }
 
-// The layout table: the byte offset of each of a root's ARAEL_COLS columns
+// The layout table: the byte offset of each of a model's ARAEL_COLS columns
 // in its block, a launch's parameter (TABLE_PARAM(ArgLayout) L) in every
 // generated constraint kernel.
 #ifdef ARAEL_COLS

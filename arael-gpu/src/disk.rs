@@ -31,8 +31,10 @@ pub(crate) struct DiskCache {
 /// to report ([`take_cache_failure`]).
 static FAILURE: Mutex<Option<(bool, String)>> = Mutex::new(None);
 
-/// The first failure to write a kernel cache entry since the last
-/// call, as a message; each process reports one at most.
+/// The process's first failure to write a kernel cache entry, as a
+/// message, on the first call after it; `None` before a failure and on
+/// every later call. A failed write leaves the kernel working; it is
+/// compiled again in the next process.
 pub fn take_cache_failure() -> Option<String> {
     let mut f = FAILURE.lock().unwrap_or_else(|e| e.into_inner());
     match f.as_mut() {

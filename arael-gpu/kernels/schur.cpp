@@ -3,9 +3,9 @@
 // arael-gpu/src/schur.rs over its plan. Compiled after schur.h, which
 // declares the plan's header, R and the functions shared with cg.cpp.
 //
-// H, the gradient and the step are in V, the route's values (wide.h); the
+// H, the gradient and the step are in V, the solve's values (wide.h); the
 // reduction computes in R (schur.h) and keeps its vectors in R; the
-// refinement's norms and state are in W, the route's wide scalar. Compiled per EWX (the widest
+// refinement's norms and state are in W, the solve's wide scalar. Compiled per EWX (the widest
 // eliminated block), EW (it rounded up to 4, 8, 16, 32 or 64), KW (the
 // widest kept block, rounded likewise), TILE_LANES (k_schur_tiles' threads
 // per unit: the device's lockstep width, 32 or 64), TILE_WARPS (its units

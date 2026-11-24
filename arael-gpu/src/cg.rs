@@ -7,14 +7,15 @@
 //! preconditioner (the Cholesky factor of each diagonal tile of S), its
 //! stopping rule and its settings ([`CgParams`]); the vectors are in the
 //! reduction's scalar ([`GpuSchur::reduced`]), the dot products in the
-//! route's wide scalar. The kernels are `kernels/cg.cpp`.
+//! solve's wide scalar.
 //!
-//! The number of iterations is data, so the scalars and the decision to
-//! stop stay on the device: the kernels of an iteration return at once when
-//! the solve has stopped. A round queues the launches of some iterations
-//! (replays of one captured graph of [`GpuCgParams::graph_iters`]) and
-//! reads the status, the one wait of the round; a solve takes as many
-//! rounds as it needs, usually one, sized from the solve before it.
+//! The scalars and the decision to stop stay on the device: the kernels of
+//! an iteration do nothing once the solve has stopped. A round queues the
+//! launches of some iterations (replays of one captured graph of
+//! [`GpuCgParams::graph_iters`] iterations) and reads the status, the one
+//! wait of the round. A solve takes as many rounds as it needs; the first
+//! round queues enough iterations for the solve before it and a quarter
+//! more.
 //!
 //! ```ignore
 //! let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), Wide::F64)?;
@@ -69,17 +70,29 @@ pub const CG_STATUS_BYTES: usize = 8 * N_STATE + 4 * N_FLAGS;
 /// 1024 threads.
 const MAX_MATVEC_WARPS: u32 = 32;
 
-/// How [`GpuCg`] queues its iterations and cuts its product with S.
+/// The settings of a [`GpuCg`] beyond [`CgParams`]: how it queues its
+/// iterations and how it cuts its product with S.
+///
+/// ```
+/// use arael_gpu::GpuCgParams;
+/// // a status read after every 4 iterations
+/// let params = GpuCgParams { graph_iters: 4, first_iters: 4, ..Default::default() };
+/// assert_eq!(params.matvec_warps, None);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GpuCgParams {
-    /// Iterations in the captured graph a round replays.
+    /// Iterations in the captured graph a round replays, at least 1; a
+    /// round queues a whole number of graphs. Default 8.
     pub graph_iters: u32,
-    /// Iterations queued before the first status read of the first solve;
-    /// a later solve starts from the count of the solve before it.
+    /// Iterations the first round of the first solve queues, rounded up to
+    /// whole graphs; the first round of a later solve queues the iterations
+    /// of the solve before it and a quarter more. Default 16.
     pub first_iters: u32,
-    /// Warps (32 threads) a kept block takes in the product with S, 1 to
-    /// 32; `None` takes [`Self::matvec_warps_for`]'s. Kept blocks wider
-    /// than 32 columns take one.
+    /// Warps (32 threads) a kept block takes in the product with S: 1 to
+    /// 32. `None` (the default) takes the power of two that gives each lane
+    /// group (a lane per row of the block) about 8 of the average kept
+    /// block's tile entries, at most 8. Kept blocks wider than 32 columns
+    /// take one warp.
     pub matvec_warps: Option<u32>,
 }
 
@@ -87,14 +100,13 @@ impl GpuCgParams {
     /// [`matvec_warps`](Self::matvec_warps), unset: from the tile entries
     /// the `kept_blocks` kept blocks have in all (`tile_entries`) and
     /// their width rounded up (`kw_cap`, at most 32), by
-    /// [`kept_warps_for`](crate::schur::kept_warps_for), up to 8 (more
-    /// measured no faster for the product).
+    /// [`kept_warps_for`](crate::schur::kept_warps_for), up to 8.
     ///
     /// ```ignore
     /// // 372 cameras of 9 parameters, 54692 tile entries: 8 warps
     /// assert_eq!(GpuCgParams::default().matvec_warps_for(54692, 372, 16), 8);
     /// ```
-    pub fn matvec_warps_for(&self, tile_entries: usize, kept_blocks: usize, kw_cap: usize) -> u32 {
+    pub(crate) fn matvec_warps_for(&self, tile_entries: usize, kept_blocks: usize, kw_cap: usize) -> u32 {
         self.matvec_warps.unwrap_or_else(|| crate::schur::kept_warps_for(tile_entries, kept_blocks, kw_cap, 8))
     }
 }
@@ -119,7 +131,9 @@ pub struct CgStatus {
     /// a direction (or a value is not a number), and the solve stopped
     /// with the iterate it had.
     pub breakdown: bool,
-    /// `r^T M^-1 r` relative to its starting value.
+    /// `r^T M^-1 r` relative to its starting value (`M` the
+    /// preconditioner): 0 for a right-hand side of zero, NaN for one that
+    /// is not finite.
     pub relative_residual: f64,
 }
 
@@ -129,11 +143,12 @@ pub struct GpuCgStats {
     /// Iterations run, each one product with S.
     pub iters: usize,
     /// Whether the tolerance was met. `false` at the iteration cap or after
-    /// a breakdown; the solution is then the best iterate.
+    /// a breakdown; the solution is then the last iterate.
     pub converged: bool,
     /// [`CgStatus::breakdown`].
     pub breakdown: bool,
-    /// `r^T M^-1 r` at the end, relative to its starting value.
+    /// `r^T M^-1 r` at the end, relative to its starting value
+    /// ([`CgStatus::relative_residual`]).
     pub relative_residual: f64,
     /// Status reads: the waits the iterations took.
     pub rounds: usize,
@@ -168,9 +183,42 @@ struct Sections {
     bytes: usize,
 }
 
-/// Conjugate gradients on the reduced system of one [`GpuSchur`]: the
-/// preconditioner's factors, the iteration's vectors and its state on the
-/// device, made in [`new`](Self::new).
+/// Conjugate gradients on the reduced system of one [`GpuSchur`], in place
+/// of a factor ([module docs](self)). Build it once per reduction, then
+/// call [`solve`](Self::solve) once per damped attempt: from H's tile
+/// values and the gradient on the host to the step.
+///
+/// The parts of a solve can also be queued by hand, for a caller whose H
+/// and gradient are already on the device, or that reads results of its
+/// own with each status. [`run`](Self::run) does the rounds below.
+///
+/// ```ignore
+/// use arael_gpu::{CgParams, GpuCg, GpuCgParams, cg::CG_STATUS_BYTES};
+///
+/// let mut cg = GpuCg::new(&schur, &CgParams::default(), &GpuCgParams::default())?;
+/// let stats = cg.solve(&mut schur, &hvals, &rhs, &mut delta)?;
+///
+/// // the same by hand
+/// schur.upload(&hvals, &rhs)?;
+/// schur.launch_reduce()?;
+/// cg.launch_start(&schur)?;
+/// let (mut graphs, mut queued) = (cg.first_graphs(), 0);
+/// let status = loop {
+///     cg.queue(&schur, graphs)?;
+///     queued += graphs;
+///     let mut bytes = [0u8; CG_STATUS_BYTES];
+///     let (block, at) = cg.status_view();
+///     dev.read(block, at, &mut bytes)?; // the round's wait
+///     let status = cg.status(&bytes);
+///     if !status.active {
+///         break status;
+///     }
+///     graphs = cg.more_graphs(queued);
+/// };
+/// cg.note_iterations(status.iters);
+/// schur.launch_backsub()?;
+/// // the step at schur.step_view(), the status at schur.status_view() (GpuSchur::outcome)
+/// ```
 pub struct GpuCg<D: Device> {
     /// The launches of [`GpuCgParams::graph_iters`] iterations as a graph;
     /// first, so it is dropped before the blocks it records.
@@ -203,13 +251,15 @@ pub struct GpuCg<D: Device> {
 
 impl<D: Device> GpuCg<D> {
     /// Conjugate gradients under `cg` on the reduced system of `gs`, on
-    /// its device, with the vectors, the preconditioner's factors and the
-    /// kernels. A reduction that keeps no block has nothing to iterate: its
-    /// solve converges at once.
+    /// its device, with the settings `params`: the device memory allocated
+    /// and the kernels compiled. A reduction that keeps no block has
+    /// nothing to iterate: its solve converges at once. A compile or driver
+    /// error comes back as is.
     ///
     /// # Panics
     ///
-    /// When [`GpuCgParams::graph_iters`] is 0.
+    /// When [`GpuCgParams::graph_iters`] is 0, or
+    /// [`GpuCgParams::matvec_warps`] is not 1 to 32.
     pub fn new(gs: &GpuSchur<D>, cg: &CgParams, params: &GpuCgParams) -> Result<Self, GpuError> {
         let dev = gs.device();
         let rs = gs.reduced_system();
@@ -313,13 +363,15 @@ impl<D: Device> GpuCg<D> {
         })
     }
 
-    /// The settings the solves run under.
+    /// The conjugate gradient settings the solves run under, as given to
+    /// [`new`](Self::new) (the [`CgParams`], not the [`GpuCgParams`]).
     pub fn params(&self) -> &CgParams {
         &self.cg
     }
 
-    /// Whether [`queue`](Self::queue) captures the iterations' launches as
-    /// a graph and replays it (the default).
+    /// Turns graphs on (the default) or off for [`queue`](Self::queue).
+    /// With graphs, the iterations' launches are captured once as a graph
+    /// and replayed.
     pub fn use_graphs(&mut self, on: bool) {
         self.graphs = on;
         if !on {
@@ -449,14 +501,15 @@ impl<D: Device> GpuCg<D> {
     }
 
     /// The graphs a round queues after `queued` of them left the solve
-    /// unfinished: as many again. An iteration launched after the stop
-    /// costs little against a round's wait (measured on an NVIDIA discrete
-    /// GPU: about 3 us against 100), so a miss doubles what is queued.
+    /// unfinished: as many again, so each round doubles what is queued.
+    /// The iterations launched after the solve has stopped do nothing.
     pub fn more_graphs(&self, queued: u32) -> u32 {
         queued.max(1)
     }
 
-    /// The iterations a finished solve took, the next one's first guess.
+    /// Records `iters`, the iterations a finished solve took, for the next
+    /// solve's [`first_graphs`](Self::first_graphs). [`run`](Self::run)
+    /// records them itself.
     pub fn note_iterations(&mut self, iters: usize) {
         self.last = Some(iters.min(u32::MAX as usize) as u32);
     }
@@ -519,9 +572,16 @@ impl<D: Device> GpuCg<D> {
     /// gradients, the eliminated blocks recovered, and the full step read
     /// into `delta` (left as it was by a failed solve).
     ///
-    /// An eliminated block that is not positive definite is
-    /// [`GpuSchurError::Eliminated`], a diagonal tile of S that is not
-    /// [`GpuSchurError::Reduced`]: the caller raises the damping.
+    /// A solve that reaches the iteration cap ([`CgParams::max_iters`]) or
+    /// breaks down returns `Ok` with [`GpuCgStats::converged`] `false` and
+    /// the step of the last iterate. An eliminated block that is not positive
+    /// definite is [`GpuSchurError::Eliminated`], a diagonal tile of S that
+    /// is not [`GpuSchurError::Reduced`]: the caller raises the damping.
+    ///
+    /// # Panics
+    ///
+    /// When `gs` is not the reduction this was built over, or `hvals`,
+    /// `rhs` or `delta` has another length than [`GpuSchur::solve`] takes.
     pub fn solve<M: SchurReal + 'static>(&mut self, gs: &mut GpuSchur<D>, hvals: &[M], rhs: &[M], delta: &mut [M]) -> Result<GpuCgStats, GpuSchurError> {
         gs.start_solve(hvals, rhs)?;
         gs.launch_reduce()?;

@@ -1,34 +1,38 @@
-//! [`GpuSchur`]: the Schur reduction on the device, generic over block
-//! widths, with the reduced system kept on the device for the factorization,
-//! the refinement and the back-substitution.
+//! [`GpuSchur`]: the Schur reduction of a damped system on the device, and
+//! the solve around it.
 //!
-//! From H and the gradient in the route's [`Values`] (f32 for an f32 root,
-//! else the wide scalar), formed in the route's wide scalar ([`Wide`]:
-//! `f64` or df32), as an f32 factor's refinement measures its residuals
-//! against S, or in f32 for an f32 solve that does not refine, as the CPU's
-//! f32 route ([`GpuSchurParams::f32_reduction`]).
-//! Per reduction, from the Hessian's tile values and the gradient:
+//! The reduction splits the parameter blocks into eliminated blocks (in
+//! bundle adjustment the points) and kept blocks (the cameras). An observer
+//! is a coupling tile `C_o` of H between an eliminated block `e` and a kept
+//! block `k`. S, the reduced system, is H over the kept blocks less the
+//! eliminated blocks' part. A solve from H's tile values and the gradient
+//! `b`, all on the device:
 //!
-//!   elim      one unit per eliminated block: the Cholesky factor of `D_e`,
-//!             and `z_e = D_e^-1 b_e`
-//!   w         one unit per observer: `W_o = C_o D_e^-1`
-//!   tiles     one plane per tile of S: `S(a, b) = H(a, b) - sum over the
-//!             pairs (oa, ob) of its list of W_oa C_ob^T`, the pair lists
-//!             built once on the host; no shared write
-//!   rhs       one plane per kept block: `b_k - sum over its observers of
-//!             C_o z_e`
-//!   backsub   one unit per eliminated block: `x_e = D_e^-1 (b_e - sum_a C_a^T x_a)`
+//! 1. each eliminated block's diagonal tile `D_e` is factored (Cholesky),
+//!    and `z_e = D_e^-1 b_e`;
+//! 2. per observer, `W_o = C_o D_e^-1`;
+//! 3. each tile of S is H's tile less `W_oa C_ob^T` over the pairs of
+//!    observers `(oa, ob)` of one eliminated block that touch it;
+//! 4. the reduced right-hand side is `b_k` less `C_o z_e` over the kept
+//!    block's observers;
+//! 5. S is factored and solved for the kept blocks' step `x_k` (a
+//!    [`GpuFactor`], or [`GpuCg`](crate::GpuCg)), and the solution may be
+//!    refined against S (for an f32 factor);
+//! 6. the eliminated blocks' step is `x_e = D_e^-1 (b_e - sum of C_o^T x_k)`
+//!    over the block's observers.
 //!
-//! `D_e^-1` is applied by two triangular solves with its factor, as on the
-//! CPU, never as an explicit inverse: multiplying by a rounded inverse loses
-//! digits in proportion to `D_e`'s condition number, high for a point seen
-//! along nearly parallel rays.
+//! `D_e^-1` is applied by two triangular solves with `D_e`'s factor. H and
+//! the gradient are in the solve's [`Values`]; S and its vectors in the
+//! wide scalar ([`Wide`]), or in f32 with
+//! [`GpuSchurParams::f32_reduction`]. Blocks are at most 64 columns wide.
 //!
-//! A block symv over the tiles of S gives the refinement its residual on the
-//! device, and one-block norm kernels decide there whether the next step is
-//! due, so a solve with an f32 factor waits only for its result either:
-//! [`GpuSchur::solve`] reads the step, the pivot flags and the refinement's
-//! state in one copy.
+//! The refinement decides on the device whether its next step is due, so a
+//! solve waits once: [`GpuSchur::solve`] reads the step, the pivot flags and
+//! the refinement's state in one copy.
+
+// D_e^-1 is never formed: multiplying by a rounded inverse loses digits in
+// proportion to D_e's condition number, high for a point seen along nearly
+// parallel rays.
 
 use std::sync::Arc;
 
@@ -84,8 +88,7 @@ pub(crate) const SHEADER: usize = 32;
 // grouped by tile (ST_PAIR_PTR), a tile's pairs in no fixed order: written
 // on the device once per structure (`k_schur_pairs`, from the observers'
 // records) into a block of their own, so the tile kernel reads a pair in
-// one step and the host neither builds nor uploads the pairs (at slam-900,
-// 4.25 M pairs, 20 ms of host writes and 34 MB of upload).
+// one step and the host neither builds nor uploads the pairs.
 /// The value offset of W_oa in w.
 pub(crate) const PX_W_OFF: usize = 0;
 /// The value offset of ob's coupling tile in h.
@@ -180,44 +183,63 @@ fn kt_dims(wr: u32, wc: u32, trans: bool, diag: bool) -> u32 {
     wr | wc << 8 | (trans as u32) << 16 | (diag as u32) << 17
 }
 
-/// How [`GpuSchur`] cuts the forming of S (`k_schur_tiles`), whose
-/// lockstep units (the device's lockstep width of threads each) take a tile
-/// of S each. The defaults are the measured ones, lowered where the
-/// kernel's shared memory would not fit the device ([`Arch::shared_bytes`]:
-/// units per block first, then lane groups); a value set here that does
-/// not fit is [`GpuError::Limit`].
+/// The settings of a [`GpuSchur`] ([`GpuSchur::with_params`],
+/// [`GpuSchur::whole_with_params`]): how the forming of S is cut over the
+/// device, the scalar of the reduction, and the warps a kept block takes.
 ///
+/// S is formed a tile at a time, each tile by a unit of threads of the
+/// device's lockstep width ([`Arch::warp`], at least 32), which sums the
+/// tile's pairs: the pairs of observers of one eliminated block, a term of
+/// the tile each. When the kernel's shared memory would not fit the device
+/// ([`Arch::shared_bytes`]), a default `tile_warps` is lowered first, then
+/// a default `tile_groups`; a value set here that does not fit makes the
+/// constructor return [`GpuError::Limit`].
+///
+/// ```
+/// use arael_gpu::GpuSchurParams;
+/// // one lane group per unit, the rest as the device has it
+/// let params = GpuSchurParams { tile_groups: Some(1), ..Default::default() };
+/// assert_eq!(params.split_pairs, 128);
+/// ```
+///
+/// [`Arch::warp`]: crate::Arch::warp
 /// [`Arch::shared_bytes`]: crate::Arch::shared_bytes
 #[derive(Clone, Copy, Debug)]
 pub struct GpuSchurParams {
-    /// Units per block; `None` takes the device's choice
+    /// Units per block of the forming of S, at least 1. With several, a
+    /// tile of more than [`split_pairs`](Self::split_pairs) pairs takes a
+    /// whole block, split over its units, and the other tiles a unit each.
+    /// `None` (the default) takes the device's value
     /// ([`Self::tile_warps_on`]).
     pub tile_warps: Option<u32>,
-    /// The most pairs of a tile that one unit sums, with more than one unit
-    /// per block: a tile with more takes a whole block.
+    /// The most pairs a tile may have and still take one unit of a block of
+    /// several ([`tile_warps`](Self::tile_warps)); a tile with more takes a
+    /// whole block. Default 128.
     pub split_pairs: u32,
-    /// Lane groups per unit, 1, 2, 4 or 8: each group takes a different pair
+    /// Lane groups per unit: 1, 2, 4 or 8. Each group sums different pairs
     /// of the tile, and the groups' sums are added at the tile's end. More
     /// groups leave fewer lanes idle on small tiles (a 6 x 6 tile on 32
-    /// lanes: 36 of 64 lane-products busy with one group, 36 of 48 with
-    /// two) and take more registers and shared memory. `None`: two groups
-    /// when they issue more than 10% fewer products over the plan's tiles
-    /// than one, else one (measured: two on SLAM, one on bundle
-    /// adjustment; four slower than two on both).
+    /// lanes keeps 36 of 64 lane-products busy with one group, 36 of 48
+    /// with two) and take more registers and shared memory. `None` (the
+    /// default) takes two when they issue more than 10% fewer products over
+    /// the reduction's tiles than one, else one.
     pub tile_groups: Option<u32>,
-    /// Whether the reduction computes in f32, as the CPU's f32 route: the
-    /// eliminated blocks' factors, W, S, the reduced right-hand side, the
-    /// kept blocks' solution and the eliminated blocks' step, from the
-    /// inputs rounded to f32 (an f32 root's [`Values`] already are), all
-    /// stored in f32 (the step in the route's values). For a solve whose
+    /// Whether the reduction computes in f32, as the host's f32 solve does:
+    /// the eliminated blocks' factors, W, S, the reduced right-hand side,
+    /// the kept blocks' solution and the eliminated blocks' step, from the
+    /// inputs rounded to f32 (an f32 model's [`Values`] already are), all
+    /// stored in f32 (the step in the solve's values). For a solve whose
     /// factor is f32 and that does not refine against S (a refined solve
-    /// panics), or by conjugate gradients in f32. Off: in the wide scalar.
+    /// panics), or by conjugate gradients in f32. Default `false`: the
+    /// reduction computes in the wide scalar.
     pub f32_reduction: bool,
-    /// Warps (32 threads) a kept block takes in the kernels whose lanes
-    /// are its rows, the reduced right-hand side (over the block's
-    /// observers) and the refinement's residual (over its tiles of S), 1
-    /// to 32; `None` takes [`kept_warps_for`]'s for each. Kept blocks
-    /// wider than 32 columns take one.
+    /// Warps (32 threads) a kept block takes in the kernels with a lane per
+    /// row of the block: the reduced right-hand side (over the block's
+    /// observers) and the refinement's residual (over its tiles of S). 1 to
+    /// 32. `None` (the default) takes, per kernel, the power of two that
+    /// gives each lane group about 8 of the average kept block's items, at
+    /// most 32 for the right-hand side and 8 for the residual. Kept blocks
+    /// wider than 32 columns take one warp.
     pub kept_warps: Option<u32>,
 }
 
@@ -228,20 +250,15 @@ pub(crate) const MAX_KEPT_WARPS: u32 = 32;
 /// The warps (32 threads) a kept block takes in a kernel whose lanes are
 /// its rows, from the items (observers, or tiles of S) the `blocks` kept
 /// blocks have in all and their width rounded up (`kw_cap`, at most 32): a
-/// power of two, 1 to `most`.
-///
-/// A warp is `32 / kw_cap` groups of lanes, a lane a row of the block, and
-/// a group takes an item at a time. The choice gives a group about 8 items.
-/// Measured on an NVIDIA discrete GPU, on bundle adjustment's camera
-/// systems and a SLAM map's pose system: the kernels are fastest near
-/// there, 2 to 3 times as fast as with one warp. On an AMD integrated GPU
-/// the warps make no difference.
+/// power of two, 1 to `most`, that gives a group of lanes about 8 items. A
+/// warp is `32 / kw_cap` groups of lanes, a lane a row of the block, and a
+/// group takes an item at a time.
 ///
 /// ```ignore
 /// // 372 cameras of 9 parameters (two groups a warp), 147 tiles of S each
 /// assert_eq!(kept_warps_for(54692, 372, 16, 8), 8);
 /// ```
-pub fn kept_warps_for(items: usize, blocks: usize, kw_cap: usize, most: u32) -> u32 {
+pub(crate) fn kept_warps_for(items: usize, blocks: usize, kw_cap: usize, most: u32) -> u32 {
     let groups = (PLANE as usize / kw_cap).max(1);
     let warps = items / (blocks.max(1) * 8 * groups);
     // the power of two at or under it
@@ -249,17 +266,10 @@ pub fn kept_warps_for(items: usize, blocks: usize, kw_cap: usize, most: u32) -> 
 }
 
 impl GpuSchurParams {
-    /// [`tile_warps`](Self::tile_warps) on the device `arch`, unset: 4 on a
-    /// discrete GPU, 1 on an integrated one. Measured on bundle adjustment
-    /// and SLAM: on an NVIDIA discrete GPU, 4 units, heavy tiles split over
-    /// a block, cut the reduction's tail (`k_schur_tiles` 36% faster on
-    /// Ladybug-372, 18% on slam); on an AMD integrated GPU, with nothing to
-    /// fill, a block per tile in storage order measured fastest. Discrete
-    /// AMD GPUs are not measured.
-    ///
-    /// ```ignore
-    /// let units = GpuSchurParams::default().tile_warps_on(dev.arch());
-    /// ```
+    /// The [`tile_warps`](Self::tile_warps) used on the device `arch`: the
+    /// value set, else 4 on a discrete GPU, 1 on an integrated GPU and the
+    /// CPU device. [`GpuSchur::tile_warps`] gives the value a reduction
+    /// took after the fit to the device's shared memory.
     pub fn tile_warps_on(&self, arch: &crate::Arch) -> u32 {
         self.tile_warps.unwrap_or(if arch.integrated { 1 } else { 4 })
     }
@@ -292,14 +302,19 @@ pub(crate) const FLAGS_AT: usize = 64;
 /// refinement's state and the flags, for [`GpuSchur::outcome`].
 pub const STATUS_BYTES: usize = FLAGS_AT + 4 * N_FLAGS;
 
-/// What a refined solve took: steps, the final and the right-hand side's
-/// norm, and whether it stayed above the tolerance (`short`; a norm that is
-/// not a number is).
+/// What the refinement of a solve took ([`GpuSchur::solve`]); all zero for
+/// a solve without one.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RefineStats {
+    /// Refinement steps run, a step undone for not reducing the residual
+    /// among them.
     pub steps: usize,
+    /// The norm of the residual `b - S x` of the reduced system at the end.
     pub rnorm: f64,
+    /// The norm of the reduced right-hand side `b`.
     pub bnorm: f64,
+    /// Whether `rnorm` stayed above the tolerance; a norm that is not a
+    /// number does.
     pub short: bool,
 }
 
@@ -451,8 +466,8 @@ impl SchurPlan {
         // pointers (nt + 1), the observers' kept blocks and the kept
         // blocks' observers (no each), the kept blocks' observer pointers
         // and first tiles (nk + 1 each) and three words each (nk), the
-        // eliminated blocks' pair pointers (ne + 1); a reallocation of
-        // the buffer cost 10 ms at Ladybug-1723
+        // eliminated blocks' pair pointers (ne + 1); sized once, so the
+        // buffer is never reallocated
         let nt = sym.s.nblocks();
         let words = at_so + SO_REC * no + 7 * nt + 1 + 2 * no + 2 * (nk + 1) + 3 * nk + ne + 1;
         let mut buf: Vec<u32> = Vec::with_capacity(words);
@@ -623,6 +638,7 @@ pub enum GpuSchurError {
     /// The reduced system is not positive definite; the caller raises the
     /// damping.
     Reduced,
+    /// A device operation failed.
     Device(GpuError),
 }
 
@@ -728,12 +744,44 @@ pub(crate) struct ReducedSystem<'a, D: Device> {
     pub kt_entries: usize,
 }
 
-/// The device plan of a [`SchurSymbolic`] and the device state of one
-/// reduction on a [`Device`]: the Hessian's values and gradient as
-/// uploaded, the eliminated blocks' Cholesky factors, W, S and the reduced
-/// right-hand side, the
-/// solution. Every device buffer is made in [`new`](Self::new): the plan in
-/// one block, uploaded in one copy, and the rest in a work block.
+/// The Schur reduction of one sparsity structure on a [`Device`], and the
+/// damped solves around it ([module docs](self)). Build it once per
+/// structure, then call [`solve`](Self::solve) once per damped attempt:
+/// from H's tile values and the gradient on the host to the step, with one
+/// wait. Every device buffer is made in [`new`](Self::new).
+///
+/// The parts of a solve can also be queued one by one, without a wait, for
+/// a caller whose H and gradient are already on the device (written at
+/// [`h_target`](Self::h_target) and [`rhs_target`](Self::rhs_target)) or
+/// that solves S another way: [`launch_reduce`](Self::launch_reduce), a
+/// solve of S ([`launch_factored`](Self::launch_factored), or
+/// [`GpuCg`](crate::GpuCg)), [`launch_backsub`](Self::launch_backsub).
+/// The step is then at [`step_view`](Self::step_view) and the status at
+/// [`status_view`](Self::status_view), to read together and hand to
+/// [`outcome`](Self::outcome).
+///
+/// ```ignore
+/// use arael_gpu::{GpuFactor, GpuPrecision, GpuSchur, GpuSchurError, Wide, schur::STATUS_BYTES};
+///
+/// let mut schur = GpuSchur::new(&dev, &schur_sym, h.symbolic(), Wide::F64)?;
+/// let mut factor = GpuFactor::new(&dev, GpuPrecision::F32, &sn_of_s, &schur_sym.s, &Default::default(), Wide::F64)?;
+/// let refine = Some((4, 1e-10));
+/// match schur.solve(&mut factor, &hvals, &rhs, refine, &mut delta) {
+///     Ok(stats) => {}                                                          // delta holds the step
+///     Err(GpuSchurError::Eliminated { .. } | GpuSchurError::Reduced) => {}     // raise the damping
+///     Err(GpuSchurError::Device(e)) => return Err(e.into()),
+/// }
+///
+/// // the same by parts
+/// schur.upload(&hvals, &rhs)?;
+/// schur.launch_reduce()?;
+/// schur.launch_factored(&factor, refine)?;
+/// schur.launch_backsub()?;
+/// let (mut step, mut status) = (vec![0u8; schur.values().bytes() * schur.dim()], [0u8; STATUS_BYTES]);
+/// let ((sb, sa), (tb, ta)) = (schur.step_view(), schur.status_view());
+/// dev.read_many(&mut [(sb, sa, &mut step[..]), (tb, ta, &mut status[..])])?;  // the one wait
+/// let stats = schur.outcome(&status, refine)?;
+/// ```
 pub struct GpuSchur<D: Device> {
     /// The last attempt's launches as a graph, with what it was captured
     /// against; first, so it is dropped before the blocks it records.
@@ -809,32 +857,52 @@ pub struct GpuSchur<D: Device> {
 }
 
 impl<D: Device> GpuSchur<D> {
-    /// The device plan of `sym`, the reduction of a matrix with the block
-    /// structure `hsym`, uploaded to `dev`, with the reduction's blocks and
-    /// kernels, for a route of `values` (a [`Wide`] for an f64 root's).
+    /// The reduction on `dev` of a matrix of block structure `hsym` (H's),
+    /// as arael-faer's symbolic Schur analysis `sym` of it splits the
+    /// blocks, for a solve of `values` (a [`Wide`] for an f64 model): the
+    /// plan uploaded, the device memory allocated, the kernels compiled.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError::Unavailable`] for [`Wide::F64`] on a device without f64;
+    /// [`GpuError::Limit`] when the reduction's records do not fit 32-bit
+    /// word offsets, or the forming of S needs more shared memory than the
+    /// device has; a compile or driver error.
+    ///
+    /// # Panics
+    ///
+    /// When a block is wider than 64 columns.
     pub fn new(dev: &Arc<D>, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, values: impl Into<Values>) -> Result<Self, GpuError> {
         Self::with_params(dev, sym, hsym, values, &GpuSchurParams::default())
     }
 
-    /// [`new`](Self::new) with the work cut by `params`.
+    /// [`new`](Self::new) with the settings `params`. A `tile_warps` or
+    /// `tile_groups` set that does not fit the device's shared memory is
+    /// [`GpuError::Limit`].
     ///
     /// ```ignore
     /// let params = GpuSchurParams { tile_groups: Some(1), ..Default::default() };
     /// let g = GpuSchur::with_params(&dev, &sym, h.symbolic(), Wide::F64, &params)?;
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// As [`new`](Self::new), and for `params` out of range: `tile_warps`
+    /// 0, `tile_groups` not 1, 2, 4 or 8, `kept_warps` not 1 to 32.
     pub fn with_params(dev: &Arc<D>, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, values: impl Into<Values>, params: &GpuSchurParams) -> Result<Self, GpuError> {
         Self::build(dev, SchurPlan::reduction(sym, hsym), hsym.val_count(), values.into(), params)
     }
 
     /// [`new`](Self::new) with nothing eliminated: S is H, and a solve is
-    /// the whole system's.
+    /// the whole system's. Errors and panics as [`new`](Self::new).
     pub fn whole(dev: &Arc<D>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, values: impl Into<Values>) -> Result<Self, GpuError> {
         Self::whole_with_params(dev, hsym, values, &GpuSchurParams::default())
     }
 
-    /// [`whole`](Self::whole) with `params`: with
+    /// [`whole`](Self::whole) with the settings `params`, as
+    /// [`with_params`](Self::with_params) takes them: with
     /// [`GpuSchurParams::f32_reduction`], S (H) and the solve's vectors in
-    /// f32, as the CPU's f32 route.
+    /// f32, as the host's f32 solve keeps them.
     ///
     /// ```ignore
     /// let params = GpuSchurParams { f32_reduction: true, ..Default::default() };
@@ -885,7 +953,7 @@ impl<D: Device> GpuSchur<D> {
         // the tile blocks, a word holding 1 and the kept blocks' tile lists
         // follow the plan's words, each from a 256-byte boundary, in a tail
         // written apart from them: appending to the plan's words would
-        // reallocate them (10 ms at Ladybug-1723)
+        // reallocate them
         let base = words.len();
         let mut tail: Vec<u32> = Vec::new();
         let mut put = |v: &[u32]| {
@@ -1159,8 +1227,9 @@ impl<D: Device> GpuSchur<D> {
     }
 
     /// The Hessian's tile values as the last upload or device assembly left
-    /// them, read back (for diagnostics).
-    pub fn h_values(&self) -> Result<Vec<f64>, GpuError> {
+    /// them, read back.
+    #[cfg(test)]
+    pub(crate) fn h_values(&self) -> Result<Vec<f64>, GpuError> {
         let mut bytes = vec![0u8; self.values.bytes() * self.nh];
         self.dev.read(&self.work, self.sec.h, &mut bytes)?;
         let mut v = vec![0.0f64; self.nh];
@@ -1168,8 +1237,9 @@ impl<D: Device> GpuSchur<D> {
         Ok(v)
     }
 
-    /// S's values and the reduced right-hand side read back (for tests).
-    pub fn download(&self) -> Result<(Vec<f64>, Vec<f64>), GpuError> {
+    /// S's values and the reduced right-hand side read back.
+    #[cfg(test)]
+    pub(crate) fn download(&self) -> Result<(Vec<f64>, Vec<f64>), GpuError> {
         Ok((self.read_reduced(self.sec.s, self.s_len)?, self.read_reduced(self.sec.rhs_kept, self.nks)?))
     }
 
@@ -1181,6 +1251,7 @@ impl<D: Device> GpuSchur<D> {
 
     /// `n` values of [`reduced`](Self::reduced) of the work block from byte
     /// `at` on, read back.
+    #[cfg(test)]
     fn read_reduced(&self, at: usize, n: usize) -> Result<Vec<f64>, GpuError> {
         let r = self.reduced();
         let mut bytes = vec![0u8; r.bytes() * n];
@@ -1195,10 +1266,16 @@ impl<D: Device> GpuSchur<D> {
         self.sec.out + self.status_at + FLAGS_AT + 4 * f
     }
 
-    /// Write the Hessian's tile values (`hsym`'s value count) and the
-    /// gradient at [`h_target`](Self::h_target) and
-    /// [`rhs_target`](Self::rhs_target), in [`values`](Self::values), for
-    /// [`launch`](Self::launch) (no wait).
+    /// Writes the Hessian's tile values `hvals`, in the storage order of the
+    /// structure the reduction was built for, and the gradient `rhs` at
+    /// [`h_target`](Self::h_target) and [`rhs_target`](Self::rhs_target),
+    /// converted to [`values`](Self::values), for the launches after it
+    /// (no wait).
+    ///
+    /// # Panics
+    ///
+    /// When `hvals` is not the structure's value count or `rhs` not
+    /// [`dim`](Self::dim) values.
     pub fn upload<M: SchurReal + 'static>(&mut self, hvals: &[M], rhs: &[M]) -> Result<(), GpuError> {
         assert_eq!(hvals.len(), self.nh, "the Hessian's values, in the structure the reduction was built for");
         assert_eq!(rhs.len(), self.n);
@@ -1252,10 +1329,12 @@ impl<D: Device> GpuSchur<D> {
         self.run(&self.k.rhs, self.nk, self.rhs_threads, &[plan, hd, kobs, w(s.h), w(s.rhs), w(s.z), w(s.rhs_kept)])
     }
 
-    /// Form S and the reduced right-hand side from the damped Hessian's tile
-    /// values `hvals` (in `hsym`'s storage order) and the gradient `rhs`, and
-    /// wait for the pivot flags (for inspection: [`solve`](Self::solve)
-    /// reduces as its first stage).
+    /// Forms S and the reduced right-hand side from the damped Hessian's
+    /// tile values `hvals` and the gradient `rhs` (as [`upload`](Self::upload)
+    /// takes them), and waits for the eliminated blocks' pivot flags: the
+    /// first stage of [`solve`](Self::solve) on its own, for inspection.
+    /// [`GpuSchurError::Eliminated`] when an eliminated block's diagonal
+    /// tile is not positive definite.
     pub fn reduce<M: SchurReal + 'static>(&mut self, hvals: &[M], rhs: &[M]) -> Result<(), GpuSchurError> {
         self.upload(hvals, rhs)?;
         self.launch_reduce()?;
@@ -1264,10 +1343,11 @@ impl<D: Device> GpuSchur<D> {
         if failed[0] != 0 { Err(GpuSchurError::Eliminated { block: self.elim_blk[failed[0] as usize - 1] as usize }) } else { Ok(()) }
     }
 
-    /// Whether [`solve`](Self::solve) captures its launches as a graph and
-    /// replays it (the default): the first solve with a factor and a
-    /// refinement setting runs the kernels and records them, and the solves
-    /// after it replay the recording, one launch instead of hundreds.
+    /// Turns graphs on (the default) or off for [`solve`](Self::solve). With
+    /// graphs, the first solve with a factor and a refinement setting runs
+    /// its kernels and records them as a graph, and the solves after it
+    /// with the same factor and setting replay the recording, one launch
+    /// instead of hundreds.
     pub fn use_graphs(&mut self, on: bool) {
         self.graphs = on;
         if !on {
@@ -1299,7 +1379,13 @@ impl<D: Device> GpuSchur<D> {
     /// between [`launch_reduce`](Self::launch_reduce) and
     /// [`launch_backsub`](Self::launch_backsub): S factorized, the kept
     /// blocks solved for, and the solution refined against S under `refine`
-    /// (`(max_steps, tolerance)`).
+    /// (`(max_steps, tolerance)`, as [`solve`](Self::solve) takes it).
+    ///
+    /// # Panics
+    ///
+    /// When `factor` is not on this reduction's device (the same `Arc`),
+    /// and for a refinement of a reduction with
+    /// [`GpuSchurParams::f32_reduction`].
     pub fn launch_factored(&self, factor: &GpuFactor<D>, refine: Option<(usize, f64)>) -> Result<(), GpuError> {
         assert!(Arc::ptr_eq(&self.dev, factor.device()), "the factor runs on the reduction's device, so S never leaves it");
         let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));
@@ -1391,14 +1477,13 @@ impl<D: Device> GpuSchur<D> {
         self.stamps = stamps;
     }
 
-    /// One damped solve, entirely on the device, waiting once: form S and
-    /// the reduced right-hand side from the Hessian's tile values `hvals`
-    /// (in `hsym`'s storage order) and the gradient `rhs`, factorize S with
-    /// `factor`, solve for the kept blocks, refine the solution against S
-    /// when `refine` is `Some((max_steps, tol))` (an f32 factor; `tol`
-    /// relative to the right-hand side), recover the eliminated blocks, and
-    /// read the full step into `delta` with the pivot flags and the
-    /// refinement's state.
+    /// Solves the damped system for the step into `delta`, on the device,
+    /// with one wait. The input is the damped Hessian's tile values `hvals`
+    /// and the gradient `rhs`, as [`upload`](Self::upload) takes them;
+    /// `factor` factorizes and solves S. `refine` is `Some((max_steps,
+    /// tol))` to refine the solution against S (for an f32 factor), `tol`
+    /// relative to the norm of the reduced right-hand side; its
+    /// [`RefineStats`] come back.
     ///
     /// The refinement decides on the device: `max_steps` steps are
     /// launched, and those after it has converged or stalled do nothing. A
@@ -1406,6 +1491,25 @@ impl<D: Device> GpuSchur<D> {
     /// end; `delta` is then left as it was. The launches are captured as a
     /// graph and replayed by the solves after it (see
     /// [`use_graphs`](Self::use_graphs)).
+    ///
+    /// ```ignore
+    /// let stats = schur.solve(&mut factor, h.vals(), &rhs, Some((4, 1e-10)), &mut delta)?;
+    /// if stats.short {
+    ///     // the refinement stopped above the tolerance
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`GpuSchurError::Eliminated`] or [`GpuSchurError::Reduced`] when a
+    /// matrix is not positive definite (raise the damping and solve again);
+    /// [`GpuSchurError::Device`] when a device operation fails.
+    ///
+    /// # Panics
+    ///
+    /// As [`upload`](Self::upload) and
+    /// [`launch_factored`](Self::launch_factored), and when `delta` is not
+    /// [`dim`](Self::dim) values.
     pub fn solve<M: SchurReal + 'static>(
         &mut self,
         factor: &mut GpuFactor<D>,
@@ -1477,7 +1581,8 @@ impl<D: Device> GpuSchur<D> {
     /// [`status_view`](Self::status_view), for the caller to read with its
     /// own results and hand to [`outcome`](Self::outcome). Launches only, so
     /// a caller can capture them in a graph of its own (keyed by
-    /// [`graph_key`](Self::graph_key)).
+    /// [`graph_key`](Self::graph_key)). Panics as
+    /// [`launch_factored`](Self::launch_factored).
     pub fn launch(&self, factor: &GpuFactor<D>, refine: Option<(usize, f64)>) -> Result<(), GpuError> {
         assert!(Arc::ptr_eq(&self.dev, factor.device()), "the factor runs on the reduction's device, so S never leaves it");
         let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));

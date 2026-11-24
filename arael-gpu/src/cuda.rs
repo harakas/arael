@@ -1,5 +1,6 @@
-//! [`Device`] on CUDA: the driver API and NVRTC through cudarc, both loaded
-//! at run time.
+//! [`Device`] on CUDA, for NVIDIA GPUs. It needs the CUDA driver library
+//! (`libcuda`) and NVRTC, CUDA's run-time compiler (`libnvrtc`), both
+//! loaded at run time through cudarc, so a build needs no CUDA toolkit.
 
 use crate::disk::DiskCache;
 use crate::pool::{Pool, capacity};
@@ -277,7 +278,7 @@ impl CudaDevice {
         let ctx = std::panic::catch_unwind(|| CudaContext::new(index))
             .map_err(|_| GpuError::Unavailable("the CUDA driver library is not installed".into()))?
             .map_err(|e| GpuError::Unavailable(format!("CUDA device {index}: {e}")))?;
-        // Streams are ordered by our own events (GPU.md 7.6), not by events
+        // Streams are ordered by our own events, not by events
         // cudarc records on every buffer use.
         unsafe { ctx.disable_event_tracking() };
         let stream = ctx.new_stream().map_err(driver)?;
