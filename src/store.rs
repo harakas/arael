@@ -2053,7 +2053,7 @@ const VAR_NO_COL: u8 = u8::MAX;
 /// in the values, each side's first live global index and live width,
 /// and per side the live slot positions and the compact place of every
 /// slot position. A side's live indices are one ascending run (what
-/// [`tile_extent`] asserts), so a live slot's compact place is its
+/// `tile_extent` asserts), so a live slot's compact place is its
 /// index minus the side's first.
 #[derive(Clone, Copy, Debug)]
 pub struct VarCrossMeta<const NA: usize, const NB: usize> {

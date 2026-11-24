@@ -178,7 +178,7 @@ fn a_solve_logs_what_its_gpu_does() {
         assert_eq!(r.gpu.unwrap().work, arael::simple_lm::GpuWork::Unused, "{route}");
         let warnings = unused(&log);
         assert_eq!(warnings.len(), 1, "{route}: {log:?}");
-        assert!(warnings[0].starts_with("gpu: cpu:0 was given and is not used -- ") && warnings[0].contains(route), "{route}: {}", warnings[0]);
+        assert!(warnings[0].starts_with("gpu: cpu:0 was given and is not used -- ") && warnings[0].contains(&format!("{route}, on the host.")), "{route}: {}", warnings[0]);
     }
     log::reset_sink();
 }

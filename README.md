@@ -1,6 +1,6 @@
 # ARAEL
 
-**Algorithms for Robust Autonomy, Estimation, and Localization**
+Algorithms for Robust Autonomy, Estimation, and Localization
 
 A Rust framework for nonlinear least-squares optimization. You write constraints as symbolic expressions inside the model definition; at compile time Rust's procedural macros differentiate, simplify, eliminate common subexpressions -- and emit plain Rust for calculating the cost, gradient, and Gauss-Newton hessian (J^T J).
 
@@ -19,6 +19,7 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
 - [Robustness and loss functions](#robustness-and-loss-functions)
 - [Examples](#examples)
 - [Solvers](#solvers)
+  - [Solving on a GPU](#solving-on-a-gpu)
 - [Parameter Covariance](#parameter-covariance)
 - [Runtime Differentiation](#runtime-differentiation)
 - [Cross-Crate Models](#cross-crate-models)
@@ -32,44 +33,22 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
 
 ## Features
 
-- **Symbolic math** -- expression trees with automatic differentiation, simplification, expansion, LaTeX/Rust code generation
-- **Compile-time constraint code generation** -- write constraints symbolically, get compiled derivative code with CSE
-- **Levenberg-Marquardt solver** -- with robust error suppression via the [Starship method (US12346118)](https://patents.google.com/patent/US12346118) `gamma * atan(r / gamma)`, block-level robust loss (`loss = |s| loss_geman_mcclure(s, c2)`), and switchable constraints (`guard = expr`)
-- **Multiple solver backends** via `LmSolver` trait:
-  - **Dense Cholesky** (nalgebra) -- fixed-size dispatch up to 9x9, dynamic for larger
-  - **Band Cholesky** -- pure Rust O(n*kd^2) for block-tridiagonal systems
-  - **Sparse Cholesky** (faer, pure Rust) -- for general sparse hessians
-  - **Eigen SimplicialLLT** and **CHOLMOD** -- optional C++ backends via FFI (`--features eigen`, `--features cholmod`)
-  - **CHOLMOD supernodal** -- optional `--features cholmod-gpl`. **License warning:** CHOLMOD's Supernodal module is GPL (the `cholmod` feature binds only the LGPL Simplicial module), so the resulting binary is subject to the GPL
-  - **LAPACK band** -- optional dpbsv/spbsv backend (`--features lapack`)
-- **Block supernodal Cholesky** -- the sparse backend factorizes the Hessian in block form by default, one dense panel per supernode, not flattened to scalar CSC
-- **Schur marginalization** -- landmark-like blocks eliminated before the factorization and recovered by back-substitution, taken automatically when the backend prices it faster
-- **Conjugate gradients** -- the reduced system solved iteratively rather than factorized, preconditioned per block: no fill, no factor to store, an inexact step. A second, implicit form skips building the reduced system altogether, working straight off the Hessian to save its memory
-- **Indexed sparse assembly** -- precomputed position lists for zero-overhead hessian assembly after first iteration
-- **Precomputed rotations** -- every rotation param caches its rotation matrix and the matrix's Jacobian once per linearization; constraints that differentiate through a rotation read them as constants instead of rebuilding them per observation
-- **Warm re-solve** -- `LmSession` keeps what a solve learns about the problem's structure (pattern, ordering, symbolic factorization) so repeated solves of the same problem skip the analysis
-- **Threads** -- with the `threads` feature the cost and assembly sweeps and the linear solve run on as many threads as `num_threads` says ([docs/SOLVERS.md](docs/SOLVERS.md#threads))
-- **GPU solve** -- with the `gpu-cuda`, `gpu-hip` or `gpu-metal` feature the assembly, the Schur reduction, the factorization (or conjugate gradients in its place) and the LM loop run on an NVIDIA, AMD or Apple silicon GPU ([docs/SOLVERS.md](docs/SOLVERS.md#gpu))
-- **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout
-- **Mixed precision** -- an f32 factor under an f64 solve; surgical wide computation in an f32 model with `with_wide`, in f64 or in `df32` (two f32s) where there is no f64; mixed parameter types that keep their state wide
-- **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
-- **Cross-crate models** -- `arael::export_models!()` bundles a crate's pub models; the importing crate registers them all with one `arael_import!()` and builds its own models and roots over them
-- **C++, Python and JavaScript interfaces** -- `cargo arael export` generates full bindings for a root model, exact solve parity against Rust; the JavaScript one runs the solver in the browser as WebAssembly ([docs/CXX.md](docs/CXX.md), [docs/PYTHON.md](docs/PYTHON.md), [docs/WASM.md](docs/WASM.md))
-- **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>` for indexed collections with stable references
-- **Runtime differentiation** -- parse equations from strings at runtime, auto-differentiate symbolically, and optimize via `ExtendedModel`
-- **User-defined functions** -- plug custom symbolic or native-eval operators into constraint bodies with `#[arael::function]`.
-- **Hessian blocks** -- markers declaring which parameters a constraint couples: `SelfBlock<A>` an entity with itself, `CrossBlock<A, B>` one entity with another (each with a variable-width form, `VarSelfBlock` and `VarCrossBlock`, for entities whose parameters are commonly held), and the `coo` keyword for pairs a constraint does not name
-- **Jacobian computation** -- `#[arael(root, jacobian)]` generates `calc_jacobian()` returning a sparse Jacobian matrix for DOF analysis and constraint diagnostics (see `examples/jacobian_demo.rs`)
-- **Parameter covariance** -- `assemble_covariance` recovers `Sigma = 2 H^-1` at the solution without forming the dense inverse; per-entity marginal / conditional / cross blocks and std devs, with a `PerQuery` / `AllMarginals` (selected inverse) / `TriDiagonal` (band, no factorization) mode per workload
-- **Gimbal-lock-free rotations** -- `EulerAngleParam` (euler-angle delta) and `QuaternionParam` (rotation-vector delta) optimize a small delta around a re-centered reference rotation
-- **Rigid transforms** -- `TransformParam` optimizes a translation and a rotation as one 6-DOF parameter. The optimized delta is represented as a twist (se(3)), so a rotation correction carries the translation with it
-- **Similarity transforms** -- `ScaledTransformParam` adds a uniform scale to the rigid transform (Sim(3), the state of monocular loop closing), optimized as its logarithm; the scale can be fixed on its own
-- **Unit directions** -- `UnitVecParam` optimizes a direction with 2 degrees of freedom
-- **2D rotations** -- `AngleParam` optimizes a heading angle directly and caches its rotation matrix, so 2D pose constraints read a cached constant instead of rebuilding sin/cos per observation
-- **Fast approximate atan** -- `#[arael(root, fast_atan)]` swaps every atan/atan2 in the generated code for polynomial approximations (max error < 1e-6 rad); or call `fast_atan`/`fast_atan2` per site. Derivatives stay the exact rational forms
-- **.g2o file I/O** -- `arael::g2o` reads and writes the standard pose-graph interchange format (2D and 3D), with information matrices kept as read and sqrt-info helpers
-- **Model validation** -- `model.validate()` reports every formulation problem in one pass (non-finite parameters, stale refs, unconstrained parameters, derivative mismatches); `check_gradients()` compares assembled gradients against finite differences
-- **WASM/browser support** -- the sketch editor compiles to WebAssembly and runs in the browser via eframe/egui
+- Symbolic math: expression trees with automatic differentiation, simplification and LaTeX and Rust code generation ([docs/SYM.md](docs/SYM.md))
+- Constraints written as math and compiled at build time into derivative code, with common subexpressions computed once
+- Levenberg-Marquardt solver with robust losses and constraints that switch themselves off
+- C++, Python and JavaScript (WebAssembly) interfaces generated from a model, so a model built in Rust is solved from those languages and in the browser ([docs/CXX.md](docs/CXX.md), [docs/PYTHON.md](docs/PYTHON.md), [docs/WASM.md](docs/WASM.md))
+- Sparse Cholesky in block form, landmark-style blocks marginalized automatically, and conjugate gradients in place of a factor ([docs/SOLVERS.md](docs/SOLVERS.md))
+- Dense, band and sparse backends in pure Rust; optional Eigen, CHOLMOD and LAPACK backends (CHOLMOD's supernodal module is GPL)
+- Multithreaded assembly and factorization ([docs/SOLVERS.md](docs/SOLVERS.md#threads))
+- Solving on NVIDIA, AMD and Apple silicon GPUs ([docs/SOLVERS.md](docs/SOLVERS.md#solving-on-a-gpu))
+- f32 and f64 models, and mixed precision: an f32 factor refined to f64, wider arithmetic inside an f32 model where it is needed
+- Fast repeated solves of one problem: the analysis of its structure is kept
+- Rotation, rigid and similarity transform, unit direction and 2D heading parameters, without gimbal lock
+- Typed references between entities, held in collections that keep them valid
+- Parameter covariance at the solution, without a dense inverse ([docs/COVARIANCE.md](docs/COVARIANCE.md))
+- Model validation, gradient checks, and Jacobians for constraint diagnostics
+- Equations parsed and differentiated at run time, and user-defined functions in constraint bodies
+- Models shared across crates
 
 ## Benchmarks
 
@@ -119,14 +98,14 @@ benchmark and on bundle adjustment, against Ceres on the same machine
 
 Arael is a nonlinear optimization framework, not a complete SLAM or state estimation system. The SLAM and localization demos show how to use arael as the optimizer backend, but a production SLAM pipeline would additionally need:
 
-- **Front-end perception**: feature detection, descriptor extraction
-- **Data association**: matching observed features to existing landmarks, handling ambiguous or incorrect matches
-- **Landmark management**: initializing new landmarks from observations, merging duplicates, pruning unreliable ones
-- **Keyframe selection**: deciding when to add new poses vs. discard redundant frames
-- **Loop closure**: detecting revisited places, verifying loop closure candidates, and injecting constraints
-- **Outlier rejection logic**: deciding which observations to reject
-- **Marginalization / sliding window**: limiting optimization scope for real-time operation, marginalizing old poses while preserving their information
-- **Map management**: spatial indexing, map saving/loading, multi-session map merging
+- Front-end perception: feature detection, descriptor extraction
+- Data association: matching observed features to existing landmarks, handling ambiguous or incorrect matches
+- Landmark management: initializing new landmarks from observations, merging duplicates, pruning unreliable ones
+- Keyframe selection: deciding when to add new poses vs. discard redundant frames
+- Loop closure: detecting revisited places, verifying loop closure candidates, and injecting constraints
+- Outlier rejection logic: deciding which observations to reject
+- Marginalization / sliding window: limiting optimization scope for real-time operation, marginalizing old poses while preserving their information
+- Map management: spatial indexing, map saving/loading, multi-session map merging
 
 Arael provides the compile-time-differentiated solver that sits at the core of such a system. Everything above is application-level logic that builds on top of it.
 
@@ -159,7 +138,7 @@ See [docs/SYM.md](docs/SYM.md) for the full symbolic math reference.
 
 You describe the model as a Rust struct and the residual as an arael-sym expression; the macros do the rest.
 
-- `#[arael::model]` auto-implements the `Model` trait for the struct: serialize / deserialize / update of every optimizable parameter, flat indexing into the residual vector, and all the hooks the solver needs.
+- `#[arael::model]` auto-implements the `Model` trait for the struct: serialize / deserialize / update of every optimizable parameter, flat indexing into the parameter vector, and all the hooks the solver needs.
 - Every `Param<T>` field is an optimization variable. Plain fields (`data`, `sigma`, `gamma` here) are constants.
 - `#[arael(fit(data, |e| ...))]` declares a least-squares fit: one residual per element of `data`, body written as a symbolic expression referencing model fields and the current data entry. The macro compiles the body into residual + gradient + Hessian code with symbolic differentiation and CSE. A trailing `loss = |s| rho(s)` (e.g. `loss_geman_mcclure(s, c2)`) applies a robust M-estimator over each point's squared residual.
 
@@ -281,7 +260,7 @@ struct Path {
 }
 ```
 
-Each constraint body computes one or more **residuals** -- the differences
+Each constraint body computes one or more residuals -- the differences
 between what the model predicts and what the sensor measured. Driving them
 toward zero pulls the estimate into agreement with the data, a soft constraint
 on the poses and landmarks involved; the same per-measurement term is what
@@ -319,7 +298,7 @@ $$
 S(M) = (L - \mu(M))^T K_L^{-1} (L - \mu(M)).
 $$
 
-**Whitening.** Diagonalising $K_L = R D R^T$ and substituting $L^D = R^T L$, $G(M) = R^T \mu(M)$ turns the quadratic form into a plain sum of squares in units of standard deviations:
+Whitening. Diagonalising $K_L = R D R^T$ and substituting $L^D = R^T L$, $G(M) = R^T \mu(M)$ turns the quadratic form into a plain sum of squares in units of standard deviations:
 
 $$
 S(M) = \sum_i r_i^2, \qquad r_i = \frac{L_i^D - G_i(M)}{\sigma_i}.
@@ -350,11 +329,11 @@ The closure argument is the block squared norm; the scale (`k2`, `c2`) is square
 
 ### Starship robust error suppression
 
-Wrapping a residual $r$ in $\gamma \arctan(r / \gamma)$ is the **Starship method** ([US Patent 12,346,118](https://patents.google.com/patent/US12346118)) -- a way to cap how much a single outlier can move the optimum without losing smooth differentiability. This section explains what it does and why.
+Wrapping a residual $r$ in $\gamma \arctan(r / \gamma)$ is the Starship method ([US Patent 12,346,118](https://patents.google.com/patent/US12346118)) -- a way to cap how much a single outlier can move the optimum without losing smooth differentiability. This section explains what it does and why.
 
 The usual robust-loss fixes -- L1 ($|r|$) and Huber (quadratic near zero, linear past a threshold) -- replace $r^2$ with something that grows slower than quadratically, which limits but does not cap each residual's contribution; a single very bad outlier can still pull the solution. Their derivatives are also awkward: L1 has a kink at $r = 0$ (undefined derivative there), Huber has a kink at the quadratic-to-linear transition (continuous but not smooth), and Gauss-Newton wants a smooth Jacobian. We want a loss that is both fully bounded and smooth everywhere.
 
-#### The cap
+#### The suppression function
 
 We look for a function $\alpha(x)$ that behaves like $x$ in the normal range but saturates for large inputs, so that $\alpha(x)^2$ contributes a bounded amount $\Delta S_{\max}$ to the sum instead of an unbounded $x^2$.
 
@@ -374,7 +353,7 @@ The $\gamma$ value follows from the saturation requirement: as $|x| \to \infty$,
 
 Left: $\alpha(x)$ (green) bends away from the identity $x$ (purple) once $|x|$ moves past a few sigmas. Right: the *squared* contribution -- the unbounded $x^2$ parabola vs the saturating $\alpha(x)^2$, capped at $\Delta S_{\max}$. The cap is also smooth; Gauss-Newton still sees a well-defined Jacobian everywhere.
 
-#### Using it
+#### Applying it to a sum of residuals
 
 Replace each $r_i$ in the sum with $\alpha(r_i)$:
 
@@ -399,7 +378,7 @@ Gauss-Newton (and Levenberg-Marquardt) is a local method: each step linearises t
 
 Every robustifier makes this requirement stricter -- that is its purpose. The redescending block kernels (Geman-McClure, Tukey) and the Starship cap all shrink the gradient of far-out residuals; for Starship it falls off as $\alpha'(r) = 1 / (1 + \pi^2 r^2 / (4 \Delta S_{\max}))$, so at the recommended $\Delta S_{\max} = 25$ a residual at $5\sigma$ still carries about 29% of its least-squares pull and a $10\sigma$ residual about 9% -- still usable. Once you get out to $20\sigma$ and beyond it drops under 3% and those residuals are effectively frozen. If $M_0$ puts many residuals that far out -- outliers by position, not by nature -- the solver has nothing to work with and stalls, whichever mechanism is doing the suppression.
 
-The usual remedy is **graduated optimisation**: start with the suppression loose (everything in the informative regime), solve, then tighten across passes down to the target. The SLAM demos do this via a `frine_isigma_scale` field stepped per pass -- `slam_demo` with the per-element wrapper, `slam_demo_gm` with the block loss (re-snapshotting landmark anchors between passes).
+The usual remedy is graduated optimisation: start with the suppression loose (everything in the informative regime), solve, then tighten across passes down to the target. The SLAM demos do this via a `frine_isigma_scale` field stepped per pass -- `slam_demo` with the per-element wrapper, `slam_demo_gm` with the block loss (re-snapshotting landmark anchors between passes).
 
 ### What loss function should I use?
 
@@ -407,10 +386,10 @@ Whichever works on your data -- there is no universally best kernel.
 The shipped kernels and the Starship wrapper differ in how hard they
 redescend, and the right choice depends on the contamination level,
 the residual dimensionality, and how good the initial guess is; the
-scale (`c2`, `gamma`) matters as much as the kernel itself. So
-experiment: kernels are one-line changes (and `branch()` switches them
-at runtime -- `slam_demo_gm --loss gm|cauchy` does exactly that), and
-measurements beat folklore.
+scale (`c2`, `gamma`) matters as much as the kernel itself. Kernels
+are one-line changes, and `branch()` switches them at run time
+(`slam_demo_gm --loss gm|cauchy` does that), so compare them on your
+data.
 
 A loss is also not the whole story: pruning bad measurements outright
 (gating by residual, dropping associations that fail a validity check)
@@ -419,7 +398,7 @@ solution as the loss does. A robustifier can only down-weight what the
 initialisation puts within its reach.
 
 And a robust loss fixes one failure mode -- outliers, heavy tails in the
-noise -- and only that. It does nothing about **systematic error**: a
+noise -- and only that. It does nothing about systematic error: a
 constant sensor offset, a wrong scale, an unmodelled bias, a miscalibrated
 extrinsic. A systematic error is present in every measurement, so it reads
 as signal, not an outlier -- the loss down-weights nothing and the bias
@@ -436,39 +415,40 @@ good ones, not a substitute for a correct model.
 
 The `examples/` directory is the primary place to see the API in use. Each file is a runnable `cargo run --release --example <name>`.
 
-- **[linear_demo](examples/linear_demo.rs)** -- robust linear regression on noisy 2D data. Residual wrapped in `gamma * atan(r / gamma)` -- the [Starship method (US12346118)](https://patents.google.com/patent/US12346118), same robustifier used by the feature constraints in loc/SLAM. Minimal single-struct model + LM fit, compared against plain closed-form least squares.
-- **[robust_curve_fitting](examples/robust_curve_fitting.rs)** -- fit `y = exp(m*x + c)` to data with two gross outliers: a plain fit against a block Cauchy loss (`loss = |s| loss_cauchy(s, 0.25)`, matching Ceres `CauchyLoss(0.5)` -- the scale is squared) and the per-element starship wrapper. The robust fits recover the true parameters; the plain fit is dragged off. Ports Ceres's robust_curve_fitting example.
-- **[slam2d_simple_demo](examples/slam2d_simple_demo.rs)** -- minimal pedagogical 2D SLAM: bearing-only landmark observations, pose `(x, y, gamma)`, first pose fixed as the gauge. Writes `slam2d_simple.eps` with per-landmark 95% covariance ellipses -- elongated radially, showing depth is the unobservable dimension of bearing-only SLAM.
-- **[slam2d_multi_demo](examples/slam2d_multi_demo.rs)** -- multi-run merge on a nested model tree (`Map { paths: Vec<Path>, landmarks }`): three GPS-anchored runs fused in one solve via bearings onto shared root-level landmarks (`ref = root.landmarks`, run-local odometry via `ref = parent.poses`). Writes `slam2d_multi.eps` with 95% ellipses.
-- **[slam2d_align_demo](examples/slam2d_align_demo.rs)** -- builds one map from three runs the cheap, two-step way: each run is solved on its own, then a small second step lines the runs up with each other. Same scene as `slam2d_multi_demo` (which solves everything at once), so the two results can be compared; writes `slam2d_align.eps`.
-- **[slam2d_direct_align_demo](examples/slam2d_direct_align_demo.rs)** -- the cheapest variant of the same merge: only the per-run corrections are optimized (9 parameters), with each run pair's landmark matches accumulating into one shared Hessian block (`constraint(parent.hb, ...)`); the landmarks are then fused in closed form. Same scene again; writes `slam2d_direct_align.eps`.
-- **[slam_demo](examples/slam_demo.rs)** -- full 3D monocular SLAM: S-curve trajectory, 60 poses, 240 landmarks, odometry + tilt + GPS + feature observations. Full verbose-LM trace across graduated isigma passes -- the reference for what a healthy solver run looks like.
-- **[slam_demo_gm](examples/slam_demo_gm.rs)** -- the same scene on newer machinery: selectable Geman-McClure / Cauchy block loss (`--loss gm|cauchy`) instead of the per-element starship wrap, a `TransformParam` pose, anchored inverse-depth landmarks (`UnitVecParam` direction + inverse range, re-anchored between ramp passes), trig-free chord residuals, and the graduated ramp through one `LmSession`.
-- **[loc_demo](examples/loc_demo.rs)** -- localisation with fixed known landmarks (no gauge freedom). Block-tridiagonal Hessian + band solver. Graduated-isigma optimisation via a root `frine_isigma_scale` field.
-- **[loc_global_demo](examples/loc_global_demo.rs)** -- root-level `Param` fields consumed by constraints: a global rigid transform (translation + rotation) applied to every pose. Shows the two pose<->root cross-Hessian wirings (`CrossBlock<Pose, Path>` on the constraint, or `[hb_pose, coo]` with no block field) and a staged pass that optimises only the globals first.
-- **[plane_slam_demo](examples/plane_slam_demo.rs)** -- plane SLAM with a user-defined component: `UnitVec<T>`, a 2-DOF unit direction on the sphere, demonstrating `#[arael(component)]`.
-- **[m3500_demo](examples/m3500_demo.rs)** -- the classic M3500 Manhattan-world pose-graph benchmark (Olson 2006): 3500 SE2 poses and 5453 relative-pose constraints from a g2o file, the between-factor written symbolically, solved with sparse faer LM. The same model backs [benchmarks/pgo](benchmarks/pgo/README.md).
-- **[bal_demo](examples/bal_demo.rs)** -- bundle adjustment on a real Bundle-Adjustment-in-the-Large Ladybug problem (49 cameras, 7776 points, 31843 observations, from the vendored file). The Snavely reprojection residual written symbolically; verbose LM with the Nielsen driver drives the solve to the same optimum as Ceres. Same model as [benchmarks/bal](benchmarks/bal/README.md).
-- **[model_demo](examples/model_demo.rs)** -- minimal `#[arael::model]` walk-through showing how `Param`, `SimpleEulerAngleParam`, and the update cycle fit together.
-- **[single_root_demo](examples/single_root_demo.rs)** -- single-struct model-and-root + a direct-composed sub-model, each carrying its own `SelfBlock<Self>`. The smallest example that exercises the "root has its own params" path.
-- **[refs_demo](examples/refs_demo.rs)** -- `Ref<T>`, `refs::Vec`, `refs::Deque`, and `refs::Arena` behaviour: insertion, iteration, stable handles.
-- **[jacobian_demo](examples/jacobian_demo.rs)** -- `#[arael(root, jacobian)]`, `#[arael(constraint_index)]`, and `calc_jacobian` / `calc_cost_table` walk-through. End-to-end reference for the instrumentation features used in convergence debugging.
-- **[runtime_fit_demo](examples/runtime_fit_demo.rs)** -- curve fitting where the residual equation is a string parsed at runtime. Demonstrates `ExtendedModel` + robust loss on top of the symbolic front end.
-- **[root_fit_demo](examples/root_fit_demo.rs)** -- curve fitting on the regular model system: the parameters live on the root, each measurement is a plain data entity whose constraint writes into the root's own `SelfBlock` through `root.hb`. The full constraint feature set (guards, block losses, named groups) in place of the `fit(...)` one-liner.
-- **[user_function_demo](examples/user_function_demo.rs)** -- `#[arael::function]` for user-defined operators in constraint bodies, in its two forms: a purely symbolic `sigmoid(x) = 1 / (1 + exp(-x))` (arael differentiates it automatically) and an opaque numerical `my_safe_asin` that carries a hand-written closed-form derivative. Both are used in a single two-residual LM fit.
-- **[sym_demo](examples/sym_demo.rs)** -- symbolic-math tour: expression building, automatic differentiation, CSE, pretty printing, parsing. No solver involvement; pure `arael-sym`.
-- **[calc_demo](examples/calc_demo.rs)** -- `bc`-style REPL calculator built on `arael-sym`. Shows `parse_with_functions` + `FunctionBag` for user-defined functions, persistent history via rustyline.
-- **[bench_band](examples/bench_band.rs)** -- benchmarks the band Cholesky backend against dense on the localisation model at increasing pose counts. Prints timing + speedup.
-- **[bench_sparse](examples/bench_sparse.rs)** -- sparse Cholesky backends (faer) vs dense on SLAM.
-- **[bench_investigate](examples/bench_investigate.rs)** -- deeper comparison of sparse backends on SLAM, with assembly vs solve breakdown and numeric cross-check of the solutions.
+- [linear_demo](examples/linear_demo.rs) -- robust linear regression on noisy 2D data. Residual wrapped in `gamma * atan(r / gamma)` -- the [Starship method (US12346118)](https://patents.google.com/patent/US12346118), same robustifier used by the feature constraints in loc/SLAM. Minimal single-struct model + LM fit, compared against plain closed-form least squares.
+- [robust_curve_fitting](examples/robust_curve_fitting.rs) -- fit `y = exp(m*x + c)` to data with two gross outliers: a plain fit against a block Cauchy loss (`loss = |s| loss_cauchy(s, 0.25)`, matching Ceres `CauchyLoss(0.5)` -- the scale is squared) and the per-element starship wrapper. The robust fits recover the true parameters; the plain fit is dragged off. Ports Ceres's robust_curve_fitting example.
+- [slam2d_simple_demo](examples/slam2d_simple_demo.rs) -- minimal pedagogical 2D SLAM: bearing-only landmark observations, pose `(x, y, gamma)`, first pose fixed as the gauge. Writes `slam2d_simple.eps` with per-landmark 95% covariance ellipses -- elongated radially, showing depth is the unobservable dimension of bearing-only SLAM.
+- [slam2d_multi_demo](examples/slam2d_multi_demo.rs) -- multi-run merge on a nested model tree (`Map { paths: Vec<Path>, landmarks }`): three GPS-anchored runs fused in one solve via bearings onto shared root-level landmarks (`ref = root.landmarks`, run-local odometry via `ref = parent.poses`). Writes `slam2d_multi.eps` with 95% ellipses.
+- [slam2d_align_demo](examples/slam2d_align_demo.rs) -- builds one map from three runs the cheap, two-step way: each run is solved on its own, then a small second step lines the runs up with each other. Same scene as `slam2d_multi_demo` (which solves everything at once), so the two results can be compared; writes `slam2d_align.eps`.
+- [slam2d_direct_align_demo](examples/slam2d_direct_align_demo.rs) -- the cheapest variant of the same merge: only the per-run corrections are optimized (9 parameters), with each run pair's landmark matches accumulating into one shared Hessian block (`constraint(parent.hb, ...)`); the landmarks are then fused in closed form. Same scene again; writes `slam2d_direct_align.eps`.
+- [slam_demo](examples/slam_demo.rs) -- full 3D monocular SLAM: S-curve trajectory, 60 poses, 240 landmarks, odometry + tilt + GPS + feature observations. Full verbose-LM trace across graduated isigma passes -- the reference for what a healthy solver run looks like. Built with a GPU feature (`--features gpu-cuda`), it solves on the machine's GPU and prints the solve report.
+- [slam_demo_gm](examples/slam_demo_gm.rs) -- the same scene with other modelling choices: selectable Geman-McClure / Cauchy block loss (`--loss gm|cauchy`) instead of the per-element starship wrap, a `TransformParam` pose, anchored inverse-depth landmarks (`UnitVecParam` direction + inverse range, re-anchored between ramp passes), trig-free chord residuals, and the graduated ramp through one `LmSession`.
+- [loc_demo](examples/loc_demo.rs) -- localisation with fixed known landmarks (no gauge freedom). Block-tridiagonal Hessian + band solver. Graduated-isigma optimisation via a root `frine_isigma_scale` field.
+- [loc_global_demo](examples/loc_global_demo.rs) -- root-level `Param` fields consumed by constraints: a global rigid transform (translation + rotation) applied to every pose. Shows the two pose<->root cross-Hessian wirings (`CrossBlock<Pose, Path>` on the constraint, or `[hb_pose, coo]` with no block field) and a staged pass that optimises only the globals first.
+- [plane_slam_demo](examples/plane_slam_demo.rs) -- plane SLAM with a user-defined component: `UnitVec<T>`, a 2-DOF unit direction on the sphere, demonstrating `#[arael(component)]`.
+- [m3500_demo](examples/m3500_demo.rs) -- the classic M3500 Manhattan-world pose-graph benchmark (Olson 2006): 3500 SE2 poses and 5453 relative-pose constraints from a g2o file, the between-factor written symbolically, solved with sparse faer LM. The same model backs [benchmarks/pgo](benchmarks/pgo/README.md).
+- [bal_demo](examples/bal_demo.rs) -- bundle adjustment on a real Bundle-Adjustment-in-the-Large Ladybug problem (49 cameras, 7776 points, 31843 observations, from the vendored file). The Snavely reprojection residual written symbolically; verbose LM with the Nielsen driver drives the solve to the same optimum as Ceres. Same model as [benchmarks/bal](benchmarks/bal/README.md).
+- [model_demo](examples/model_demo.rs) -- minimal `#[arael::model]` walk-through showing how `Param`, `SimpleEulerAngleParam`, and the update cycle fit together.
+- [single_root_demo](examples/single_root_demo.rs) -- single-struct model-and-root + a direct-composed sub-model, each carrying its own `SelfBlock<Self>`. The smallest example that exercises the "root has its own params" path.
+- [refs_demo](examples/refs_demo.rs) -- `Ref<T>`, `refs::Vec`, `refs::Deque`, and `refs::Arena` behaviour: insertion, iteration, stable handles.
+- [jacobian_demo](examples/jacobian_demo.rs) -- `#[arael(root, jacobian)]`, `#[arael(constraint_index)]`, and `calc_jacobian` / `calc_cost_table` walk-through. End-to-end reference for the instrumentation features used in convergence debugging.
+- [runtime_fit_demo](examples/runtime_fit_demo.rs) -- curve fitting where the residual equation is a string parsed at runtime. Demonstrates `ExtendedModel` + robust loss on top of the symbolic front end.
+- [root_fit_demo](examples/root_fit_demo.rs) -- curve fitting on the regular model system: the parameters live on the root, each measurement is a plain data entity whose constraint writes into the root's own `SelfBlock` through `root.hb`. The full constraint feature set (guards, block losses, named groups) in place of the `fit(...)` one-liner.
+- [user_function_demo](examples/user_function_demo.rs) -- `#[arael::function]` for user-defined operators in constraint bodies, in its two forms: a purely symbolic `sigmoid(x) = 1 / (1 + exp(-x))` (arael differentiates it automatically) and an opaque numerical `my_safe_asin` that carries a hand-written closed-form derivative. Both are used in a single two-residual LM fit.
+- [sym_demo](examples/sym_demo.rs) -- symbolic-math tour: expression building, automatic differentiation, CSE, pretty printing, parsing. No solver involvement; pure `arael-sym`.
+- [calc_demo](examples/calc_demo.rs) -- `bc`-style REPL calculator built on `arael-sym`. Shows `parse_with_functions` + `FunctionBag` for user-defined functions, persistent history via rustyline.
+- [bench_band](examples/bench_band.rs) -- benchmarks the band Cholesky backend against dense on the localisation model at increasing pose counts. Prints timing + speedup.
+- [bench_sparse](examples/bench_sparse.rs) -- sparse Cholesky backends (faer) vs dense on SLAM.
+- [bench_investigate](examples/bench_investigate.rs) -- deeper comparison of sparse backends on SLAM, with assembly vs solve breakdown and numeric cross-check of the solutions.
+- [gpu_lm_trace](examples/gpu_lm_trace.rs) -- counts the CUDA launches, waits and copies of each attempt of a bundle adjustment solved on the GPU; run under `scripts/gpu_trace.py`, which needs NVIDIA's Nsight Systems (`--features gpu-cuda`).
 
 ### External and larger examples
 
-- **[Pose-graph optimization in the browser](https://arael.mare.ee/pgo/)** -- the JavaScript interface running the solver as WebAssembly: a pose graph with poses to drag, lock and fix, re-solved live. Source in [cxx-examples/m3500_demo](cxx-examples/m3500_demo).
-- **[arael-sketch](docs/ARAEL_SKETCH.md)** -- the constraint-based 2D sketch editor, [live in the browser](https://sketch.mare.ee/): geometric constraints, parametric dimensions, undo, a command interface and an MCP server, all on arael.
-- **[rtabmap-arael](https://github.com/harakas/rtabmap-arael)** -- RTAB-Map with arael as a graph optimizer: pose-graph optimization and bundle adjustment with marginal covariance, measured against its Ceres, GTSAM, g2o and TORO backends. The models and the numbers are in [corelib/src/optimizer/arael](https://github.com/harakas/rtabmap-arael/tree/arael-optimizer/corelib/src/optimizer/arael).
-- **[slam_toolbox-arael](https://github.com/harakas/slam_toolbox-arael)** -- ROS 2 slam_toolbox with an arael solver plugin reproducing its Ceres plugin's residual, measured against it on 2D pose-graph datasets. The model and the numbers are in [solvers/arael](https://github.com/harakas/slam_toolbox-arael/tree/arael-solver/solvers/arael).
-- **[colmap-arael](https://github.com/harakas/colmap-arael)** -- COLMAP with arael as its bundle adjustment backend: the incremental mapper's local and global bundle adjustments on the Ceres backend's problem (every camera model, rigs, loss functions, position priors), measured against Ceres and the GPU solver caspar. The model and the numbers are in [src/colmap/estimators/arael](https://github.com/harakas/colmap-arael/tree/arael-optimizer/src/colmap/estimators/arael).
+- [Pose-graph optimization in the browser](https://arael.mare.ee/pgo/) -- the JavaScript interface running the solver as WebAssembly: a pose graph with poses to drag, lock and fix, re-solved live. Source in [cxx-examples/m3500_demo](cxx-examples/m3500_demo).
+- [arael-sketch](docs/ARAEL_SKETCH.md) -- the constraint-based 2D sketch editor, [live in the browser](https://sketch.mare.ee/): geometric constraints, parametric dimensions, undo, a command interface and an MCP server, all on arael.
+- [rtabmap-arael](https://github.com/harakas/rtabmap-arael) -- RTAB-Map with arael as a graph optimizer: pose-graph optimization and bundle adjustment with marginal covariance, measured against its Ceres, GTSAM, g2o and TORO backends. The models and the numbers are in [corelib/src/optimizer/arael](https://github.com/harakas/rtabmap-arael/tree/arael-optimizer/corelib/src/optimizer/arael).
+- [slam_toolbox-arael](https://github.com/harakas/slam_toolbox-arael) -- ROS 2 slam_toolbox with an arael solver plugin reproducing its Ceres plugin's residual, measured against it on 2D pose-graph datasets. The model and the numbers are in [solvers/arael](https://github.com/harakas/slam_toolbox-arael/tree/arael-solver/solvers/arael).
+- [colmap-arael](https://github.com/harakas/colmap-arael) -- COLMAP with arael as its bundle adjustment backend: the incremental mapper's local and global bundle adjustments on the Ceres backend's problem (every camera model, rigs, loss functions, position priors), measured against Ceres and the GPU solver caspar. The model and the numbers are in [src/colmap/estimators/arael](https://github.com/harakas/colmap-arael/tree/arael-optimizer/src/colmap/estimators/arael).
 
 ## Solvers
 
@@ -476,14 +456,11 @@ Levenberg-Marquardt with pluggable linear-algebra backends behind one
 trait (`LmSolver`) and one config (`LmConfig`). Full reference:
 [docs/SOLVERS.md](docs/SOLVERS.md).
 
-The main entry point is `solve_with` on `LmProblem` -- it wraps
-the serialize -> optimize -> deserialize round trip (parameters are
-read from the model and written back) and takes any backend instance.
-Every `#[arael(root)]` model gets it: the macro implements `RootProblem`
-(the parameter round trip), which unlocks the solve methods LmProblem
-provides. `solve_sparse` and `solve_dense` are conveniences over
-`solve_with`, `solve(SolverKind, &cfg)` picks the backend at run time,
-and `lm_solve` runs the same solve over a raw parameter vector you
+The main entry point is `solve_with`, which every `#[arael(root)]` model
+has: it reads the parameters from the model, solves with any backend
+instance and writes them back. `solve_sparse` and `solve_dense` are
+shorthands for it, `solve(SolverKind, &cfg)` picks the backend at run
+time, and `lm_solve` runs the same solve over a parameter vector you
 manage yourself:
 
 ```rust,ignore
@@ -501,35 +478,27 @@ terminated by a stopping rule (including `MaxIterations` and `TimeLimit`),
 went bad -- with the best accepted state carried in the error when one
 exists. See [docs/SOLVERS.md](docs/SOLVERS.md#solve-failures).
 
-`solve_sparse` (indexed sparse faer) is the right default: for most
-real problems the Hessian is sparse enough for sparse Cholesky, and
-faer is pure Rust with no external dependency. The generated methods
-match the root's precision: on an `#[arael(root, f32)]` model they take
-`f32` configs and `solve_sparse` uses `SparseFaer<f32>`.
+The generated methods match the root's precision: on an
+`#[arael(root, f32)]` model they take `f32` configs and `solve_sparse`
+uses `SparseFaer<f32>`.
 
 | Backend (`solve_with(&mut ..., &cfg)`) | What it is |
 |---|---|
-| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **default** (= `solve_sparse`): sparse Cholesky, pure Rust. Factorizes the block Hessian in block form (the supernodal block route), falling back to faer's scalar one where that does not apply. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; `SchurPolicy` / `SolveOrdering` / `BlockSupernodalMode` override it |
-| `Dense` | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
-| `Band::new(kd)` | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
+| `SparseFaer::<T>::new()` (`T` = `f64`/`f32`) | the default (= `solve_sparse`): sparse Cholesky, pure Rust, in block form. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself. The only backend that runs on a GPU |
+| `Dense` | dense nalgebra Cholesky (= `solve_dense`): few parameters, or dense problems |
+| `Band::new(kd)` | pure-Rust band Cholesky for banded Hessians (localization); an element outside the band is an error |
 | `BandLapack::new(kd)` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |
 | `SparseEigen::<T>::new()` | Eigen `SimplicialLLT` (feature `eigen`) |
 | `SparseCholmod::new()` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) |
-| `SparseCholmodSupernodal::new()` | CHOLMOD supernodal Cholesky, **GPL-licensed module** (feature `cholmod-gpl`; f64 only) |
+| `SparseCholmodSupernodal::new()` | CHOLMOD supernodal Cholesky, a GPL-licensed module (feature `cholmod-gpl`; f64 only) |
 
 ### Damping-schedule drivers
 
-Levenberg-Marquardt is an iterative algorithm with a damping parameter,
-lambda, that modulates each step between Gauss-Newton (small lambda) and
-gradient descent (large lambda). The initial value of lambda, how it evolves
-per step, and when to stop all depend on the problem's state along the solve
--- there is no single schedule that is perfect for every problem, or even for
-one problem from start to finish. And it pays to get them right: every LM iteration is a
-full linearize + factorize + solve, so the iteration count is essentially the
-run time. Leaving damping and tolerances at their defaults therefore leaves
-considerable performance on the table, whatever the problem -- they are worth
-tuning to the one at hand, and a production system chasing every last bit of
-throughput writes a dedicated damping driver matched to its own problem.
+Levenberg-Marquardt's damping parameter, lambda, moves each step between
+Gauss-Newton (small lambda) and gradient descent (large lambda). Every
+iteration is a full linearization, factorization and solve, so the
+iteration count is close to the run time, and the damping schedule and
+tolerances that suit a problem are worth finding.
 
 The lambda schedule is pluggable: the LM loop consults a
 `LambdaDriver` for every damping decision, feeding it each attempted
@@ -553,46 +522,66 @@ last accepted one comes back (`LmStatus::LambdaCeiling`).
 To watch a solve without touching the schedule, attach an `LmObserver`
 with `LmConfig::with_observer` (closures qualify): it is called once per
 damped attempt with the iteration state and the current best parameters,
-and can stop the solve (`LmStatus::ObserverTerminated`) -- progress
-reporting, cancellation flags, good-enough checks. See
-[docs/SOLVERS.md](docs/SOLVERS.md#iteration-observer).
+and can stop the solve (`LmStatus::ObserverTerminated`), for progress
+reporting, cancellation and good-enough checks. See
+[docs/SOLVERS.md](docs/SOLVERS.md#iteration-observer). With the LM loop on
+a GPU, an observer gets the parameters and a driver the gradient, the
+diagonal and the step only when the config asks for them
+([docs/SOLVERS.md](docs/SOLVERS.md#observers-and-drivers-on-a-gpu)).
 
-`LmConfig` controls the solve -- convergence tolerances, iteration
-caps, initial lambda, `time_limit` (an optional wall-clock budget; it
-overrides `min_iters`, because a budget is a budget), and `verbose` (turn
-it on first when
-debugging). Defaults are a safe middle ground; production solves
-usually want `max_iters` and `rel_precision` tuned for the
-performance/quality trade-off that actually matters for the
-problem. See [docs/SOLVERS.md](docs/SOLVERS.md) for the full field
-reference and a recipe for picking them.
+`LmConfig` controls the solve: convergence tolerances, iteration caps, the
+initial lambda, `time_limit` (an optional wall-clock budget that overrides
+`min_iters`), and `verbose` (turn it on first when debugging). The defaults
+are a safe middle ground; production solves usually tune `max_iters` and
+`rel_precision`. See [docs/SOLVERS.md](docs/SOLVERS.md) for every field and
+a procedure for picking them.
 
 ### Threads
 
-Arael is single-threaded by default. With the `threads` feature the
-factorization's dense kernels run on rayon's thread pool, and everything
-else that threads on arael's own worker threads, parked between dispatches:
-the cost evaluation and the assembly of the gradient and Hessian, each
-thread sweeping its own share of the model into its own block store, a
-serial pass adding the stores into the gradient and the same threads
-writing the sparse Hessian from them, one range of it each; the Schur
-reduction, one range of the reduced system's block columns each; and the
-factorization's large panels, in windows. Set `LmConfig::num_threads` (1 =
-sequential, the default; `n` = n threads; 0 = every core), or
-`ARAEL_NUM_THREADS` in the environment, which sets the default and yields to
-a count set in code; `assembly_threads` gives the sweeps a count of their own.
-The workers stay parked for the life of the process; `arael::pool::shutdown()`
-joins them, and the next threaded solve spawns them again.
+Arael is single-threaded by default. With the `threads` feature the cost
+evaluation, the assembly, the Schur reduction and the factorization run on
+several threads. Set `LmConfig::num_threads` (1 = sequential, the default;
+`n` = n threads; 0 = every core), or `ARAEL_NUM_THREADS` in the
+environment, which sets the default and yields to a count set in code;
+`assembly_threads` gives the assembly a count of its own.
 
 A threaded assembly adds up in a different order than the sequential one, so
 results differ in the last bits between thread counts. The model is read from
 every thread at once, so a root must be `Sync`; one that is not, or that should
 stay sequential, says `#[arael(root, seq)]` and keeps its linear solve threaded.
 
-Threading has overhead: whether it helps, and by how much, depends on the model
-and its number of parameters. Every solve's report says what the threads did.
-See [docs/SOLVERS.md](docs/SOLVERS.md#threads); the threads chart under
+Threading has overhead: whether it helps depends on the model and its number
+of parameters. Every solve's report says what the threads did. See
+[docs/SOLVERS.md](docs/SOLVERS.md#threads); the threads chart under
 [Benchmarks](#benchmarks) shows what the threads buy.
+
+### Solving on a GPU
+
+`SparseFaer` can run the assembly, the damped solves and the LM loop on a
+GPU. It pays where the factor is large: bundle adjustment from a few
+hundred cameras up, SLAM maps with landmarks. A cargo feature compiles in a
+runtime: `gpu-cuda` (NVIDIA), `gpu-hip` (AMD) or `gpu-metal` (Apple
+silicon); the runtimes load their libraries at run time, so a build needs
+no CUDA toolkit or ROCm.
+
+```toml
+arael = { version = "0.9", features = ["gpu-cuda", "gpu-hip"] }
+```
+
+```rust,ignore
+let gpu = GpuDevice::detect(); // the machine's GPU, None without one
+let mixed = gpu.as_ref().is_some_and(|g| !g.has_f64()).then(MixedPrecision::default); // Metal has no f64
+let opts = SparseFaerOptions::default().with_gpu(gpu).with_mixed_precision(mixed);
+let result = model.solve_with(&mut SparseFaer::from_options(&opts), &cfg)?;
+if let Some(gpu) = &result.gpu {
+    println!("gpu: {gpu}"); // what ran on it
+}
+```
+
+A GPU solve agrees with a host solve to rounding. Some routes run on the
+host only, and a GPU given to them is not used: the solve then warns.
+See [docs/SOLVERS.md](docs/SOLVERS.md#solving-on-a-gpu) for what runs on
+the GPU, choosing a GPU, precision and the report.
 
 ## Parameter Covariance
 
@@ -612,7 +601,7 @@ let cov = r.covariance?;                           // the assembly the solve bui
 let sd  = cov.std_dev(&model.poses[0])?;           // one entity's 1-sigma (tangent coords)
 let s   = cov.marginal_cov(&model.landmarks[3])?;  // its full covariance block
 let p   = cov.marginal_cov(&model.poses[0].r2w)?;  // one parameter field alone
-let x   = cov.cross_cov(&model.poses[0], &model.landmarks[3]); // joint off-diagonal block
+let x   = cov.cross_cov(&model.poses[0], &model.landmarks[3])?; // joint off-diagonal block
 
 let cov = model.assemble_covariance(CovMode::AllMarginals)?;   // without a solve
 ```
@@ -626,9 +615,9 @@ unfixed gauge (free-gauge SLAM, a similarity-free bundle problem) returns
 
 | `CovMode` | What it does | When |
 |---|---|---|
-| **`PerQuery`** | factors `H`, solves for each queried entity's columns on demand | a few entities |
-| **`AllMarginals`** | also runs a selected inverse up front (block Takahashi over a supernodal factor), so every marginal and cross block is a lookup | many / all marginals |
-| **`TriDiagonal`** | forward/backward Schur pass over a block-tridiagonal `H` (localization: a pose chain, fixed map, no loop closures) -- no factorization; the last pose is free | band-structured localization |
+| `PerQuery` | factors `H`, solves for each queried entity's columns on demand | a few entities |
+| `AllMarginals` | also runs a selected inverse up front (block Takahashi over a supernodal factor), so every marginal and cross block is a lookup | many / all marginals |
+| `TriDiagonal` | forward/backward Schur pass over a block-tridiagonal `H` (localization: a pose chain, fixed map, no loop closures) -- no factorization; the last pose is free | band-structured localization |
 
 `CovOptions` (`LmConfig::with_covariance_options`, or `assemble_covariance_with` on
 the model) chooses the elimination `ordering`, and whether the block
@@ -646,7 +635,7 @@ covariance section in each of their READMEs.
 
 Compile-time differentiation generates optimized Rust code with CSE at build time -- ideal when the model structure is fixed. But many applications need equations that are only known at runtime: user-typed formulas in a CAD parametric dimension, configuration-driven curve fitting, or symbolic constraints loaded from a file.
 
-Arael supports this through **runtime differentiation**: parse an equation string with `arael_sym::parse`, symbolically differentiate once at setup with `E::diff`, then evaluate the expression tree numerically each solver iteration. The `ExtendedModel` trait is the integration point with the LM solver: the solve hands its hook a `Coo` list to push Hessian entries into.
+Arael supports this through runtime differentiation: parse an equation string with `arael_sym::parse`, symbolically differentiate once at setup with `E::diff`, then evaluate the expression tree numerically each solver iteration. The `ExtendedModel` trait is the integration point with the LM solver: the solve hands its hook a `Coo` list to push Hessian entries into.
 
 The sketch editor (`arael-sketch`) uses this extensively for parametric expression dimensions -- a user can type `d0 * 2 + 3` as a dimension value, and the solver constrains the geometry to satisfy the equation in real time, with full symbolic derivatives.
 
@@ -737,10 +726,11 @@ cdylib + staticlib), C++ wrapper classes with vendored math headers
 (`python/`, stdlib only -- one cdylib serves every CPython 3.x), and a
 wasm-bindgen crate for the browser (`wasm/`); `interfaces = ["cxx"]`
 under `[package.metadata.arael]` in the crate's `Cargo.toml` writes
-only the trees listed. The three skins carry
-the full surface: composing the problem, all solvers
-(dense/sparse/band), robust losses, configs with the real Rust preset
-values, timing, solve reports, and the covariance queries.
+only the trees listed. The C++ and Python interfaces cover composing the
+problem, the solvers (dense, sparse, band, the GPU), robust losses,
+configs with the Rust preset values, timing, solve reports and the
+covariance queries; [docs/WASM.md](docs/WASM.md) lists what the
+JavaScript one leaves out.
 
 ```cpp
 Fit fit;                                  // C++
@@ -771,7 +761,7 @@ re-solving around them. Its source is
 
 ### My solve doesn't converge. What do I check?
 
-- **Turn on verbose mode.** Set `verbose: true` on `LmConfig` and every LM step prints one line: iteration / retry, cost before -> after, the improvement, the damping lambda, and the microseconds it took.
+- Turn on verbose mode. Set `verbose: true` on `LmConfig` and every LM step prints one line: iteration / retry, cost before -> after, the improvement, the damping lambda, and the microseconds it took.
 
   ```rust,ignore
   let cfg = LmConfig::conservative().with_verbose(true).with_gather_timing(true);
@@ -802,35 +792,35 @@ re-solving around them. Its source is
 
   A healthy pass is steady cost drops with no Cholesky rejections. The trace points at the rest of this list: a run of rejections before the first major cost reduction is the initial-damping entry; NaN / Inf counts and a `DegenerateDiagonal` failure each have their own entry below.
 
-- **Initial damping.** The `lambda` column in the verbose output is the LM damping, seeded by `LmConfig::initial_lambda` (1e-4 in `conservative()`). Too small and early steps are near-Gauss-Newton: they overshoot from a rough start and get rejected, and lambda has to climb before progress begins. Too large and every step is a short gradient-descent crawl. Starting near a minimum (a re-solve after a small perturbation): 1e-8 to 1e-6. Starting far from one: 1e-3 or higher. The `LmConfig::well_conditioned()` and `ill_conditioned()` presets cover the two regimes. When no single value works, `ill_conditioned()`'s gain-ratio `NielsenLambdaDriver` adapts lambda per step instead of holding a schedule. Re-solving the same problem: `LmConfig::continue_from(&result)` seeds `initial_lambda` from the previous solve's `final_lambda`.
+- Initial damping. The `lambda` column in the verbose output is the LM damping, seeded by `LmConfig::initial_lambda` (1e-4 in `conservative()`). Too small and early steps are near-Gauss-Newton: they overshoot from a rough start and get rejected, and lambda has to climb before progress begins. Too large and every step is a short gradient-descent crawl. Starting near a minimum (a re-solve after a small perturbation): 1e-8 to 1e-6. Starting far from one: 1e-3 or higher. The `LmConfig::well_conditioned()` and `ill_conditioned()` presets cover the two regimes. When no single value works, `ill_conditioned()`'s gain-ratio `NielsenLambdaDriver` adapts lambda per step instead of holding a schedule. Re-solving the same problem: `cfg.continue_from(&result)` seeds `initial_lambda` from the previous solve's `final_lambda`.
 
-- **Better initial values.** LM is a local method: it linearises around the current parameters, so a starting point far from the optimum converges slowly, lands in the wrong minimum, or stalls -- and a robustifier makes the requirement stricter, since it is built to ignore far-out residuals. Seed from whatever structure you have (odometry, a closed-form estimate, the previous solve) before tuning anything else. See [Initialisation matters](#initialisation-matters).
+- Better initial values. LM is a local method: it linearises around the current parameters, so a starting point far from the optimum converges slowly, lands in the wrong minimum, or stalls -- and a robustifier makes the requirement stricter, since it is built to ignore far-out residuals. Seed from whatever structure you have (odometry, a closed-form estimate, the previous solve) before tuning anything else. See [Initialisation matters](#initialisation-matters).
 
-- **Run `model.validate()`.** The model linter reports non-finite parameters, stale refs, unconstrained parameters, and derivative mismatches in one pass, instead of a solve failing on the first one (see [docs/SOLVERS.md](docs/SOLVERS.md#validation----modelvalidate)).
+- Run `model.validate()`. The model linter reports non-finite parameters, stale refs, unconstrained parameters, and derivative mismatches in one pass, instead of a solve failing on the first one (see [docs/SOLVERS.md](docs/SOLVERS.md#validation----modelvalidate)).
 
-- **Cost breakdown by label.** Name your constraint attributes with `#[arael(constraint(hb, name = "drift", { ... }))]` so each group shows up under its own label in the sum-of-squares. Call `model.calc_cost_table(&params)` for a `HashMap<&'static str, T>` and log it. A single label dominating the total is usually the culprit -- either an overly tight sigma, bad initial values for its inputs, or a constraint that's mathematically unsatisfiable. Read the small end too: a label that is missing, zero, or suspiciously small may be a constraint that never ran. Check its guard, that the collection it iterates is non-empty, and that its refs point where you think.
+- Cost breakdown by label. Name your constraint attributes with `#[arael(constraint(hb, name = "drift", { ... }))]` so each group shows up under its own label in the sum-of-squares. Call `model.calc_cost_table(&params)` for a `HashMap<&'static str, T>` and log it. A single label dominating the total is usually the culprit -- either an overly tight sigma, bad initial values for its inputs, or a constraint that's mathematically unsatisfiable. Read the small end too: a label that is missing, zero, or suspiciously small may be a constraint that never ran. Check its guard, that the collection it iterates is non-empty, and that its refs point where you think.
 
-- **NaN or Inf residuals / derivatives.** The verbose-mode output already tells you whether grad / matrix / params contain non-finite values at the failing step. If they do, walk `model.calc_jacobian(&params).rows` to find the specific row. A NaN residual or partial derivative usually means a `sqrt`, `acos`, `asin`, or `atan2` saw a degenerate input (zero-length vector, both-zero arguments, `|x| > 1` for asin/acos). `arael-sym` ships `safe_sqrt`, `safe_asin`, `safe_acos`, `safe_atan2` that clamp / regularise at the singular point and produce non-diverging derivatives. Before reaching for them, prefer to redesign the constraint so the singularity can't be hit. A `safe_*` wrapper hides the degeneracy from the solver and may leave the residual insensitive to the parameters that should drive it out of the singular region; an equivalent constraint formulated on the right geometric quantity avoids the singularity entirely. E.g. match 3D landmarks to features in 3D space (compare world-frame directions or positions) instead of projecting through a camera model and computing 2D image-plane residuals. 3D is not automatically better: a badly chosen 3D quantity keeps the behind-camera and singularity problems. A well-chosen one has neither.
+- NaN or Inf residuals / derivatives. The verbose-mode output already tells you whether grad / matrix / params contain non-finite values at the failing step. If they do, walk `model.calc_jacobian(&params).rows` to find the specific row. A NaN residual or partial derivative usually means a `sqrt`, `acos`, `asin`, or `atan2` saw a degenerate input (zero-length vector, both-zero arguments, `|x| > 1` for asin/acos). `arael-sym` ships `safe_sqrt`, `safe_asin`, `safe_acos`, `safe_atan2` that clamp / regularise at the singular point and produce non-diverging derivatives. Before reaching for them, prefer to redesign the constraint so the singularity can't be hit. A `safe_*` wrapper hides the degeneracy from the solver and may leave the residual insensitive to the parameters that should drive it out of the singular region; an equivalent constraint formulated on the right geometric quantity avoids the singularity entirely. E.g. match 3D landmarks to features in 3D space (compare world-frame directions or positions) instead of projecting through a camera model and computing 2D image-plane residuals. 3D is not automatically better: a badly chosen 3D quantity keeps the behind-camera and singularity problems. A well-chosen one has neither.
 
-- **Derivatives that disagree with finite differences.** `model.check_gradients(&params)` compares the assembled gradient against central differences of `calc_cost` and reports each component that disagrees. It catches a wrong `derivs = [...]` on an `#[arael::function]` or a wrong `deriv =` cache: the cost comes from the function value and the gradient from the declared derivative, so only a finite-difference comparison sees them disagree. The symptom is a solve that stalls or oscillates at a plausible-looking cost, because the step direction is not downhill. `check_gradients_tol(&params, tol)` loosens the comparison for noisy f32 costs. `validate()` runs the same check; use the standalone form for a custom tolerance or to re-check one fix.
+- Derivatives that disagree with finite differences. `model.check_gradients(&params)` compares the assembled gradient against central differences of `calc_cost` and reports each component that disagrees. It catches a wrong `derivs = [...]` on an `#[arael::function]` or a wrong `deriv =` cache: the cost comes from the function value and the gradient from the declared derivative, so only a finite-difference comparison sees them disagree. The symptom is a solve that stalls or oscillates at a plausible-looking cost, because the step direction is not downhill. `check_gradients_tol(&params, tol)` loosens the comparison for noisy f32 costs. `validate()` runs the same check; use the standalone form for a custom tolerance or to re-check one fix.
 
-- **Non-positive diagonal.** A solve that fails with `SolveFailureKind::DegenerateDiagonal { param, fault }` names the offending parameter and is the loudest possible signal that some parameter is untouched by every constraint (indices left at `u32::MAX`) or is receiving a negative contribution. Either outcome is a bug distinct from f32 accumulation noise.
+- Non-positive diagonal. A solve that fails with `SolveFailureKind::DegenerateDiagonal { param, fault }` names the offending parameter and is the loudest possible signal that some parameter is untouched by every constraint (indices left at `u32::MAX`) or is receiving a negative contribution. Either outcome is a bug distinct from f32 accumulation noise.
 
-- **Gradient magnitude.** After `calc_grad_hessian_dense`, the maximum absolute gradient component should be small relative to the cost scale at a local minimum. A huge gradient with tiny cost means the parameter scaling is off -- one parameter moves cost several orders of magnitude more than another, which destabilises Levenberg-Marquardt.
+- Gradient magnitude. After `calc_grad_hessian_dense`, the maximum absolute gradient component should be small relative to the cost scale at a local minimum. A huge gradient with tiny cost means the parameter scaling is off -- one parameter moves cost several orders of magnitude more than another, which destabilises Levenberg-Marquardt.
 
-- **Hessian health.** The same `hessian` array should be finite and positive-semi-definite at a minimum (smallest eigenvalue ≥ 0 modulo roundoff). A significantly-negative smallest eigenvalue means the Gauss-Newton approximation `J^T J` is a poor local fit -- often because constraints are ill-conditioned or cancel.
+- Hessian health. The same `hessian` array should be finite and positive-semi-definite at a minimum (smallest eigenvalue >= 0 modulo roundoff). A significantly-negative smallest eigenvalue means the Gauss-Newton approximation `J^T J` is a poor local fit -- often because constraints are ill-conditioned or cancel.
 
-- **Stiffness.** Ratios between the smallest and largest sigmas (or between the smallest and largest eigenvalues of `J^T J`) that span many orders of magnitude make the problem numerically stiff. LM damping has to pick a lambda that suits both ends, which is hard at f32 precision. Keep isigmas comparable where you can; if a tight constraint dominates one direction, a gauge direction orthogonal to it will starve for signal. Starting with a loose scale and ramping up (graduated optimisation -- see `loc_demo` / `slam_demo` for the `frine_isigma_scale` pattern) helps LM climb a stiff problem without rejecting early steps.
+- Stiffness. Ratios between the smallest and largest sigmas (or between the smallest and largest eigenvalues of `J^T J`) that span many orders of magnitude make the problem numerically stiff. LM damping has to pick a lambda that suits both ends, which is hard at f32 precision. Keep isigmas comparable where you can; if a tight constraint dominates one direction, a gauge direction orthogonal to it will starve for signal. Starting with a loose scale and ramping up (graduated optimisation -- see `loc_demo` / `slam_demo` for the `frine_isigma_scale` pattern) helps LM climb a stiff problem without rejecting early steps.
 
-- **Simpler math beats clever math.** Reformulate residuals on the most natural geometric quantity. 3D direction / position errors are cheaper and better-conditioned than 2D reprojection errors; relative rotations compared as matrices or unit quaternions avoid Euler-angle gimbal lock; distances compared in squared form avoid `sqrt` derivatives near zero. Every nonlinear operation you remove is one less place for the residual / derivative to misbehave and one less source of stiffness.
+- Simpler math beats clever math. Reformulate residuals on the most natural geometric quantity. 3D direction / position errors are cheaper and better-conditioned than 2D reprojection errors; relative rotations compared as matrices or unit quaternions avoid Euler-angle gimbal lock; distances compared in squared form avoid `sqrt` derivatives near zero. Every nonlinear operation you remove is one less place for the residual / derivative to misbehave and one less source of stiffness.
 
-- **Inspect the generated code.** Use [`cargo expand`](https://github.com/dtolnay/cargo-expand) to see what the macro emitted for your constraint body -- see [Looking under the hood](#looking-under-the-hood-with-cargo-expand) below.
+- Inspect the generated code. Use [`cargo expand`](https://github.com/dtolnay/cargo-expand) to see what the macro emitted for your constraint body -- see [Looking under the hood](#looking-under-the-hood-with-cargo-expand) below.
 
-- **Rank / DOF.** Call `Jacobian::singular_values` (or the full `Jacobian::svd` for directions). Near-zero singular values count the degrees of freedom. If this is higher than you expect, the model is under-constrained. The right singular vectors (columns of `SvdResult::v`) corresponding to σ ≈ 0 name the unconstrained parameter directions -- useful for identifying *which* parameters are free. SVD is always performed in f64 regardless of the model's element type, so rank detection stays reliable even for f32 models.
+- Rank / DOF. Call `Jacobian::singular_values` (or the full `Jacobian::svd` for directions). Near-zero singular values count the degrees of freedom. If this is higher than you expect, the model is under-constrained. The right singular vectors (columns of `SvdResult::v`) corresponding to a singular value near 0 name the unconstrained parameter directions -- useful for identifying *which* parameters are free. SVD is always performed in f64 regardless of the model's element type, so rank detection stays reliable even for f32 models.
 
 ### Looking under the hood with `cargo expand`
 
-Mastering arael means being able to read what the macros actually generated for your equations. `#[arael::model]` does a lot: it interprets the constraint body symbolically, differentiates it against every reachable parameter, runs common-subexpression elimination, and emits Rust code for three call paths (`__compute_blocks`, `__build_blocks`, `calc_jacobian`). [`cargo expand`](https://github.com/dtolnay/cargo-expand) (`cargo install cargo-expand`) prints the expansion exactly as the compiler sees it.
+To see what the macros generated for your equations, expand them. `#[arael::model]` does a lot: it interprets the constraint body symbolically, differentiates it against every reachable parameter, runs common-subexpression elimination, and emits Rust code for three call paths (`__compute_blocks`, `__build_blocks`, `calc_jacobian`). [`cargo expand`](https://github.com/dtolnay/cargo-expand) (`cargo install cargo-expand`) prints the expansion exactly as the compiler sees it.
 
 ```bash
 cargo expand --example single_root_demo
@@ -891,12 +881,12 @@ let __cse_2 = __cse_0 * (lm.pos.x - pose.pos.x.work())
 
 Reading these tells you what the compiler *actually* has to evaluate -- useful for understanding the cost of a constraint, spotting accidental non-shared work, and sanity-checking that symbolic simplification collapsed things you expected it to.
 
-### What to look for
+### What the expansion contains
 
-- **`__build_blocks`** -- where every declared `SelfBlock` / `CrossBlock` gets its place in the block store and its global parameter indices. A block absent here is not part of the Hessian.
-- **`__compute_blocks`** -- the grad + block-Hessian accumulation path. Each constraint is a nested block with its own CSE'd body.
-- **`calc_jacobian`** -- same body structure but builds a `JacobianRow` per residual instead of accumulating into the blocks. Generated only when you declare `#[arael(root, jacobian)]`.
-- **source markers** -- doc comments like `/// arael: PointFrine[<name>] @ path/to/file.rs:NNN` pinpoint the constraint attribute each block came from.
+- `__build_blocks` -- where every declared `SelfBlock` / `CrossBlock` gets its place in the block store and its global parameter indices. A block absent here is not part of the Hessian.
+- `__compute_blocks` -- the grad + block-Hessian accumulation path. Each constraint is a nested block with its own CSE'd body.
+- `calc_jacobian` -- same body structure but builds a `JacobianRow` per residual instead of accumulating into the blocks. Generated only when you declare `#[arael(root, jacobian)]`.
+- source markers -- doc comments like `/// arael: PointFrine[<name>] @ path/to/file.rs:NNN` pinpoint the constraint attribute each block came from.
 
 Expansion grows quickly (a full SLAM model runs to thousands of lines). Use `sed -n` or a pager scoped to the method you care about:
 
@@ -934,8 +924,8 @@ An interactive constraint-based 2D sketch editor built on the arael optimization
 
 The sketch solver combines both differentiation modes:
 
-- **Geometric constraints** (horizontal, coincident, parallel, tangent, etc.) use **compile-time differentiation** -- the macro generates optimized Gauss-Newton code with CSE for each constraint type.
-- **Parametric dimensions** use **runtime differentiation** -- the user types an expression like `d0 * 2 + 3` as a dimension value, and the solver parses it, differentiates symbolically, and constrains the geometry to satisfy the equation in real time. Dimensions can reference each other, entity properties (`L0.length`, `A0.radius`), and arithmetic expressions. Broken references (deleted entities) are detected and the dimension falls back to its last computed value.
+- Geometric constraints (horizontal, coincident, parallel, tangent, etc.) use compile-time differentiation -- the macro generates optimized Gauss-Newton code with CSE for each constraint type.
+- Parametric dimensions use runtime differentiation -- the user types an expression like `d0 * 2 + 3` as a dimension value, and the solver parses it, differentiates symbolically, and constrains the geometry to satisfy the equation in real time. Dimensions can reference each other, entity properties (`L0.length`, `A0.radius`), and arithmetic expressions. Broken references (deleted entities) are detected and the dimension falls back to its last computed value.
 
 This makes the sketch editor a fully parametric constraint solver where changing one dimension propagates through all dependent expressions.
 
@@ -990,7 +980,9 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
     unitvec.rs      UnitVecParam: unit direction with 2 degrees of freedom
     twist.rs        twists: compact rigid-transform form and conversions
     simple_lm.rs    LM solver, LmProblem/RootProblem/FitProblem, Dense/Band/Sparse backends
-                    (SparseFaer: sparse Cholesky + Schur marginalization)
+                    (SparseFaer: sparse Cholesky + Schur marginalization), GpuDevice
+    device.rs       The GPU assembly the generated code implements (feature gpu)
+    gpu_solver/     The solve on a GPU: the damped solves and the LM loop on the device
     store.rs        The block store the generated sweeps and the solver share (inner API)
     threads.rs      Solve context: thread count, the block stores kept between solves, the thread report
     covariance.rs   Parameter covariance recovery (Sigma = 2 H^-1) at the solution
@@ -1012,7 +1004,7 @@ cargo-arael/        `cargo arael` subcommand: C ABI + C++ + Python + JavaScript 
     main.rs         `cargo arael export` / `check` / `setup` / `kernels`: the driver
     lib.rs          Library surface: the sidecar IR, the per-target emitters and the kernels dump
     export.rs       Export pipeline: build with the sidecar, harvest the JSON, emit the trees
-    kernels.rs      Kernels dump: build with ARAEL_KERNELS_DIR, list each root's kernels file
+    kernels.rs      `cargo arael kernels`: writes the GPU kernels a crate's roots generate, for reading
     ir.rs           The model IR, a typed mirror of the JSON sidecar
     leaves.rs       The settable-scalar leaf walk shared by the shim and Python emitters
     emit_ffi.rs     Rust FFI shim emitter (the C ABI capi crate)
@@ -1022,6 +1014,10 @@ cargo-arael/        `cargo arael` subcommand: C ABI + C++ + Python + JavaScript 
 cxx-tests/          Generated-interface proof: fixture model, parity + CMake consumer tests
 cxx-examples/       demos over generated interfaces: shared Rust models, C++ and Python drivers
 export-tests/       Standalone mini-workspace proving cross-crate model export/import
+
+arael-gpu/          The GPU runtimes (CUDA, HIP, Metal, and the CPU device for tests) and the GPU
+                    solver's kernels, written in C++ and compiled at run time (arael-gpu/README.md)
+tools/devmap/       Maps a traced GPU solve by phase, stage and kernel (tools/devmap/README.md)
 
 arael-faer/         faer extensions: block CSC, Schur complement, block Cholesky, ordering, threads
   src/

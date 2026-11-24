@@ -800,7 +800,7 @@ impl<T: crate::utils::Float> EulerAngleParam<T> {
     /// Write per-component indices into `out`, or `u32::MAX` if fixed.
     pub fn write_indices(&self, out: &mut [u32]) { ParamSlot::write_param_indices(self, out) }
     /// Absorb current delta into reference rotation and reset delta. The
-    /// composition is re-orthonormalized ([`compose_reference`]), so its
+    /// composition is re-orthonormalized (`compose_reference`), so its
     /// rounding does not build up over the steps.
     pub fn advance(&mut self) {
         self.ref_rotation = compose_reference(self.ref_rotation, self.delta);
@@ -1456,7 +1456,7 @@ impl<F: crate::utils::Float, const R: usize, const C: usize> Model
 impl<T> Model for crate::refs::Ref<T> {}
 
 // ---------------------------------------------------------------------------
-// Collection Model impls — iterate and recurse
+// Collection Model impls -- iterate and recurse
 // ---------------------------------------------------------------------------
 
 macro_rules! impl_model_collection {
@@ -1568,7 +1568,7 @@ use crate::store::HessianBinder;
 /// Declares that one entity has a diagonal Hessian block.
 ///
 /// The block itself is a marker. Its values -- the upper triangle of the
-/// Gauss-Newton Hessian approximation (2·dr·dr^T) over that entity's own
+/// Gauss-Newton Hessian approximation (2*dr*dr^T) over that entity's own
 /// parameters, and the entity's gradient -- live in a
 /// [`SelfBlockArray`](crate::store::SelfBlockArray)
 /// in the block store, the generated `<Root>Blocks` struct the solve keeps
@@ -1638,9 +1638,9 @@ pub type BoxedSelfBlock<A, const N: usize, const M: usize, T = f64> = SelfBlock<
 /// [`Context`](crate::threads::Context). The marker's
 /// [`slot`](Self::slot) is its index into that array. A's gradient and A-A
 /// diagonal belong to A's own [`SelfBlock`]; same for B. So every
-/// `∂r/∂p_i · ∂r/∂p_j` pair is written in exactly one place.
+/// `dr/dp_i * dr/dp_j` pair is written in exactly one place.
 ///
-/// `NA = A::PARAM_COUNT`, `NB = B::PARAM_COUNT`, and the tile is NA×NB
+/// `NA = A::PARAM_COUNT`, `NB = B::PARAM_COUNT`, and the tile is NA x NB
 /// row-major. `T` is the float type (f32 or f64, default f64).
 ///
 /// Placement: normally a field on the constraint struct itself (one tile
@@ -1875,7 +1875,7 @@ impl<A, B, const NA: usize, const NB: usize, T: crate::utils::Float> VarCrossBlo
 /// in triplet form.
 #[derive(Clone)]
 pub struct Coo<T: crate::utils::Float = f64> {
-    /// Hessian entries: upper-triangle (lo, hi, 2·dr_i·dr_j). Only cross-
+    /// Hessian entries: upper-triangle (lo, hi, 2*dr_i*dr_j). Only cross-
     /// entity pairs are stored (within-entity pairs live in each entity's
     /// `SelfBlock`). Callers that manage their own flat param layout
     /// without per-entity blocks can pass each param as its own "entity"
@@ -2288,11 +2288,11 @@ impl<T: crate::utils::Float> Jacobian<T> {
         }
     }
 
-    /// Full thin SVD: σ, U, V. Use this when you need the directions of
+    /// Full thin SVD: the singular values, U, V. Use this when you need the directions of
     /// rank deficiency; right singular vectors (columns of `V`) with
-    /// σ ≈ 0 name the free-parameter directions in a DOF analysis.
+    /// singular values near 0 name the free-parameter directions in a DOF analysis.
     ///
-    /// Thin dimensions: U is m×k, V is n×k, σ has k entries where
+    /// Thin dimensions: U is m x k, V is n x k, the singular values have k entries where
     /// k = min(m, n). Matrices stored row-major. Always in f64.
     pub fn svd(&self) -> SvdResult {
         let m = self.num_residuals();
@@ -2441,15 +2441,15 @@ fn svd_dense_f64(m: usize, n: usize, dense: &[f64]) -> SvdResult {
     }
 }
 
-/// Result of an SVD decomposition of a [`Jacobian`]. Thin SVD: U is m×k,
-/// V is n×k, σ has k = min(m, n) entries. Matrices are stored row-major.
+/// Result of an SVD decomposition of a [`Jacobian`]. Thin SVD: U is m x k,
+/// V is n x k, the singular values have k = min(m, n) entries. Matrices are stored row-major.
 /// Always in f64 regardless of the source Jacobian's element type.
 pub struct SvdResult {
     /// Singular values, descending order.
     pub singular_values: std::vec::Vec<f64>,
-    /// Left singular vectors, m×k row-major.
+    /// Left singular vectors, m x k row-major.
     pub u: std::vec::Vec<f64>,
-    /// Right singular vectors, n×k row-major. Column `i` corresponds to
+    /// Right singular vectors, n x k row-major. Column `i` corresponds to
     /// `singular_values[i]`.
     pub v: std::vec::Vec<f64>,
     /// Number of residuals (rows of the original Jacobian).
@@ -2653,7 +2653,7 @@ mod tests {
         c.deserialize_params(&data);
         assert_eq!(a.value, 10.0);
         assert_eq!(b.value, 20.0);
-        assert_eq!(c.value, 99.0); // unchanged — fixed
+        assert_eq!(c.value, 99.0); // unchanged -- fixed
     }
 
     #[test]

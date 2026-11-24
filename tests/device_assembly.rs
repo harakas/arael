@@ -745,7 +745,7 @@ fn a_quaternion_scene_assembles_and_solves_on_the_device_as_on_the_cpu() {
     if checks_f64("the quaternion scene") {
         for (wide, tol) in [(Wide::F64, 1e-11), (Wide::Df32, 1e-10)] {
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -889,7 +889,7 @@ fn an_euler_scene_assembles_and_solves_on_the_device_as_on_the_cpu() {
     if checks_f64("the Euler scene") {
         for (wide, tol) in [(Wide::F64, 1e-11), (Wide::Df32, 1e-10)] {
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -1684,7 +1684,7 @@ fn checks_f32<P: LmProblemInternals<f32> + RootProblem<f32>>(s: &mut P, cost_tol
     for wide in check_wides() {
         let chk = arael::__gpu::device_check(s, &x, &x1, &device(), wide);
         assert!(chk.values > 0, "{what}");
-        assert!((chk.device_cost - chk.cpu_cost).abs() <= cost_tol * chk.cpu_cost, "{what} {wide:?}: {chk:?}");
+        assert!((chk.device_cost - chk.host_cost).abs() <= cost_tol * chk.host_cost, "{what} {wide:?}: {chk:?}");
         assert!(chk.grad_err < deriv_tol && chk.hess_err < deriv_tol, "{what} {wide:?}: {chk:?}");
     }
 }
@@ -1769,7 +1769,7 @@ fn the_f64_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
         let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
         assert!(chk.values > 0);
         assert_eq!(chk.leaf_bits, 53, "an f64 model's leaves");
-        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
         assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
     }
 }
@@ -1786,7 +1786,7 @@ fn the_f32_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
         let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
         assert_eq!(chk.leaf_bits, 24, "an f32 model's leaves");
         // the CPU sums its f32 products in f32, the device in its wide scalar
-        assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-5 * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!((chk.device_cost - chk.host_cost).abs() <= 1e-5 * chk.host_cost, "{wide:?}: {chk:?}");
         assert!(chk.grad_err < 1e-4 && chk.hess_err < 1e-4, "{wide:?}: {chk:?}");
     }
 }
@@ -1840,7 +1840,7 @@ fn an_f32_entity_in_an_f64_root_reports_its_leaves_bits() {
         let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
         assert_eq!(chk.leaf_bits, 24, "{wide:?}: the f32 entity's leaves");
         let tol = arael::__gpu::check_tolerance(chk.leaf_bits);
-        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
         assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
     }
 }
@@ -2018,7 +2018,7 @@ fn a_pose_graph_with_a_prior_assembles_on_the_device_as_on_the_cpu() {
             let x1 = perturbed(&x);
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
             assert!(chk.values > 0);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -2051,7 +2051,7 @@ fn an_edge_from_a_pose_to_itself_assembles_on_the_device_as_on_the_cpu() {
             s.serialize(&mut x);
             let x1 = perturbed(&x);
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -2088,7 +2088,7 @@ fn a_self_edge_on_the_first_pose_is_not_grouped_with_the_slots_of_a_fixed_pose()
                 s.serialize(&mut x);
                 let x1 = perturbed(&x);
                 let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-                assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}, self edge first {first}: {chk:?}");
+                assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}, self edge first {first}: {chk:?}");
                 assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}, self edge first {first}: {chk:?}");
             }
         }
@@ -2249,7 +2249,7 @@ fn an_angle_pose_graph_assembles_and_solves_on_the_device_as_on_the_cpu() {
     if checks_f64("the angle pose graph") {
         for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -2392,7 +2392,7 @@ fn a_var_self_block_pose_graph_assembles_and_solves_on_the_device_as_on_the_cpu(
     if checks_f64("the var self block pose graph") {
         for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -2556,7 +2556,7 @@ fn a_3d_pose_graph_assembles_and_solves_on_the_device_as_on_the_cpu() {
     if checks_f64("the 3d pose graph") {
         for (wide, tol) in [(Wide::F64, 1e-11), (Wide::Df32, 1e-10)] {
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -2756,7 +2756,7 @@ fn guards_on_every_form_keep_on_the_device_what_they_keep_on_the_cpu() {
         let x1 = perturbed(&x);
         for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{use_prior} {wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{use_prior} {wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{use_prior} {wide:?}: {chk:?}");
         }
     }
@@ -2983,7 +2983,7 @@ fn losses_on_every_form_assemble_and_solve_on_the_device_as_on_the_cpu() {
     if checks_f64("losses on every form") {
         for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -3097,7 +3097,7 @@ fn a_robust_bundle_adjustment_assembles_and_solves_on_the_device_as_on_the_cpu()
             s.serialize(&mut x);
             let x1 = perturbed(&x);
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -3208,7 +3208,7 @@ fn an_f32_root_s_cost_sums_on_the_device_as_its_keywords_say() {
         let tol = if wide == arael::__gpu::Wide::F64 { 1e-13 } else { 1e-11 };
         assert!((chk.device_cost - exact).abs() <= tol * exact, "cost_f64 {wide:?}: {} against the exact {exact}", chk.device_cost);
         // the CPU's f64 sum rounded to f32
-        assert!((chk.device_cost - chk.cpu_cost).abs() <= 0.5 * f32::EPSILON as f64 * exact, "cost_f64 {wide:?}: {chk:?}");
+        assert!((chk.device_cost - chk.host_cost).abs() <= 0.5 * f32::EPSILON as f64 * exact, "cost_f64 {wide:?}: {chk:?}");
     }
 }
 
@@ -3351,7 +3351,7 @@ fn a_multi_cross_constraint_assembles_and_solves_on_the_device_as_on_the_cpu() {
     if checks_f64("the multi cross constraint") {
         for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -3647,7 +3647,7 @@ fn assembles_and_solves_as_on_the_cpu<P: LmProblemInternals<f64> + RootProblem<f
     if checks_f64(what) {
         for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{what} {wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{what} {wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{what} {wide:?}: {chk:?}");
         }
     }
@@ -5808,7 +5808,7 @@ fn a_plane_world_assembles_and_solves_on_the_device_as_on_the_cpu() {
     if checks_f64("the plane world") {
         for (wide, tol) in [(Wide::F64, 1e-11), (Wide::Df32, 1e-10)] {
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -6224,7 +6224,7 @@ fn a_slam_path_assembles_and_solves_on_the_device_as_on_the_cpu() {
     if checks_f64("the slam path") {
         for (wide, tol) in [(Wide::F64, 1e-11), (Wide::Df32, 1e-10)] {
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -6333,7 +6333,7 @@ fn a_loss_not_zero_at_zero_costs_the_same_behind_a_dead_branch_on_the_device() {
             s.serialize(&mut x);
             let x1 = perturbed(&x);
             let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
-            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+            assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
             assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
         }
     }
@@ -6437,7 +6437,7 @@ fn the_cost_check_allows_for_the_cpus_chain_of_adds() {
     for wide in check_wides() {
         let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
         assert_eq!(chk.chain, n, "{wide:?}");
-        let rel = (chk.device_cost - chk.cpu_cost).abs() / chk.cpu_cost;
+        let rel = (chk.device_cost - chk.host_cost).abs() / chk.host_cost;
         assert!(rel > tol, "{wide:?}: the chain rounds less than this test needs: {chk:?}");
         assert!(rel <= arael::__gpu::check_cost_tolerance(24, 24, chk.chain), "{wide:?}: {chk:?}");
         assert!(chk.grad_err <= tol && chk.hess_err <= tol, "{wide:?}: {chk:?}");

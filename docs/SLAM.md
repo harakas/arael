@@ -11,10 +11,10 @@ The demo generates a synthetic S-curve trajectory with 60 poses and
 240 point landmarks at 5-30m distance. Five cameras provide
 360-degree coverage. Each landmark is visible from its anchor pose
 +/- 15 poses with 75% probability, reproducing the sparse band
-structure you get from real feature tracks. **50% of feature
-associations are completely wrong, with 30x pixel noise on those
-outliers** -- tolerated by the Starship robust wrapper combined with
-graduated optimisation.
+structure you get from real feature tracks. 50% of feature
+associations are wrong, with 30x pixel noise on those outliers,
+tolerated by the Starship robust wrapper combined with graduated
+optimisation.
 
 The linear solver is faer sparse Cholesky (pure Rust) to exploit the
 Hessian sparsity, with optional Eigen SimplicialLLT and CHOLMOD
@@ -27,9 +27,10 @@ cargo run -r --example slam_demo -- --solver faer --poses 100 --landmarks 400
 
 Built with a GPU feature (`gpu-cuda`, `gpu-hip`, `gpu-metal`, or
 several of them), the faer solver runs on the machine's GPU
-(`GpuDevice::detect()`): an NVIDIA card where there is one, else an AMD
-one. The report printed after the last pass says what ran on it and how
-long it took:
+(`GpuDevice::detect()`, which prefers a discrete GPU to an integrated
+one, then CUDA, HIP, Metal); on a machine without one it solves on the
+host. The report printed after the last pass says what ran on the GPU
+and how long it took:
 
 ```bash
 cargo run -r --example slam_demo --features gpu-cuda,gpu-hip
@@ -56,7 +57,7 @@ Path (root)
     ea: SimpleEulerAngleParam<f32>  -- euler angles: x=roll, y=pitch, z=yaw
     info: PoseInfo                  -- odometry, GPS, tilt, features
     hb_pose: SelfBlock<Pose>        -- GPS + drift + tilt hessian block
-  landmarks: Vec<PointLandmark>     -- 240 landmarks, 3 params each
+  landmarks: Arena<PointLandmark>   -- 240 landmarks, 3 params each
     pos: Param<vect3f>              -- 3D position (optimizable)
     frines: Vec<PointFrine>         -- observations linking to poses
       pose: Ref<Pose>               -- which pose observed this
@@ -79,7 +80,7 @@ and `--landmarks`.
 
 ### Frines
 
-A **frine** (project vocabulary) is a struct that ties one entity to
+A frine (project vocabulary) is a struct that ties one entity to
 one measurement. `PointFrine` is the frine for a point landmark: it
 binds a `PointLandmark` to a `PointFeature` -- the 2D detection in
 one of the pose's cameras that observed it. In factor-graph SLAM
@@ -111,14 +112,14 @@ freedom (3 translation + 3 rotation). The entire solution can
 shift/rotate arbitrarily without changing feature reprojection costs.
 Each sensor fixes specific degrees of freedom:
 
-- **Tilt sensor (accelerometer)** fixes roll (ea.x) and pitch (ea.y),
+- Tilt sensor (accelerometer) fixes roll (ea.x) and pitch (ea.y),
   making the path level. Without it the solution can tilt arbitrarily.
-- **GPS** fixes translation and yaw (ea.z). Even with a systematic
+- GPS fixes translation and yaw (ea.z). Even with a systematic
   offset (all readings biased by ~2.5m), it still constrains yaw
   because the offset is constant while poses move -- relative GPS
   positions define heading.
-- **Odometry** constrains relative motion between consecutive poses.
-- **Drift constraints** are weak regularizers (sigma=1000m pos,
+- Odometry constrains relative motion between consecutive poses.
+- Drift constraints are weak regularizers (sigma=1000m pos,
   1800deg ea) preventing parameters from diverging during early
   optimization passes when feature constraints are scaled down.
 
@@ -154,7 +155,7 @@ struct PointFeature {
 
 - `pixel` -- the original detection pixel; kept for debugging, not
   touched by any constraint.
-- `mf2r` -- the **feature frame** rotation. `col0` points from the
+- `mf2r` -- the feature frame rotation. `col0` points from the
   pose along the measured view direction (in robot-frame
   coordinates); `col1` and `col2` are the two perpendicular axes
   used to measure horizontal and vertical angular error. Set at
@@ -230,7 +231,7 @@ struct PoseInfo {
   covariances, produced by `decompose_cov` on the position and
   attitude covariances separately.
 - `gps: Option<GpsData>` -- optional GPS fix at this timestep. The
-  GPS constraint on `Pose` is **guarded** on `self.info.gps.is_some()`
+  GPS constraint on `Pose` is guarded on `self.info.gps.is_some()`
   so the macro emits a conditional that evaluates the constraint
   only where a fix actually exists.
 - `tilt_roll`, `tilt_pitch` -- accelerometer readings projected into
@@ -286,7 +287,7 @@ struct Pose {
 Fields:
 
 - `pos: Param<vect3f>` -- the pose's 3D position. `Param<T>` marks
-  this as an **optimisation variable**; the macro counts 3 scalars
+  this as an optimisation variable; the macro counts 3 scalars
   into `PARAM_COUNT` for `Pose` and threads their indices through
   `calc_grad_hessian`.
 - `ea: SimpleEulerAngleParam<f32>` -- the pose's orientation as
@@ -303,7 +304,7 @@ Fields:
 
 Constraints:
 
-1. **GPS, guarded** (first attribute). Whitened position residual
+1. GPS, guarded (first attribute). Whitened position residual
    wrapped by Starship. `guard = self.info.gps.is_some()` tells the
    macro to only evaluate when this particular pose actually has a
    GPS fix -- there is no `else` branch, no wasted work, no NaN
@@ -312,7 +313,7 @@ Constraints:
    applying `cov_r^T * raw` and scaling by `cov_isigma` is the
    whitening `diag(1/sqrt(d)) * R^T * (pose.pos - gps.pos)`.
 
-2. **Drift regularizer** (second attribute). The macro generates
+2. Drift regularizer (second attribute). The macro generates
    shadow fields `pose.pos_value` and `pose.ea_value` from every
    `Param<...>` field -- they hold the parameter's initial value.
    The residual measures drift away from that anchor and weights it
@@ -321,7 +322,7 @@ Constraints:
    feature constraints are scaled down, from wandering off into
    regions where GPS and odometry no longer pull hard enough.
 
-3. **Tilt** (third attribute). Directly constrains roll and pitch to
+3. Tilt (third attribute). Directly constrains roll and pitch to
    the accelerometer readings on this timestep. This is what fixes
    the two rotational gauge DOFs that GPS alone cannot pin down.
 
@@ -355,7 +356,7 @@ Fields:
 
 Constraint:
 
-- **Landmark drift regularizer.** Same idea as the pose drift above
+- Landmark drift regularizer. Same idea as the pose drift above
   but on the landmark position: anchor to the initial `pos_value`
   with a very weak sigma (`drift_lm_isigma = 1/1000m`). The
   bare-name `pointlandmark` in the body is the default -- when
@@ -399,7 +400,7 @@ Fields:
 - `pose: Ref<Pose>` with `#[arael(ref = root.poses)]` -- the
   observing pose, resolved from the root's `poses` collection.
 - `feature: Ref<PointFeature>` with
-  `#[arael(ref = pose.info.features)]` -- **chained resolution**.
+  `#[arael(ref = pose.info.features)]` -- chained resolution.
   The `pose` reference has just been resolved; the macro now looks
   the feature up inside *that pose's* `info.features`. Chained
   refs let you model "this observation in that pose's camera"
@@ -409,7 +410,7 @@ Fields:
 
 Constraint:
 
-- **Bearing observation.** `parent=lm` tells the macro to expose the
+- Bearing observation. `parent=lm` tells the macro to expose the
   parent `PointLandmark` variable as `lm` in the body (since the
   frine lives inside a landmark via `PointLandmark::frines`). Steps:
 
@@ -422,7 +423,7 @@ Constraint:
      landmark direction keeps the derivatives smooth and avoids the
      projective singularities of a pixel-space reprojection.
   5. Whiten by the feature's per-axis `isigma`, then multiply by
-     the global `frine_isigma_scale` so **graduated optimisation**
+     the global `frine_isigma_scale` so graduated optimisation
      can dial all feature constraints up or down as a group from
      the root.
   6. Starship cap: `gamma * atan(plain / gamma)` on each.
@@ -479,7 +480,7 @@ Fields:
 
 Constraint:
 
-- **Relative motion.** The measured odometry `delta_pos`, `delta_ea`
+- Relative motion. The measured odometry `delta_pos`, `delta_ea`
   is stored on `cur.info`. The residual splits into a position and
   an attitude part:
 
@@ -559,7 +560,7 @@ accumulating into the right `SelfBlock` / `CrossBlock`.
 
 ## Starship robust error suppression
 
-Every residual above is wrapped in $\gamma \arctan(r / \gamma)$. This is the **Starship method** ([US Patent 12,346,118](https://patents.google.com/patent/US12346118)) -- a way to cap how much a single outlier can move the optimum without losing smooth differentiability. This section explains what it does and why.
+Every residual above is wrapped in $\gamma \arctan(r / \gamma)$. This is the Starship method ([US Patent 12,346,118](https://patents.google.com/patent/US12346118)) -- a way to cap how much a single outlier can move the optimum without losing smooth differentiability. This section explains what it does and why.
 
 ### Setup
 
@@ -569,7 +570,7 @@ $$
 S(M) = (L - \mu(M))^T K_L^{-1} (L - \mu(M)).
 $$
 
-**Whitening.** Diagonalising $K_L = R D R^T$ and substituting $L^D = R^T L$, $G(M) = R^T \mu(M)$ turns the quadratic form into a plain sum of squares in units of standard deviations:
+Whitening. Diagonalising $K_L = R D R^T$ and substituting $L^D = R^T L$, $G(M) = R^T \mu(M)$ turns the quadratic form into a plain sum of squares in units of standard deviations:
 
 $$
 S(M) = \sum_i r_i^2, \qquad r_i = \frac{L_i^D - G_i(M)}{\sigma_i}.
@@ -626,13 +627,13 @@ The symbolic-differentiation pipeline handles `atan`'s derivative automatically;
 
 Gauss-Newton (and Levenberg-Marquardt) is a local method: each step linearises the cost around the current $M$ and moves in the direction that linearisation suggests. For any loss, you need a starting $M_0$ close enough to the optimum that the linearisation is informative.
 
-Starship makes this requirement stricter. The gradient falls off as $\alpha'(r) = 1 / (1 + \pi^2 r^2 / (4 \Delta S_{\max}))$, so at the recommended $\Delta S_{\max} = 25$ a residual at $5\sigma$ still carries about 29% of its least-squares pull and a $10\sigma$ residual about 9% -- still usable. Once you get out to $20\sigma$ and beyond it drops under 3% and those residuals are effectively frozen. If $M_0$ puts many residuals that far out, the solver has nothing to work with and stalls. The usual remedy is **graduated optimisation**: start with a large $\Delta S_{\max}$ (loose cap, everything in the informative regime), solve, then shrink it across passes down to the target value. The SLAM demo does this via a `frine_isigma_scale` field stepped per pass.
+Starship makes this requirement stricter. The gradient falls off as $\alpha'(r) = 1 / (1 + \pi^2 r^2 / (4 \Delta S_{\max}))$, so at the recommended $\Delta S_{\max} = 25$ a residual at $5\sigma$ still carries about 29% of its least-squares pull and a $10\sigma$ residual about 9% -- still usable. Once you get out to $20\sigma$ and beyond it drops under 3% and those residuals are effectively frozen. If $M_0$ puts many residuals that far out, the solver has nothing to work with and stalls. The usual remedy is graduated optimisation: start with a large $\Delta S_{\max}$ (loose cap, everything in the informative regime), solve, then shrink it across passes down to the target value. The SLAM demo does this via a `frine_isigma_scale` field stepped per pass.
 
 ### Graduated passes in this demo
 
-1. **Pass 1** (scale=0.01): Features contribute almost nothing. GPS, odometry, tilt, and drift dominate and find roughly correct poses.
-2. **Pass 2** (scale=0.1): Features start pulling. Outliers are already suppressed by the robust cap.
-3. **Pass 3** (scale=1.0): Full feature weight. Fine-tunes the solution. Outliers are deep in the `atan` saturation region and contribute at most $\Delta S_{\max}$ each.
+1. Pass 1 (scale=0.01): Features contribute almost nothing. GPS, odometry, tilt, and drift dominate and find roughly correct poses.
+2. Pass 2 (scale=0.1): Features start pulling. Outliers are already suppressed by the robust cap.
+3. Pass 3 (scale=1.0): Full feature weight. Fine-tunes the solution. Outliers are deep in the `atan` saturation region and contribute at most $\Delta S_{\max}$ each.
 
 ## Uncertainty estimation
 
@@ -648,13 +649,13 @@ Cov = (J^T * J)^{-1} = 2 * H^{-1}
 
 ### Global vs relative uncertainty
 
-The raw diagonal block of `Cov` for a landmark gives its **global**
+The raw diagonal block of `Cov` for a landmark gives its global
 position uncertainty, which includes the gauge uncertainty (GPS
 offset, yaw) shared by all parameters. This gauge floor dominates
 and makes all landmarks look equally uncertain -- not useful.
 
-The demo instead computes uncertainty **relative to the closest
-pose**, which cancels the shared gauge. Given the full covariance
+The demo instead computes uncertainty relative to the closest
+pose, which cancels the shared gauge. Given the full covariance
 with blocks `C_ll` (landmark), `C_pp` (pose position), and `C_lp`
 (cross-covariance):
 
@@ -664,7 +665,7 @@ Cov_rel = C_ll - C_lp - C_pl + C_pp
 
 The eigendecomposition of this 3x3 `Cov_rel` yields three
 eigenvalues whose square roots are the semi-axis lengths of the
-**1-sigma uncertainty ellipsoid** -- an ellipsoid describing the
+1-sigma uncertainty ellipsoid -- an ellipsoid describing the
 uncertainty of the landmark's position relative to the nearby pose.
 The three eigenvectors give the principal directions of uncertainty.
 Printed as `sigma=(a, b, c)` in descending order:
@@ -674,11 +675,11 @@ LM 227: |d|=0.017m  rel=0.30%  dist=5.8m  sigma=(0.417,0.059,0.006)m  frines=26
 LM 224: |d|=0.054m  rel=0.21%  dist=25.9m  sigma=(1.876,0.319,0.020)m  frines=23
 ```
 
-- The **largest** axis is depth (radial distance from observing
+- The largest axis is depth (radial distance from observing
   cameras), the hardest direction to constrain from angular
   measurements alone. It scales roughly with landmark distance.
-- The **middle** axis reflects the angular baseline of observations.
-- The **smallest** axis is well-constrained by many observations
+- The middle axis reflects the angular baseline of observations.
+- The smallest axis is well-constrained by many observations
   from different poses.
 - More observations (`frines`) and wider baselines produce smaller
   ellipsoids.

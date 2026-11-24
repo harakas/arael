@@ -192,7 +192,8 @@ pub struct LmConfig<T: Float> {
 
     // Diagnostics.
 
-    /// Print each iteration's cost, lambda and timing to stderr.
+    /// Log each attempt's cost, lambda and time at info level (see
+    /// [`crate::log`]; stderr by default).
     pub verbose: bool,
     /// Record where the time went; [`LmResult::timing`] is then `Some`.
     /// Off, the solve never reads the clock.
@@ -200,15 +201,17 @@ pub struct LmConfig<T: Float> {
     /// Called once per damped attempt with an [`LmIter`]; can stop the
     /// solve (see [`LmObserver`]). `None` costs nothing.
     pub observer: Option<Box<dyn LmObserver<T>>>,
-    /// On a solve whose vectors stay on the GPU (the reduced GPU route with
-    /// the device assembly), read the parameters back after every accepted
-    /// step for the observer. Off, [`LmIter::params`] is empty there. Other
-    /// solves always pass the parameters.
+    /// With the LM loop on a GPU ([`GpuWork::Loop`]), read the parameters
+    /// back after each accepted step, for an observer that uses
+    /// [`LmIter::params`]. Off (the default), `params` is empty there;
+    /// other solves always pass them. Each read is a copy from the GPU.
     pub device_observer_params: bool,
-    /// On a solve whose vectors stay on the GPU, read the gradient, the
-    /// Hessian diagonal and the step back for the lambda driver. Off, the
-    /// vectors of [`LambdaState`] and [`LambdaStep`] are empty there; the
-    /// built-in drivers need only [`LambdaStep::predicted_reduction`].
+    /// With the LM loop on a GPU ([`GpuWork::Loop`]), read the gradient, the
+    /// Hessian diagonal and the step back for each attempt, for a lambda
+    /// driver that uses them. Off (the default), those slices of
+    /// [`LambdaState`] and [`LambdaStep`] are empty there; the built-in
+    /// drivers need only [`LambdaStep::predicted_reduction`]. Each read is
+    /// a copy from the GPU.
     pub device_driver_vectors: bool,
 }
 
@@ -463,7 +466,7 @@ impl<T: Float> LmConfig<T> {
 }
 
 // ---------------------------------------------------------------------------
-// LmProblem trait — object implementing cost + gradient/hessian
+// LmProblem trait -- object implementing cost + gradient/hessian
 // ---------------------------------------------------------------------------
 
 /// A structural failure that makes the linear system impossible to build or
@@ -516,10 +519,12 @@ pub enum SetupError {
     /// different question silently, so the solve stops here. Pair
     /// `Iterative` with [`SchurPolicy::Force`].
     IterativeSchurWithoutReduction,
-    /// The requested [`SolverKind`] is not available: its cargo feature is not
-    /// compiled in, or it does not support this scalar type. Reported by
-    /// [`LmProblem::solve`] before any solve is attempted, so the parameters
-    /// are returned unchanged.
+    /// The requested solver is not available, and the parameters are
+    /// returned unchanged. From [`LmProblem::solve`]: the [`SolverKind`]'s
+    /// cargo feature is not compiled in, or it does not support this scalar
+    /// type. From [`SparseFaer`] with `solver: "gpu"`: the GPU's runtime is
+    /// not compiled in, or the GPU cannot run the solve (Metal and an f64
+    /// solve that factorizes without [`MixedPrecision`]).
     SolverUnavailable {
         /// The solver that was requested.
         solver: &'static str,
@@ -626,10 +631,10 @@ impl From<DeviceFailure> for SolveFailureKind {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceFailure {
-    /// What the solve asked of the device: `"assembly"`, `"attempt"`,
-    /// `"setup of the factor"`, ...
+    /// What the solve asked of the GPU: `"assembly"`, `"attempt"`,
+    /// `"setup of the CUDA solver"`, `"read of the step"`, ...
     pub operation: &'static str,
-    /// The error as the device's runtime reported it.
+    /// The error as the GPU's runtime reported it.
     pub message: String,
 }
 
@@ -1361,18 +1366,16 @@ pub struct LmTiming {
     /// Where `analysis` went, from a backend that times its parts (the
     /// sparse one); `None` otherwise.
     pub setup: Option<SetupTiming>,
-    /// The device's own time in a solve on a GPU; `None` without one, and
-    /// on a device that keeps no timestamps (Metal).
+    /// The GPU's own time in a solve on a GPU; `None` without one.
     pub gpu: Option<GpuTiming>,
     /// Damped linear solve (factorization + triangular solve) summed over
     /// every inner attempt. With the loop on a GPU, the host's waits for the
     /// device, one an attempt: each covers the linearization queued before
     /// it, the damped solve and the trial cost ([`GpuTiming`] splits it).
     pub linear_solve: Duration,
-    /// The first damped solve alone. Recorded apart so the steady-state mean can
-    /// drop the first iteration uniformly with the other phases. NOTE it does NOT
-    /// carry the symbolic factorization: that runs inside `compute` and is
-    /// reported as `analysis`. `solve_damped` only ever factorizes numerically.
+    /// The first damped solve alone, recorded apart so a steady-state mean
+    /// can leave it out. The symbolic factorization is not in it: that is
+    /// `analysis`.
     pub first_linear_solve: Duration,
     /// Trial-point cost evaluation (residual only, no Jacobian) summed over
     /// every inner attempt. Zero with the loop on a GPU: the trial cost is
@@ -1413,12 +1416,11 @@ pub struct LmTiming {
     pub steps: std::vec::Vec<LmStep>,
 }
 
-/// The device's own time in a GPU solve ([`LmTiming::gpu`]), from stamps
-/// in its queue read at the waits the solve already makes. The host's
-/// phases cannot show it: the host queues a linearization and returns, and
-/// waits once per attempt, so on the device loop [`LmTiming::assembly`]
-/// and [`LmTiming::cost_eval`] read near zero and
-/// [`LmTiming::linear_solve`] holds the device's assembly and trial cost
+/// The GPU's own time in a GPU solve ([`LmTiming::gpu`]). The host's
+/// phases show waits, not the GPU's work: with the LM loop on the GPU the
+/// host queues a linearization and goes on, and waits once per attempt,
+/// so [`LmTiming::assembly`] and [`LmTiming::cost_eval`] read near zero
+/// and [`LmTiming::linear_solve`] holds the GPU's assembly and trial cost
 /// with its solve.
 ///
 /// ```ignore
@@ -1443,13 +1445,13 @@ pub struct GpuTiming {
     pub attempts: Duration,
     /// The attempts timed.
     pub attempt_count: usize,
-    /// The conjugate gradients' iterations, a part of `attempts`, summed:
-    /// from an attempt's first iterations queued to the status read that
-    /// finds its solve stopped, the waits between its rounds included.
-    /// Zero for a solve that factorizes.
+    /// The part of `attempts` spent in conjugate gradients, summed, the
+    /// waits between their rounds included. Zero for a solve that
+    /// factorizes.
     pub cg: Duration,
-    /// The rounds of iterations the conjugate gradients took, each a wait
-    /// for the device beside the attempt's one.
+    /// The rounds of conjugate gradient iterations: the iterations are sent
+    /// to the GPU in batches, and each batch is a wait for the GPU beside
+    /// the attempt's one.
     pub cg_rounds: usize,
 }
 
@@ -1470,9 +1472,9 @@ pub struct SetupTiming {
     /// The Hessian's block pattern, the blocks' positions in it and, when
     /// reducing, the Schur symbolic (the reduced system's pattern).
     pub structure: Duration,
-    /// On a GPU, opening the device: its first use in a process creates
-    /// its context and stream (tens to hundreds of milliseconds); nothing
-    /// after that.
+    /// On a GPU, opening it: the first solve through a [`GpuDevice`] value
+    /// (or its clones) creates the GPU's state; later solves take nothing
+    /// here.
     pub gpu_open: Duration,
     /// Ordering the system that is factorized.
     pub ordering: Duration,
@@ -1482,10 +1484,10 @@ pub struct SetupTiming {
     /// The symbolic factorization and the factor's buffers; on a GPU the
     /// device factor's plan and kernels.
     pub factor: Duration,
-    /// On a GPU, the device's plan of the reduction.
+    /// On a GPU, setting the reduction up there: its plan and kernels.
     pub gpu_plan: Duration,
-    /// On a GPU that assembles, the device assembly's layout: the model's
-    /// image and its kernels.
+    /// On a GPU that assembles, setting the GPU assembly up: the model's
+    /// data written for the GPU, and its kernels.
     pub gpu_layout: Duration,
 }
 
@@ -1590,24 +1592,22 @@ fn steady_mean(total: Duration, first: Duration, count: usize) -> Option<Duratio
 }
 
 impl LmTiming {
-    /// Mean assembly time per iteration, EXCLUDING the first. The first
-    /// assembly also builds the sparsity pattern, so averaging it in would
-    /// skew the steady-state estimate. `None` if the solve had only one
-    /// assembly.
+    /// Mean assembly time per iteration, without the first assembly.
+    /// `None` if the solve had only one.
     pub fn mean_assembly(&self) -> Option<Duration> {
         steady_mean(self.assembly, self.first_assembly, self.assembly_count)
     }
-    /// Mean damped-solve time per attempt, EXCLUDING the first (which also
-    /// runs the symbolic factorization). `None` if there was only one solve.
+    /// Mean damped-solve time per attempt, without the first. `None` if
+    /// there was only one.
     pub fn mean_linear_solve(&self) -> Option<Duration> {
         steady_mean(self.linear_solve, self.first_linear_solve, self.linear_solve_count)
     }
-    /// Mean trial-point cost evaluation, EXCLUDING the first call. `None` if
-    /// there was only one evaluation.
+    /// Mean trial-point cost evaluation, without the first. `None` if
+    /// there was only one.
     pub fn mean_cost_eval(&self) -> Option<Duration> {
         steady_mean(self.cost_eval, self.first_cost_eval, self.cost_eval_count)
     }
-    /// Mean re-centering (`advance`) time, EXCLUDING the first call. `None` if
+    /// Mean re-centering (`advance`) time, without the first. `None` if
     /// there was only one accepted step.
     pub fn mean_advance(&self) -> Option<Duration> {
         steady_mean(self.advance, self.first_advance, self.advance_count)
@@ -2035,12 +2035,16 @@ fn render_threads(t: &ThreadReport, style: Style) -> String {
     out
 }
 
-/// The plan's precision note: empty on a double-precision factor.
+/// The plan's precision note: empty on a double-precision factor, the
+/// refinement only under mixed precision.
 fn render_precision(plan: &SchurPlan) -> String {
     if !plan.f32_factor {
         return String::new();
     }
-    let mut out = format!("f32 factor, {} refinement steps", plan.refinements.unwrap_or(0));
+    let mut out = "f32 factor".to_string();
+    if let Some(steps) = plan.refinements {
+        out.push_str(&format!(", {steps} refinement steps"));
+    }
     if let Some(m) = plan.refinement_shortfalls.filter(|&m| m > 0) {
         out.push_str(&format!(", {m} solves short of tolerance"));
     }
@@ -2101,7 +2105,7 @@ fn log_gpu(gpu: Option<GpuReport>, plan: Option<SolverReport>, verbose: bool) {
                 None => "the solver took another route".to_string(),
             };
             warn!(
-                "gpu: {} was given and is not used -- {route}, on the CPU. The block supernodal Cholesky \
+                "gpu: {} was given and is not used -- {route}, on the host. The block supernodal Cholesky \
                  and conjugate gradients on the formed reduced system run on a device \
                  (SparseFaerOptions::with_block_supernodal, with_envelope_schur and with_schur_solve \
                  choose the route)",
@@ -2205,7 +2209,7 @@ impl<T: Float> fmt::Display for LmResult<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Cholesky solve — nalgebra fixed-size, dispatch by runtime n
+// Cholesky solve -- nalgebra fixed-size, dispatch by runtime n
 // ---------------------------------------------------------------------------
 
 fn cholesky_solve<const N: usize>(a: &[f64], b: &[f64], x: &mut [f64]) -> bool {
@@ -2300,7 +2304,7 @@ pub(crate) fn solve_spd_f32(n: usize, a: &[f32], b: &[f32], x: &mut [f32]) -> bo
 }
 
 // ---------------------------------------------------------------------------
-// LmSolver trait — abstract over matrix storage and linear solve
+// LmSolver trait -- abstract over matrix storage and linear solve
 // ---------------------------------------------------------------------------
 
 /// Abstract linear algebra backend for the LM solver.
@@ -2383,11 +2387,9 @@ pub trait LmSolver<T: Float> {
         None
     }
 
-    /// Hands the backend the solve's configuration, once, at entry --
-    /// [`LmConfig::verbose`] above all, so a backend that makes its own
-    /// decisions can explain them. The config stays the single place
-    /// verbosity is set: no separate builder call to forget or contradict.
-    /// Default: ignore it.
+    /// Hands the backend the solve's configuration, once, when the solve
+    /// starts, so a backend can follow [`LmConfig::verbose`] and the
+    /// other settings that concern it. Default: ignore it.
     fn configure(&mut self, _config: &LmConfig<T>) {}
 
     /// How much of the LAST [`compute`](Self::compute) was model assembly --
@@ -3421,7 +3423,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             first = false;
             start_cost = computed_cost;
             end_cost = computed_cost;
-            // Already at zero cost — nothing to do
+            // Already at zero cost -- nothing to do
             if start_cost == T::zero() {
                 if let Some(s) = solve_start { timing.total = s.elapsed(); }
                 timing.gpu = solver.gpu_timing();
@@ -4289,7 +4291,7 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
 }
 
 // ---------------------------------------------------------------------------
-// Sparse LmSolver — COO assembly, CSC storage, dense fallback solve
+// Sparse LmSolver -- COO assembly, CSC storage, dense fallback solve
 // ---------------------------------------------------------------------------
 
 /// Naive sparse solver: COO assembly, dense Cholesky solve. A reference
@@ -4990,38 +4992,18 @@ pub enum SchurPolicy {
     /// when the reduction is obviously right, by `obvious_flop_ratio` below.
     Auto {
         /// Decline when the reduced route costs more than this multiple of
-        /// the full route. 1.0 is the break-even point in flops; the
-        /// default of 1.5 leaves slack toward reducing, because the
-        /// reduction's GEMM flops stream through unrolled kernels while
-        /// the sparse factor's flops do not -- a reduced-route flop is
-        /// cheaper than a full-route flop.
+        /// the full route, in flops. Default 1.5: a flop of the reduction's
+        /// dense products runs faster than a flop of the sparse factor.
         flop_margin: f64,
-        /// Skip the comparison entirely when the reduction is obviously
-        /// worth it: when the whole reduced route -- the reduction plus the
-        /// reduced factorization at the WORST it could cost -- stays within
-        /// this multiple of a floor under ANY whole-system factorization.
+        /// Skip the comparison and reduce when the reduced route at its
+        /// worst (the reduction plus the reduced factor's flops bounded by
+        /// `min(n^3 / 3, n * b^2)`, `b` the reduced system's bandwidth)
+        /// costs less than this multiple of a floor under any whole-system
+        /// factorization (`max(nnz(H), nnz(H)^2 / n)`). Default 25; 0
+        /// always compares.
         ///
-        /// The worst case for the reduced factor is the cheaper of two
-        /// bounds, both free:
-        /// * dense -- the reduced system's factor cannot exceed `n^3 / 3`;
-        /// * banded -- nor can it spill outside the system's own bandwidth,
-        ///   `n * b^2`. This is the bound that matters on a trajectory: a
-        ///   landmark is seen from a bounded stretch of it, so the reduced
-        ///   pose system is banded and the dense bound is wildly pessimistic.
-        ///
-        /// The floor under the full route is fill-free: a factor holds at
-        /// least its matrix's nonzeros, and sum-of-squared-column-counts is
-        /// at least `nnz^2 / n` (Cauchy-Schwarz) -- so
-        /// `max(nnz(H), nnz(H)^2 / n)` undercuts any ordering. Both sides
-        /// are pessimistic in the full route's favor, so a small ratio
-        /// means the reduction cannot lose, however the orderings come out.
-        ///
-        /// The landmark reductions this is meant to wave through sit far
-        /// below the bar, and the ones that need pricing -- a large kept
-        /// system, or a small block family observed by everyone, where
-        /// reducing loses -- far above it. Deferring is safe (the exact
-        /// comparison decides); firing wrongly is the only real risk. Set
-        /// to 0 to always compare.
+        /// Both bounds favour the whole system, so below the ratio the
+        /// reduction cannot lose. Landmark reductions pass far below it.
         obvious_flop_ratio: f64,
     },
 }
@@ -5039,7 +5021,7 @@ impl Default for SchurPolicy {
 /// It does not decide WHETHER to reduce; [`SchurPolicy`] does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SolveOrdering {
-    /// Default, and what every measurement here was taken with:
+    /// The default: chosen from the system.
     ///
     /// * whole system, with a marginalize set the caller or the model
     ///   named -- those parameters first, everything else in natural
@@ -5051,24 +5033,19 @@ pub enum SolveOrdering {
     ///   dense enough (over a quarter of the upper triangle) that AMD has
     ///   nothing to find, where it is the natural order
     ///   ([`ReducedOrdering`] names the choice);
-    /// * reduced system factored on a device
-    ///   ([`SparseFaerOptions::with_gpu`]) -- the same while it is banded
-    ///   or small (under about 1650 parameters on a discrete GPU, 670 on an
-    ///   integrated one); past that, where it is dense and its band over
-    ///   three fifths of it, AMD when its factor takes four fifths of the
-    ///   natural order's flops or less,
-    ///   and where it is sparse (a tenth of the upper triangle or less)
-    ///   AMD or nested dissection, whichever factor has fewer flops. A
-    ///   device's factor pays for each launch as well as for its
-    ///   arithmetic: on bundle adjustment's camera systems the natural
-    ///   order is 20 to 30% slower from 2500 parameters on.
+    /// * reduced system factored on a GPU ([`SparseFaerOptions::with_gpu`])
+    ///   -- the same while it is banded or small; past that, a dense
+    ///   system takes AMD when AMD's factor has at most four fifths of the
+    ///   natural order's flops, and a sparse one AMD or nested dissection,
+    ///   whichever factor has fewer flops. A GPU's factorization pays for
+    ///   each kernel launch as well as for its arithmetic.
     ///
-    /// Note what Auto does NOT do: use a set the solver DETECTED itself as
-    /// an ordering. Detection says which blocks are marginalizable, not
-    /// that ordering them first is a good idea -- it can leave less fill
-    /// and still run slower, because it chops the factor into thousands
-    /// of 3-column supernodes. A set the caller named is an
-    /// instruction; a set we guessed is not.
+    /// A set of blocks the solver found to marginalize on its own is not
+    /// used as an ordering: ordering them first can leave less fill and
+    /// still run slower, because it cuts the factor into many small
+    /// supernodes. A set the caller named is.
+    ///
+    /// AMD is approximate minimum degree.
     Auto,
     /// Approximate minimum degree, always: of the whole system, or of the
     /// reduced one.
@@ -5113,115 +5090,86 @@ pub use arael_faer::cg::{CgParams, CgStats};
 #[allow(deprecated)]
 pub use arael_faer::cg::CgOptions;
 
-/// How to factor the reduced Schur system: under its envelope, or by sparse
-/// Cholesky.
+/// Whether the reduced Schur system is factored under its envelope instead
+/// of by sparse Cholesky ([`SparseFaerOptions::with_envelope_schur`]).
 ///
-/// **What it is for.** Memory, on a reduced system that stays a narrow band.
-/// That means SLAM without loop closure: a trajectory that moves on without
-/// revisiting, each landmark seen from a short run of consecutive poses. A
-/// loop closure ties distant poses together and widens the band, which is what
-/// the envelope has to keep narrow to be worth anything.
+/// The envelope factorization uses less memory than the block supernodal
+/// Cholesky and is slower. It pays on a reduced system that stays a narrow
+/// band, as in SLAM without loop closures, where each landmark is seen from
+/// a short run of consecutive poses. It applies only to a reduced system
+/// left in its natural order; an ordered one (AMD, nested dissection) has
+/// no envelope, and then every mode is the same. [`SchurPlan::envelope`]
+/// says whether it ran. The envelope runs on the host: a GPU given to a
+/// solve that takes it is not used.
 ///
-/// The envelope route uses less peak memory than the block supernodal
-/// Cholesky it competes with, and less still than faer's scalar route, and
-/// pays for that in time: the supernodal runs faster per iteration.
-///
-/// **When it applies.** Only when the reduced system is left in its natural
-/// order, which arael decides from the system's density and bandwidth. If it
-/// orders the system instead (AMD, or nested dissection when you ask for it),
-/// there is no envelope and every mode below behaves the same. The report from
-/// [`LmResult`] says which happened.
-///
-/// **Which to pick.**
-///
-/// - Default ([`Self::Auto`]) if you have no particular constraint.
-/// - [`Self::Always`] if memory is what limits you -- an embedded target, or a
-///   problem that will not fit otherwise.
-/// - [`Self::Never`] to keep the envelope out of the way entirely.
+/// ```ignore
+/// // the least memory, on a banded reduced system
+/// let opts = SparseFaerOptions::default().with_envelope_schur(EnvelopeMode::Always);
+/// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EnvelopeMode {
-    /// Use the envelope only where it is also the cheaper factorization.
-    ///
-    /// It is priced against whichever route would take the system if the
-    /// envelope declined -- the block supernodal Cholesky, or faer's scalar one
-    /// where the supernodal is off. A reduced pose system rarely wins that
-    /// comparison, so this gives up the memory saving on most SLAM problems;
-    /// it is the wrong choice if memory is your constraint. Costs one extra
-    /// analysis of the reduced system, paid once per structure and handed on to
-    /// the winner rather than thrown away.
+    /// The default: the envelope where it is also the cheaper
+    /// factorization, priced against the route that would take the system
+    /// otherwise. A reduced pose system rarely wins, so this rarely saves
+    /// memory. The pricing costs one more analysis of the reduced system,
+    /// once per structure.
     #[default]
     Auto,
-    /// Use the envelope wherever it applies, whether or not it is faster.
-    ///
-    /// The lowest-memory setting, and the fastest to set up: it is the only
-    /// mode that skips the ordering and analysis entirely.
+    /// The envelope wherever it applies: the least memory, and the fastest
+    /// setup, as it skips the ordering and the analysis.
     Always,
-    /// Never use the envelope; the reduced system goes to the block supernodal
-    /// or scalar sparse Cholesky.
-    ///
-    /// The most memory of the three. On a naturally ordered system this is what
-    /// [`Self::Auto`] usually settles on anyway, so it is mostly worth setting
-    /// to take the gate's analysis out of the first iteration.
+    /// Never the envelope. Takes the pricing out of the first iteration,
+    /// and keeps a GPU solve on the GPU.
     Never,
 }
 
-/// When the supernodal block Cholesky factorizes instead of faer's scalar
-/// one -- in the seats the scalar route otherwise holds: the whole Hessian,
-/// and a reduced Schur system the envelope route declined. The envelope and
-/// the iterative routes keep their precedence in every mode; models without
-/// block structure (hand-built problems, `coo` constraints) always take the
-/// scalar route.
+/// Whether the block supernodal Cholesky factorizes instead of faer's
+/// scalar one ([`SparseFaerOptions::with_block_supernodal`]): for the whole
+/// Hessian, and for a reduced system the envelope did not take. The
+/// envelope and the conjugate gradient routes take precedence in every
+/// mode; a model without block structure (a hand-written problem, `coo`
+/// constraints) always takes the scalar route.
 ///
-/// At or ahead of the scalar route, with a cheaper symbolic phase and
-/// less peak memory. Its dense kernels take
-/// [`LmConfig::num_threads`] on the panels large enough to pay for the
-/// pool, so there is no thread count at which the scalar route is the
-/// better default.
+/// The block route has a cheaper symbolic phase and less peak memory than
+/// the scalar one, and is as fast or faster at any thread count. It is the
+/// route that runs on a GPU.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BlockSupernodalMode {
-    /// The supernodal route wherever the model has block structure. The
-    /// default, and at present the same choice as [`Always`](Self::Always) --
-    /// it stays a separate variant because it is the one that may learn to
-    /// decline on some future shape, where `Always` never will.
+    /// The default: the block route wherever the model has block structure,
+    /// the same choice as [`Always`](Self::Always).
     #[default]
     Auto,
-    /// The supernodal route whenever the model has block structure.
+    /// The block route whenever the model has block structure.
     Always,
-    /// Always the scalar route.
+    /// Always faer's scalar route, which runs on the host: a GPU given to
+    /// the solve is not used.
     Never,
 }
 
-/// Factor in single precision, solve to the solver's precision: the
-/// supernodal block route's mixed-precision mode
-/// ([`SparseFaerOptions::with_mixed_precision`]).
+/// Factor in `f32` and refine each damped solve to the solver's precision
+/// ([`SparseFaerOptions::with_mixed_precision`]): half the factor's memory
+/// and the speed of single-precision arithmetic, for a few more solves
+/// through the factor.
 ///
-/// The factorization -- most of a solve's arithmetic, and its memory --
-/// runs in `f32` on a factor half the size. The matrix, the right-hand side
-/// and the solution stay in the solver's scalar, and each damped solve is
-/// refined against the matrix: `r = b - A x`, `A dx = r` through the `f32`
-/// factor, `x += dx`, until `||r|| <= tol * ||b||` or `max_refinements`
-/// steps. Each step costs one solve and one matrix-vector product, no
-/// refactorization. A step that does not reduce the residual is undone and
-/// the refinement stops there: on a system too ill-conditioned for single
-/// precision the step stays inexact, which the LM loop meets with more
-/// damping. [`SchurPlan::refinements`] and
+/// The matrix, the right-hand side and the solution stay in the solver's
+/// scalar. Each damped solve is refined against the matrix (`r = b - A x`,
+/// `A dx = r` through the `f32` factor, `x += dx`) until
+/// `||r|| <= tol * ||b||` or `max_refinements` steps. A step that does not
+/// reduce the residual is undone and the refinement stops: a system too
+/// ill-conditioned for single precision gets an inexact step, which the LM
+/// loop meets with more damping. [`SchurPlan::refinements`] and
 /// [`SchurPlan::refinement_shortfalls`] report what the solve took.
 ///
-/// Only the supernodal block route factors this way
-/// ([`BlockSupernodalMode`]); the scalar, envelope and iterative routes
-/// ignore the setting, with one exception: conjugate gradients on a GPU
-/// ([`SchurMethod::Iterative`] with [`SparseFaerOptions::with_gpu`]), which
-/// have no factor, take it as the reduced system formed and solved in
-/// `f32` under an `f64` solve (the refinement's settings unused), while
-/// the assembly, the costs and the step stay `f64`. The refinement itself runs in `f64` whatever the
-/// solver's scalar: the residual is accumulated in `f64` from the matrix's
-/// entries and the iterate kept in `f64` until it is handed back. An `f32`
-/// solver's factor is single precision already, so there the setting adds
-/// only that refinement, with `tol` floored at a few `f32` epsilons (about
-/// 1e-6) since the step is handed back in `f32`.
-///
-/// The solves and the residual run on the solver's threads, like the
-/// factorization.
+/// - Only the block supernodal route factors this way
+///   ([`BlockSupernodalMode`]); the scalar and envelope routes, and
+///   conjugate gradients on the host, ignore the setting.
+/// - The refinement runs in `f64`. On an `f32` solver, whose factor is
+///   `f32` already, the setting adds only the refinement, with `tol`
+///   floored at about 1e-6.
+/// - On a GPU it also sets the precision of the system the GPU forms and
+///   solves: in the GPU's wide scalar for a factor, in `f32` (an `f64`
+///   solve's assembly, costs and step staying `f64`) for conjugate
+///   gradients. See docs/SOLVERS.md, "Precision".
 ///
 /// ```rust,ignore
 /// SparseFaer::from_options(&SparseFaerOptions::default()
@@ -5255,10 +5203,10 @@ pub enum SchurMethod {
     /// Preconditioned conjugate gradients: no factorization, so no fill and
     /// no factor to store, at the price of an inexact step and no covariance.
     ///
-    /// Worth it when factorizing the reduced system dominates the iteration,
-    /// which is a question of how much fill it takes: on a bundle problem
-    /// that share grows with the camera count. Runs on a GPU when the
-    /// solver has one ([`SparseFaerOptions::with_gpu`]).
+    /// Worth it when factorizing the reduced system is most of an
+    /// iteration, which on a bundle problem grows with the camera count.
+    /// Runs on a GPU when the solver has one
+    /// ([`SparseFaerOptions::with_gpu`]).
     Iterative(arael_faer::cg::CgParams),
     /// The same conjugate gradients, on a reduced system that is never built:
     /// each product applies `B x - E C^-1 (E^T x)` by walking the Hessian.
@@ -5266,7 +5214,7 @@ pub enum SchurMethod {
     /// Trades one reduction for one product per CG iteration, so it pays only
     /// where a solve takes few products -- which is a property of the problem,
     /// not its size. Nothing picks between this and [`Self::Iterative`]; the
-    /// caller does. On the CPU only.
+    /// caller does. Runs on the host: a GPU given to the solve is not used.
     IterativeImplicit(arael_faer::cg::CgParams),
 }
 
@@ -5294,23 +5242,24 @@ impl Default for SchurMethod {
     }
 }
 
-/// A GPU for the supernodal block route ([`SparseFaerOptions::with_gpu`]):
-/// the runtime, the device index, and the device state solves through it
-/// use, a stream and the device memory, created on first use.
+/// A GPU to solve on, for [`SparseFaerOptions::with_gpu`]. Name one with
+/// [`cuda`](Self::cuda), [`hip`](Self::hip), [`metal`](Self::metal) or
+/// [`cpu`](Self::cpu), or take the machine's with [`detect`](Self::detect).
 ///
-/// Clones share that state: solvers built from clones of one value run one
-/// after another on one stream and take their device memory from one pool,
-/// which keeps what a solver gives back and hands it out again, so solve
-/// after solve, of the same structure or of one up to about a quarter
-/// larger, allocates nothing (`buffers_created` stays the same).
-/// Separately created values have a stream and memory of their own, and
-/// their solves can run at the same time.
+/// A value holds the GPU's state, created by its first solve: a queue and
+/// the GPU memory. Clones share it: solvers built from clones of one value
+/// run one after another on one queue, and the memory a solver gives back
+/// is handed out again, so solve after solve of the same structure
+/// allocates nothing ([`buffers_created`](Self::buffers_created) stays the
+/// same). The memory is held until the last clone is dropped. Separately
+/// created values have their own state, and their solves can run at the
+/// same time.
 ///
 /// ```ignore
 /// let gpu = GpuDevice::cuda(0);
 /// for problem in problems {
 ///     let mut solver = SparseFaer::from_options(&SparseFaerOptions::default().with_gpu(Some(gpu.clone())));
-///     // ... solve; the device memory stays with `gpu`
+///     // ... solve; the GPU memory stays with `gpu`
 /// }
 /// ```
 #[derive(Clone, Debug)]
@@ -5380,15 +5329,14 @@ impl GpuDevice {
     }
 
     /// Metal device `index`, the GPU of an Apple silicon Mac (feature
-    /// `gpu-metal`). Metal has no f64: its wide values are
-    /// [`GpuWide::Df32`] and its factor `f32`, so an `f64` solve on it needs
-    /// [`MixedPrecision`], which refines the steps.
+    /// `gpu-metal`). It has no f64 (see [`has_f64`](Self::has_f64)).
     pub fn metal(index: usize) -> Self {
         Self::new(GpuBackend::Metal, index)
     }
 
-    /// The CPU running the GPU route's kernels (feature `gpu-cpu`), for
-    /// tests without a GPU; compiles them with the host's C++ compiler.
+    /// The CPU device (feature `gpu-cpu`): the GPU kernels compiled with
+    /// the host's C++ compiler and run on the host. Slow; for tests on
+    /// machines without a GPU.
     pub fn cpu() -> Self {
         Self::new(GpuBackend::Cpu, 0)
     }
@@ -5403,8 +5351,9 @@ impl GpuDevice {
         self.index
     }
 
-    /// The device with its wide values in `wide`. A device starts with f64,
-    /// or with df32 where it has no f64 (Metal).
+    /// The GPU with its wide scalar set to `wide` (see [`GpuWide`]). The
+    /// default is [`GpuWide::F64`], or [`GpuWide::Df32`] on a GPU without
+    /// f64.
     ///
     /// ```ignore
     /// let gpu = GpuDevice::cuda(0).with_wide(GpuWide::Df32);
@@ -5414,23 +5363,28 @@ impl GpuDevice {
         self
     }
 
-    /// The scalar of the device's wide values ([`Self::with_wide`]).
+    /// The GPU's wide scalar ([`Self::with_wide`]).
     pub fn wide(&self) -> GpuWide {
         self.wide
     }
 
-    /// Whether the device computes in f64: every backend but Metal. On one
-    /// without, an `f64` solve needs [`MixedPrecision`] and an f64 root
-    /// assembles on the CPU.
+    /// Whether the GPU computes in f64: every backend but Metal. On a GPU
+    /// without f64 the wide scalar is [`GpuWide::Df32`], an f64 solve that
+    /// factorizes needs [`MixedPrecision`] (without it the solve fails with
+    /// [`SetupError::SolverUnavailable`]), and an f64 root assembles on the
+    /// host ([`HostAssembly::NoF64`]).
     ///
     /// ```ignore
-    /// assert!(!GpuDevice::metal(0).has_f64());
+    /// let gpu = GpuDevice::detect();
+    /// let mixed = gpu.as_ref().is_some_and(|g| !g.has_f64()).then(MixedPrecision::default);
+    /// let opts = SparseFaerOptions::default().with_gpu(gpu).with_mixed_precision(mixed);
     /// ```
     pub fn has_f64(&self) -> bool {
         self.backend.has_f64()
     }
 
-    /// The device with the device assembly's image staged in `staging`.
+    /// The GPU with the GPU assembly's data staged in `staging` (see
+    /// [`GpuStaging`]; the default is [`GpuStaging::Pinned`]).
     ///
     /// ```ignore
     /// let gpu = GpuDevice::cuda(0).with_staging(GpuStaging::Pageable);
@@ -5440,15 +5394,15 @@ impl GpuDevice {
         self
     }
 
-    /// Where the device assembly's image is staged ([`Self::with_staging`]).
+    /// Where the GPU assembly's data is staged ([`Self::with_staging`]).
     pub fn staging(&self) -> GpuStaging {
         self.staging
     }
 
-    /// The process's shared state of device `index` of `backend`: every
-    /// call returns a clone of one value, so the solves of callers that
-    /// cannot keep a value (the C, C++ and Python interfaces) share its
-    /// stream and memory.
+    /// One value per GPU for the whole process: every call for `backend`
+    /// and `index` returns a clone of the same value, so the solves of
+    /// callers that cannot keep a value (the C, C++ and Python interfaces)
+    /// share its queue and memory.
     ///
     /// ```ignore
     /// let opts = SparseFaerOptions::default().with_gpu(Some(GpuDevice::shared(GpuBackend::Cuda, 0)));
@@ -5466,8 +5420,8 @@ impl GpuDevice {
         d
     }
 
-    /// Bytes of device memory the state holds, in use or free; 0 before
-    /// its first solve.
+    /// Bytes of GPU memory the state holds, in use or free; 0 before its
+    /// first solve.
     pub fn reserved_bytes(&self) -> usize {
         match self.backend {
             #[cfg(feature = "gpu-cuda")]
@@ -5483,8 +5437,8 @@ impl GpuDevice {
         }
     }
 
-    /// Device buffers the state has allocated over its life: constant once
-    /// the largest problem has been seen.
+    /// GPU buffers the state has allocated over its life. Unchanged across
+    /// a solve when the solve allocated nothing.
     pub fn buffers_created(&self) -> usize {
         match self.backend {
             #[cfg(feature = "gpu-cuda")]
@@ -5539,7 +5493,7 @@ impl GpuDevice {
     /// found.
     ///
     /// ```ignore
-    /// // NVIDIA's when there is one, else AMD's, else the CPU
+    /// // the machine's GPU; None without one, and the solve stays on the host
     /// let opts = SparseFaerOptions::default().with_gpu(GpuDevice::detect());
     /// ```
     pub fn detect() -> Option<GpuDevice> {
@@ -5569,6 +5523,7 @@ impl GpuDevice {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GpuInfo {
+    /// The runtime that lists the device.
     pub backend: GpuBackend,
     /// The device, as the runtime numbers them.
     pub index: usize,
@@ -5634,10 +5589,9 @@ pub enum GpuBackend {
     Cuda,
     /// AMD, through HIP.
     Hip,
-    /// The CPU: the kernels compiled by the host's C++ compiler, for tests
-    /// and CI without a GPU.
+    /// The CPU device ([`GpuDevice::cpu`]).
     Cpu,
-    /// Apple silicon, through Metal: df32 and the `f32` factor.
+    /// Apple silicon, through Metal. No f64 ([`GpuDevice::has_f64`]).
     Metal,
 }
 
@@ -5658,35 +5612,36 @@ impl GpuBackend {
     }
 }
 
-/// What a [`GpuDevice`] keeps and sums its wide values in
-/// ([`GpuDevice::with_wide`]): an f64 root's H, gradient, step and LM
-/// vectors, the cost (an f32 root's with `cost_f64`), the system the
-/// device factorizes (an f64 solve's, or an f32 solve's under
-/// [`MixedPrecision`]) and the refinement's residual. An f32 root's values
-/// are f32, as on the CPU.
+/// The GPU's wide scalar ([`GpuDevice::with_wide`]): what the GPU computes
+/// in beyond an f32 root's own values. In it are an f64 root's values (H,
+/// the gradient, the step), an f32 root's cost with `cost_f64`, the
+/// system the GPU factorizes under [`MixedPrecision`] or for an f64 solve,
+/// and the refinement's residual. An f32 root's values are f32, as on the
+/// host. See docs/SOLVERS.md, "Precision".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuWide {
-    /// f64. A device's own choice where it computes in f64.
+    /// f64; the default on a GPU with f64.
     F64,
     /// df32: two f32 whose sum is the value, about 48 bits of significand
-    /// and f32's exponent range, in f32 arithmetic only. For cards whose f64
-    /// is slow (consumer GPUs run it at 1/32 to 1/64 of f32); with an f32
-    /// root and the f32 factor ([`MixedPrecision`]) nothing on the device
-    /// runs in f64.
+    /// and f32's exponent range, in f32 arithmetic only. For GPUs whose f64
+    /// arithmetic is slow, as on most consumer cards; with an f32 root and
+    /// the f32 factor ([`MixedPrecision`]) nothing on the GPU then runs in
+    /// f64. The only choice on Metal.
     Df32,
 }
 
-/// Where a [`GpuDevice`]'s device assembly writes its image of the model
-/// before copying it to the device ([`GpuDevice::with_staging`]).
+/// Where the GPU assembly writes the model's data before copying it to the
+/// GPU ([`GpuDevice::with_staging`]): the structure once, the values every
+/// solve.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GpuStaging {
-    /// Pinned (page-locked) host memory: the copies are asynchronous, so
-    /// the host goes on while the image moves.
+    /// The default: pinned (page-locked) host memory, whose copies run
+    /// while the host goes on.
     #[default]
     Pinned,
-    /// Ordinary host memory: the runtime stages each copy itself and the
-    /// call returns once it holds the bytes. For platforms where copies
-    /// from pinned memory are slow.
+    /// Ordinary host memory, which the runtime copies itself; a copy
+    /// returns once the runtime holds the bytes. For a platform where
+    /// copies from pinned memory are slow.
     Pageable,
 }
 
@@ -5713,26 +5668,25 @@ pub struct GpuReport {
     /// What the kernels were compiled for (`sm_89`, `gfx1036`). Empty when
     /// the solve did not use the device.
     pub target: String,
-    /// Whether the device shares the host's memory: an integrated GPU, or
-    /// the CPU device.
+    /// Whether the GPU shares the host's memory: an integrated GPU, or the
+    /// CPU device. False when the solve did not use the GPU.
     pub integrated: bool,
-    /// The scalar of the device's wide values ([`GpuDevice::with_wide`]).
+    /// The GPU's wide scalar ([`GpuDevice::with_wide`]).
     pub wide: GpuWide,
-    /// How the device solves the system. `None` when the solve did not use
-    /// the device.
+    /// How the GPU solved the system. `None` when the solve did not use
+    /// the GPU.
     pub solve: Option<GpuSolve>,
-    /// Whether the system the device forms and solves (the reduced one, or
-    /// the whole system) is `f32`, as the CPU's f32 route forms it. With a
-    /// factor: an f32 solve without [`MixedPrecision`]. With conjugate
-    /// gradients: an f32 solve, or an f64 one under [`MixedPrecision`].
-    /// Otherwise it is in the wide values.
+    /// Whether the system the GPU formed and solved (the reduced one, or
+    /// the whole one) is `f32`; otherwise it is in the wide scalar. It is
+    /// `f32` for an f32 solve without [`MixedPrecision`], and with
+    /// conjugate gradients also for an f64 solve under [`MixedPrecision`].
     pub f32_system: bool,
-    /// How much of the solve ran on the device.
+    /// How much of the solve ran on the GPU.
     pub work: GpuWork,
-    /// Device memory the device's state holds after the solve, in use or
-    /// free, in bytes ([`GpuDevice::reserved_bytes`]).
+    /// GPU memory the GPU's state holds after the solve, in use or free,
+    /// in bytes ([`GpuDevice::reserved_bytes`]).
     pub reserved_bytes: usize,
-    /// Device buffers the device's state has allocated over its life
+    /// GPU buffers the GPU's state has allocated over its life
     /// ([`GpuDevice::buffers_created`]).
     pub buffers_created: usize,
 }
@@ -5815,15 +5769,20 @@ pub enum GpuSolve {
 /// How much of a solve ran on its GPU ([`GpuReport::work`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GpuWork {
-    /// Nothing: the solve took a route that does not run on a device
-    /// (the envelope, the scalar factorization, conjugate gradients on a
+    /// Nothing: the solve took a route that runs on the host (the
+    /// envelope, the scalar factorization, conjugate gradients on a
     /// reduced system that is not formed; [`SchurPlan`] says which).
     Unused,
     /// The damped solves. The gradient and the Hessian were assembled on
     /// the host, for the reason given, and the Hessian's values uploaded
     /// for each damped solve.
     Solves(HostAssembly),
-    /// The assembly, the damped solves and the LM loop's vectors.
+    /// The LM loop on the GPU: the assembly, the damped solves and the
+    /// loop's vectors. The parameters, the gradient, the diagonal and the
+    /// step stay on the GPU from the first linearization to the end of the
+    /// solve, so an observer and a lambda driver get them only when asked
+    /// ([`LmConfig::device_observer_params`],
+    /// [`LmConfig::device_driver_vectors`]).
     Loop,
 }
 
@@ -5835,7 +5794,7 @@ pub enum HostAssembly {
     /// The root has no device form, and why
     /// ([`LmProblemInternals::device_unsupported`]).
     NoDeviceForm(String),
-    /// The root is f64 and the device has no f64 (Metal).
+    /// The root is f64 and the GPU has no f64 (Metal).
     NoF64,
 }
 
@@ -5851,7 +5810,16 @@ impl fmt::Display for HostAssembly {
 
 /// Configuration for the [`SparseFaer`] backend as plain data: which system to
 /// factorize and how. Build one and hand it to [`SolverKind::Sparse`], or turn
-/// it into a solver with [`SparseFaer::from_options`].
+/// it into a solver with [`SparseFaer::from_options`]. The default decides
+/// everything from the structure.
+///
+/// ```ignore
+/// let opts = SparseFaerOptions::default()
+///     .with_policy(SchurPolicy::Force)                        // always marginalize
+///     .with_mixed_precision(Some(MixedPrecision::default()))  // f32 factor, refined
+///     .with_gpu(GpuDevice::detect());                         // on the machine's GPU, if any
+/// let r = model.solve_with(&mut SparseFaer::from_options(&opts), &cfg)?;
+/// ```
 #[derive(Clone, Debug)]
 pub struct SparseFaerOptions {
     /// Whether and when to marginalize -- see [`SchurPolicy`].
@@ -5884,10 +5852,10 @@ pub struct SparseFaerOptions {
     /// Single-precision factor with refinement on the supernodal block route
     /// (see [`Self::with_mixed_precision`]). `None`, off, by default.
     pub mixed_precision: Option<MixedPrecision>,
-    /// The GPU the supernodal block route runs on (see [`Self::with_gpu`]).
-    /// `None`, the CPU, by default.
+    /// The GPU to solve on (see [`Self::with_gpu`]). `None`, the host, by
+    /// default.
     pub gpu: Option<GpuDevice>,
-    /// Whether a solve on a GPU also assembles on the device (see
+    /// Whether a solve on a GPU also assembles there (see
     /// [`Self::with_gpu_assembly`]). On by default.
     pub gpu_assembly: bool,
     /// Parameter ranges to marginalize, named explicitly rather than left to
@@ -5949,8 +5917,8 @@ impl SparseFaerOptions {
     }
 
     /// As [`Self::with_iterative_schur`], but never forming the reduced
-    /// system ([`SchurMethod::IterativeImplicit`]). On the CPU, also when
-    /// a GPU is given.
+    /// system ([`SchurMethod::IterativeImplicit`]). Runs on the host: a GPU
+    /// given to the solve is not used.
     pub fn with_implicit_schur(mut self, cg: arael_faer::cg::CgParams) -> Self {
         self.schur_solve = SchurMethod::IterativeImplicit(cg);
         self
@@ -5968,12 +5936,8 @@ impl SparseFaerOptions {
     /// a time. On by default. Reached only where the block supernodal route
     /// does not run (see [`BlockSupernodalMode`]).
     ///
-    /// faer decides this for itself from a flop-count heuristic, and on the
-    /// sparse systems this crate produces the heuristic is too conservative: it
-    /// picks the column-at-a-time route where the panels would have been
-    /// faster, and never picks it where the columns are actually better.
-    /// Forcing panels wins on some systems and costs nothing on the rest, so
-    /// it is the default. Turn it off to hand the choice back to faer.
+    /// Off hands the choice to faer's own rule, which on the systems arael
+    /// produces picks the column-at-a-time route where panels are faster.
     pub fn with_scalar_supernodal(mut self, on: bool) -> Self {
         self.scalar_supernodal = on;
         self
@@ -6043,24 +6007,17 @@ impl SparseFaerOptions {
         self
     }
 
-    /// Factor with the supernodal block Cholesky instead of flattening to
-    /// scalar CSC and using faer's.
+    /// Set when the block supernodal Cholesky factorizes instead of faer's
+    /// scalar one (see [`BlockSupernodalMode`]; the default is
+    /// [`BlockSupernodalMode::Auto`]).
     ///
-    /// The factorization runs directly on the block matrix -- the reduced
-    /// Schur system when the solve reduces, the whole block Hessian when it
-    /// does not -- under a block-level ordering (nested dissection when that
-    /// is the ordering, block-AMD otherwise), so the scalar pattern, the
-    /// scalar symbolic analysis and the per-attempt scalar copies are never
-    /// built. At or ahead of the scalar route, with a cheaper symbolic
-    /// phase; see [`BlockSupernodalMode`].
+    /// The block route factorizes the block matrix itself (the reduced
+    /// system, or the whole Hessian) under a block ordering, so no scalar
+    /// copy of the matrix is built.
     ///
-    /// Default [`BlockSupernodalMode::Auto`]: the supernodal route wherever
-    /// the scalar one would run, at any thread count -- its dense kernels
-    /// take [`num_threads`](LmConfig::num_threads) on the panels big enough
-    /// to pay for it. Routes that never factorize (iterative Schur) and the
-    /// envelope routes, when they engage, keep precedence in every mode.
-    /// Models without block structure (hand-built problems, `coo`
-    /// constraints) always take the scalar route.
+    /// ```ignore
+    /// let opts = SparseFaerOptions::default().with_block_supernodal(BlockSupernodalMode::Never);
+    /// ```
     pub fn with_block_supernodal(mut self, mode: BlockSupernodalMode) -> Self {
         self.block_supernodal = mode;
         self
@@ -6094,37 +6051,16 @@ impl SparseFaerOptions {
         self
     }
 
-    /// Factor in single precision and refine each solve against the
-    /// double-precision matrix on the supernodal block route -- see
-    /// [`MixedPrecision`]. Half the factor memory and the single-precision
-    /// kernels' speed, at the price of the refinement's solves and products.
-    /// `None` (the default) factors in the solver's own scalar; ignored
-    /// unless the supernodal route runs at all.
-    ///
-    /// An f32 solve on a GPU ([`Self::with_gpu`]) forms the system it
-    /// factorizes in f32, as the CPU's f32 route. Under mixed precision it
-    /// forms it in the device's wide values ([`GpuDevice::with_wide`]) and
-    /// refines against that; with no refinement steps it only forms it
-    /// wide:
-    ///
-    /// ```ignore
-    /// let wide_system = MixedPrecision { max_refinements: 0, ..Default::default() };
-    /// let opts = SparseFaerOptions::default()
-    ///     .with_gpu(Some(GpuDevice::cuda(0)))
-    ///     .with_mixed_precision(Some(wide_system));
-    /// ```
-    ///
-    /// With conjugate gradients on a GPU ([`Self::with_iterative_schur`])
-    /// there is no factor: an f64 solve under mixed precision forms and
-    /// solves the reduced system in f32 there, its assembly, costs and
-    /// step f64. On the CPU conjugate gradients ignore the setting, with a
-    /// warning.
+    /// Set the mixed precision mode: factor in `f32` and refine each damped
+    /// solve (see [`MixedPrecision`]). `None`, the default, factors in the
+    /// solver's own scalar. Only the block supernodal route factors this
+    /// way; without a GPU, the other routes ignore the setting (conjugate
+    /// gradients with a warning). On a GPU it also sets the precision of
+    /// the system the GPU solves, conjugate gradients included (see
+    /// [`MixedPrecision`]).
     ///
     /// ```ignore
     /// let opts = SparseFaerOptions::default()
-    ///     .with_policy(SchurPolicy::Force)
-    ///     .with_iterative_schur(CgParams::default())
-    ///     .with_gpu(Some(GpuDevice::cuda(0)))
     ///     .with_mixed_precision(Some(MixedPrecision::default()));
     /// ```
     pub fn with_mixed_precision(mut self, mixed: Option<MixedPrecision>) -> Self {
@@ -6132,32 +6068,27 @@ impl SparseFaerOptions {
         self
     }
 
-    /// The GPU the supernodal block route, or conjugate gradients on the
-    /// reduced system, run on (features `gpu-cuda`, `gpu-hip`, `gpu-metal`,
-    /// `gpu-cpu`); `None`, the default, is the CPU.
-    ///
-    /// The device does the whole damped solve: it forms the system (the
-    /// reduced one, or the whole system with nothing eliminated), solves
-    /// it and recovers the eliminated blocks. It solves by the supernodal
-    /// factor, in the solver's scalar or in `f32` under
-    /// [`Self::with_mixed_precision`] with its solves refined, or with
-    /// [`Self::with_iterative_schur`] by conjugate gradients, without a
-    /// factor. It also assembles the gradient, the Hessian and the trial
-    /// costs when the model's constraints all have a device form
-    /// ([`Self::with_gpu_assembly`]), and the LM loop's vectors then stay
-    /// on the device; otherwise the Hessian's values are uploaded for every
-    /// damped solve. The symbolic analysis stays on the CPU.
-    ///
-    /// Solvers given clones of one [`GpuDevice`] share its stream and
-    /// buffers. Not used on the other routes (the envelope, the scalar
-    /// factorization, [`Self::with_implicit_schur`]): the solve then warns,
-    /// and its [`GpuReport::work`] is [`GpuWork::Unused`]. A device whose
-    /// runtime is not compiled in fails the solve with
+    /// Set the GPU to solve on; `None`, the default, solves on the host.
+    /// The GPU's runtime must be compiled in (features `gpu-cuda`,
+    /// `gpu-hip`, `gpu-metal`, `gpu-cpu`), or the solve fails with
     /// [`SetupError::SolverUnavailable`].
     ///
+    /// The GPU does each damped solve on the block supernodal route and
+    /// with conjugate gradients on a formed reduced system
+    /// ([`Self::with_iterative_schur`]). When every constraint of the root
+    /// has a device form it also assembles and keeps the LM loop's vectors
+    /// ([`GpuWork::Loop`]); otherwise the host assembles. The host does the
+    /// analysis.
+    ///
+    /// The other routes run on the host, and the GPU is not used: the
+    /// envelope ([`EnvelopeMode`]), faer's scalar Cholesky
+    /// ([`BlockSupernodalMode::Never`]) and [`Self::with_implicit_schur`].
+    /// The solve then logs a warning and [`GpuReport::work`] is
+    /// [`GpuWork::Unused`]. [`LmResult::gpu`] says what ran.
+    ///
     /// ```ignore
-    /// let opts = SparseFaerOptions::default().with_gpu(Some(GpuDevice::cuda(0)));
-    /// // conjugate gradients on the reduced system, on the device
+    /// let opts = SparseFaerOptions::default().with_gpu(GpuDevice::detect());
+    /// // conjugate gradients on the reduced system, on the GPU
     /// let opts = SparseFaerOptions::default()
     ///     .with_policy(SchurPolicy::Force)
     ///     .with_iterative_schur(CgParams::default())
@@ -6168,12 +6099,17 @@ impl SparseFaerOptions {
         self
     }
 
-    /// Whether a solve on a GPU ([`Self::with_gpu`]) also assembles there:
-    /// the gradient, the Hessian's tile values and the trial costs computed
-    /// on the device from the model's constraints, so the Hessian never
-    /// crosses to it. Taken when the root's every constraint has a device
-    /// form ([`LmProblemInternals::device_unsupported`] says why not
-    /// otherwise). On by default.
+    /// Set whether a solve on a GPU ([`Self::with_gpu`]) also assembles
+    /// there: the gradient, the Hessian and the trial costs computed on the
+    /// GPU from the model's constraints, with the LM loop on the GPU. On by
+    /// default; it applies when every constraint of the root has a device
+    /// form ([`LmProblemInternals::device_unsupported`] says why not). Off,
+    /// the host assembles and uploads the Hessian's values for each damped
+    /// solve. [`GpuReport::work`] says which ran.
+    ///
+    /// ```ignore
+    /// let opts = SparseFaerOptions::default().with_gpu(GpuDevice::detect()).with_gpu_assembly(false);
+    /// ```
     pub fn with_gpu_assembly(mut self, on: bool) -> Self {
         self.gpu_assembly = on;
         self
@@ -6379,8 +6315,17 @@ fn faer_par(num_threads: usize) -> faer::Par {
     faer::Par::Seq
 }
 
-/// What [`SparseFaer`]'s first compute decided. Read it with
-/// [`SparseFaer::plan`].
+/// What [`SparseFaer`] did with a solve's structure: the routes its first
+/// compute chose, and counters summed over the solve (`cg_iterations`,
+/// `refinements`, `refinement_shortfalls`). Read it with
+/// [`SparseFaer::plan`], or in [`LmResult::solver`].
+///
+/// ```ignore
+/// let r = model.solve_sparse(&cfg)?;
+/// if let Some(SolverReport::Schur(plan)) = r.solver {
+///     println!("reduced {}, block route {}, envelope {}", plan.reduced, plan.block_supernodal, plan.envelope);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct SchurPlan {
     /// Whether the reduction was used at all. `false` means the full system
@@ -6436,17 +6381,17 @@ pub struct SchurPlan {
     /// As with [`envelope`](Self::envelope), which system depends on
     /// [`reduced`](Self::reduced).
     pub block_supernodal: bool,
-    /// Whether the factor was single precision
-    /// ([`SparseFaerOptions::with_mixed_precision`]). Only ever true with
+    /// Whether the factor was `f32`: an f32 solver's, or one under
+    /// [`MixedPrecision`]. Only ever true with
     /// [`block_supernodal`](Self::block_supernodal).
     pub f32_factor: bool,
-    /// Refinement steps summed over the solve, when the factor was single
-    /// precision; `None` otherwise. Divided by the attempt count, what each
-    /// damped solve took on top of its factorization.
+    /// Refinement steps summed over the solve under [`MixedPrecision`];
+    /// `None` without it. Divided by the attempt count, what each damped
+    /// solve took on top of its factorization.
     pub refinements: Option<usize>,
     /// Damped solves that ended above the refinement tolerance -- at the
-    /// step cap, or when a step no longer reduced the residual. `None` when
-    /// the factor was not single precision.
+    /// step cap, or when a step no longer reduced the residual. `None`
+    /// without [`MixedPrecision`].
     pub refinement_shortfalls: Option<usize>,
 }
 
@@ -7073,7 +7018,7 @@ fn residual_into<T: faer::traits::RealField + arael_faer::schur::SchurReal>(
 /// what is left, recovering the marginalized blocks by back-substitution.
 /// Which of the two, it decides itself, from the model's structure:
 ///
-/// 1. **What can be marginalized.** A block is marginalizable when nothing
+/// 1. What can be marginalized. A block is marginalizable when nothing
 ///    couples it to another one -- landmarks seen from many poses, points
 ///    seen from many cameras. The macro hands over the model's type
 ///    coupling graph, so this is a graph question, not a guess, and a
@@ -7081,7 +7026,7 @@ fn residual_into<T: faer::traits::RealField + arael_faer::schur::SchurReal>(
 ///    two). Name a set yourself with
 ///    [`with_marginalize`](SparseFaerOptions::with_marginalize) or
 ///    `#[arael(root, marginalize(field))]` and it is used as given.
-/// 2. **Whether marginalizing pays.** It does not always: it forces
+/// 2. Whether marginalizing pays. It does not always: it forces
 ///    "marginalized first" as the elimination order, and on a big enough
 ///    kept system a fill-reducing ordering of the whole matrix wins
 ///    instead (a bundle problem with many cameras can be slower reduced).
@@ -7997,7 +7942,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             kept_bandwidth: 0,
             envelope: false,
             block_supernodal: true,
-            f32_factor: self.sn_num.mixed.is_some(),
+            f32_factor: self.sn_num.mixed.is_some() || core::mem::size_of::<T>() == 4,
             refinements: None,
             refinement_shortfalls: None,
         });
@@ -9323,7 +9268,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.sn_active = true;
             if let Some(plan) = self.plan.as_mut() {
                 plan.block_supernodal = true;
-                plan.f32_factor = self.sn_num.mixed.is_some();
+                plan.f32_factor = self.sn_num.mixed.is_some() || core::mem::size_of::<T>() == 4;
             }
         } else {
             // General sparse route: S flattened to scalar CSC and factorized
@@ -9653,7 +9598,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 }
 
 // ---------------------------------------------------------------------------
-// SparseEigen / SparseCholmod — Eigen sparse Cholesky via C++ FFI
+// SparseEigen / SparseCholmod -- Eigen sparse Cholesky via C++ FFI
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "eigen")]
@@ -9858,8 +9803,8 @@ impl LmSolver<f64> for SparseCholmod {
 
 /// Eigen CholmodSupernodalLLT sparse Cholesky solver (f64 only).
 ///
-/// **WARNING (license):** this binds CHOLMOD's Supernodal module, which is
-/// **GPL-licensed** (the Simplicial module behind `SparseCholmod` is LGPL).
+/// License: this binds CHOLMOD's Supernodal module, which is GPL-licensed
+/// (the Simplicial module behind `SparseCholmod` is LGPL).
 /// A binary built with the `cholmod-gpl` feature is subject to the GPL.
 #[cfg(feature = "cholmod-gpl")]
 pub struct SparseCholmodSupernodal {
@@ -9910,7 +9855,7 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
 }
 
 // ---------------------------------------------------------------------------
-// Sparse matrix types — COO (triplet) and CSC (compressed sparse column)
+// Sparse matrix types -- COO (triplet) and CSC (compressed sparse column)
 // ---------------------------------------------------------------------------
 
 /// COO (coordinate/triplet) format for incremental assembly.
@@ -10226,7 +10171,7 @@ impl<T: Float> CscMatrix<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Band Cholesky solve — LAPACK dpbsv/spbsv (optional) or pure Rust
+// Band Cholesky solve -- LAPACK dpbsv/spbsv (optional) or pure Rust
 // ---------------------------------------------------------------------------
 
 /// Band Cholesky solve via LAPACK dpbsv (f64). Band is modified in-place.
@@ -10273,7 +10218,7 @@ pub(crate) fn solve_spd_band_lapack_f32(n: usize, kd: usize, band: &mut [f32], b
 }
 
 // ---------------------------------------------------------------------------
-// Band Cholesky solve — pure Rust, O(n*kd^2)
+// Band Cholesky solve -- pure Rust, O(n*kd^2)
 // ---------------------------------------------------------------------------
 
 /// Band Cholesky solve for SPD matrix in upper-band format (column-major).
@@ -11071,7 +11016,7 @@ mod tests {
         let b = [1.0, 2.0, 3.0, 4.0];
         let mut x = [0.0f64; 4];
         assert!(solve_spd(4, &a, &b, &mut x));
-        // Verify Ax ≈ b
+        // Verify Ax ~= b
         for i in 0..4 {
             let mut ax_i = 0.0;
             for j in 0..4 { ax_i += a[i * 4 + j] * x[j]; }

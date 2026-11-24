@@ -86,13 +86,18 @@ let result = model.fit_with(&LmConfig::well_conditioned().with_verbose(true)).un
 
 Output:
 ```
-1/0: 95.0849->60.4112 / 34.6737, lambda=1.19209e-7
-2/0: 60.4112->60.2542 / 0.15696, lambda=1.19209e-7
-3/0: 60.2542->60.2525 / 0.00169373, lambda=1.19209e-7
+[arael INFO] LM threads: sweeps 1, linear 1
+[arael INFO] 1/0: 95.0849->60.4112 / 34.6737, lambda=1.19209e-7 (step=3)
+[arael INFO] 2/0: 60.4112->60.2542 / 0.15696, lambda=1.19209e-7 (step=15)
+[arael INFO] 3/0: 60.2542->60.2525 / 0.00169373, lambda=1.19209e-7 (step=6)
 
 Iterations: 3, cost: 95.084900 -> 60.252522
 Robust fit: a=0.05912567, b=-0.08700039
 ```
+
+The `[arael INFO]` lines are the solver's log (see
+[docs/SOLVERS.md](SOLVERS.md#verbose-trace-format)); `step` is the
+attempt's time in microseconds.
 
 The robust fit converges in 3 iterations. The slope drops from 0.175 to 0.059 -- the outliers are suppressed, and the fit tracks the majority of the data.
 

@@ -15,7 +15,7 @@ use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{
     LmProblemInternals,
-    BlockSupernodalMode, EnvelopeMode, LmProblem, LmSolver, RootProblem, SchurPolicy,
+    BlockSupernodalMode, EnvelopeMode, LmSolver, RootProblem, SchurPolicy,
     SparseFaer,
 };
 use arael::utils::Float;

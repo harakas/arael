@@ -57,13 +57,13 @@ pub(crate) enum SolveStats {
 ///
 /// Every device operation can fail with a [`DeviceFailure`], which ends
 /// the solve; a damped solve's `None` is the numerical outcome the loop
-/// raises lambda on. `Send`, so a solver moves between threads as on the
-/// CPU.
+/// raises lambda on. `Send`, so a solver moves between threads as a host
+/// solver does.
 pub(crate) trait GpuSolver<T>: Send {
     /// How the system is solved, as the report says it.
     fn solve(&self) -> GpuSolve;
     /// The device: its name, its compile target, whether it computes in
-    /// f64 (Metal does not: an f64 root assembles on the CPU there).
+    /// f64 (Metal does not: an f64 root assembles on the host there).
     fn arch(&self) -> &arael_gpu::Arch;
     /// Time the device's work from here on (`on`), or stop: stamps in its
     /// queue around each linearization and attempt, their spans read at the

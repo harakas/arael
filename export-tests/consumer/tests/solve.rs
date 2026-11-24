@@ -1,7 +1,6 @@
 use arael::model::{CrossBlock, Model, Param, SelfBlock, VarCrossBlock, VarSelfBlock};
 use arael::refs;
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus};
-use arael::utils::Float;
 use arael::matrix::matrixd;
 use arael::vect::{vect2, vect3, vect3d, vectd};
 use export_consumer::{Bias, BiasLink, BiasVarLink, MarkLink, World32, World64};

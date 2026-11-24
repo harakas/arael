@@ -1,12 +1,13 @@
 //! The device assembly (feature `gpu`): the gradient, the Hessian's tile
 //! values and the cost computed on a GPU from the model's constraints.
 //!
-//! A root the device head covers gets an implementation of [`DeviceRoot`]
-//! from `#[arael(root)]`: its layout ([`DeviceShape`]), a structure walk
-//! (the entities' indices, the guards, the kept instances' slots), a values
-//! walk (the entities' fixed values, references and data, the root's data,
-//! the instances' data), the data records' Rust and C++ mirrors and its
-//! constraint kernels in C++ ([`DeviceRoot::device_cpp`]).
+//! A root whose constraints all have a device form gets an implementation
+//! of [`DeviceRoot`] from `#[arael(root)]`: its layout ([`DeviceShape`]), a
+//! walk of its structure (the entities' indices, the guards, the kept
+//! instances' slots), a walk of its values (the entities' fixed values,
+//! references and data, the root's data, the instances' data), the data
+//! records' Rust and C++ mirrors and its constraint kernels in C++
+//! ([`DeviceRoot::device_cpp`]).
 //! [`DeviceAssembly`] lays a root out on a [`Device`] once per structure and
 //! then assembles at any parameter vector into device blocks, which the
 //! device solve reads in place: the model's data as columns and records in
@@ -39,6 +40,7 @@ pub struct DeviceShape {
     pub references: Vec<DeviceReference>,
     /// How many cross arrays the store holds.
     pub crosses: usize,
+    /// The root's constraint types, in the order of their kernels.
     pub constraints: Vec<DeviceConstraint>,
     /// Per entity table: the bytes of one entity's data record, a multiple
     /// of 16, zero for none.
@@ -57,6 +59,7 @@ pub struct DeviceReference {
     pub entity: usize,
     /// The offset of its step among the entity's parameters.
     pub step: usize,
+    /// The parameter's type: how its reference composes with its step.
     pub kind: ReferenceKind,
 }
 
@@ -99,7 +102,7 @@ impl ReferenceKind {
     }
 
     /// The scalar its reference is kept and composed in on a route of
-    /// `values`: the root's, as the CPU's parameter keeps it, the wide one
+    /// `values`: the root's, as the host's parameter keeps it, the wide one
     /// for a [`MixedEuler`](Self::MixedEuler).
     ///
     /// ```
@@ -246,6 +249,7 @@ pub trait DeviceLeaf {
     /// The significand bits the type carries: 24 for `f32`, 48 for `df32`,
     /// 53 for `f64`; an integer or `bool` counts as 53, exact as data.
     const BITS: u32;
+    /// The value as the device's data stores it.
     fn device_leaf(self) -> f64;
 }
 
@@ -405,14 +409,20 @@ pub trait DeviceRoot<T> {
     fn device_restore(&mut self, refs: &mut dyn FnMut(u32) -> Option<crate::model::Reference>);
 }
 
-/// What [`device_check`] found: the CPU's and the device's cost, and the
+/// What [`device_check`] found: the host's and the device's cost, and the
 /// largest differences of the gradient and of the Hessian's values, each
-/// relative to the largest CPU entry.
+/// relative to the largest host entry.
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceCheck {
-    pub cpu_cost: f64,
+    /// The cost the host's assembly computed.
+    pub host_cost: f64,
+    /// The cost the device's assembly computed.
     pub device_cost: f64,
+    /// The largest difference of a gradient entry, relative to the largest
+    /// host entry.
     pub grad_err: f64,
+    /// The largest difference of a Hessian value, relative to the largest
+    /// host value.
     pub hess_err: f64,
     /// The pattern's values.
     pub values: usize,
@@ -420,7 +430,7 @@ pub struct DeviceCheck {
     /// ([`DeviceAssembly::leaf_bits`]).
     pub leaf_bits: u32,
     /// The most instances of one constraint: the longest chain of adds in
-    /// the CPU's cost sum ([`check_cost_tolerance`]).
+    /// the host's cost sum ([`check_cost_tolerance`]).
     pub chain: usize,
 }
 
@@ -692,7 +702,8 @@ impl<H> HostBuf<H> {
 pub type Target<'a, B> = (&'a B, usize);
 
 /// A root laid out on a [`Device`] in one block: its structure uploaded
-/// once, its values written into pinned staging and uploaded per solve; the
+/// once, its values written into the staging ([`Staging`]) and uploaded per
+/// solve; the
 /// parameter vector, the targets and the cost are the caller's buffers:
 /// the parameters, H and the gradient in the assembly's [`Values`], the
 /// cost in its [`Wide`] scalar.
@@ -1258,15 +1269,16 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         v
     }
 
-    /// Changes whenever the block or its offsets change: a graph of the
-    /// launches replays only under the generation it was captured in.
+    /// A counter of the block's layout: it changes whenever the block or its
+    /// offsets change. A captured graph of the launches replays only under
+    /// the generation it was captured in.
     pub fn generation(&self) -> u64 {
         self.generation
     }
 
     /// The fewest significand bits of the model's leaves at the last
     /// refresh ([`DeviceLeaf::BITS`]): below the root scalar's, a leaf of a
-    /// narrower type, whose rows the CPU computes in that type while the
+    /// narrower type, whose rows the host computes in that type while the
     /// device computes every row in the root's.
     pub fn leaf_bits(&self) -> u32 {
         self.leaf_bits
@@ -1278,8 +1290,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     }
 
     /// The scalar of the parameters, H and the gradient: the root's, as the
-    /// CPU's route keeps them (f32 for an f32 root, else
-    /// [`wide`](Self::wide)).
+    /// host keeps them (f32 for an f32 root, else [`wide`](Self::wide)).
     pub fn values(&self) -> Values {
         self.route
     }
@@ -1470,7 +1481,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     }
 }
 
-/// Assemble `problem` at `x` on the CPU and on `dev` in `wide` against one
+/// Assemble `problem` at `x` on the host and on `dev` in `wide` against one
 /// tiled pattern (the reduced route's), and compare (for tests). The device
 /// is laid out from the model at `x0`, as a solve lays it out at its start
 /// and assembles at the points it moves to: what it computes at `x` must
@@ -1483,7 +1494,7 @@ where
     try_device_check(problem, x0, x, dev, wide).unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
-/// [`device_check`], a panic of the CPU's assembly at `x` (a model that
+/// [`device_check`], a panic of the host's assembly at `x` (a model that
 /// panics on its data) caught and returned, the model put back at `x0`.
 fn try_device_check<T, D>(
     problem: &mut dyn crate::simple_lm::LmProblemInternals<T>,
@@ -1511,12 +1522,12 @@ where
     problem.bind_hessian_positions(&mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)), &mut positions, &mut ctx);
     let nv = hsym.val_count();
     let (mut grad, mut vals) = (vec![T::zero(); n], vec![T::zero(); nv]);
-    let cpu_cost = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let host_cost = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         problem.calc_grad_hessian_sparse_indexed(x, &mut grad, &mut vals, &positions, &mut ctx)
     }));
     // the device laid out from the model at x0
     problem.update_params(x0);
-    let cpu_cost = cpu_cost?.to_f64().unwrap();
+    let host_cost = host_cost?.to_f64().unwrap();
     let root = problem.device_root().expect("the root has a device assembly");
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
     let asm = DeviceAssembly::<T, D>::new(dev, root, &hsym, threads, wide, Staging::Pinned)
@@ -1549,19 +1560,20 @@ where
         if max > 0.0 { diff / max } else { diff }
     };
     let chain = asm.counts.iter().copied().max().unwrap_or(0);
-    Ok(DeviceCheck { cpu_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv, leaf_bits: asm.leaf_bits(), chain })
+    Ok(DeviceCheck { host_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv, leaf_bits: asm.leaf_bits(), chain })
 }
 
-/// The environment variable that turns on the device check of solves:
-/// set (to anything but `0`), the first solve of each root type with a
-/// device assembly in a process assembles that root on the device too, at
-/// its starting point moved by up to three thousandths (of each
-/// parameter's size, or absolutely below 1), in both wide scalars
-/// ([`device_check`]), and panics where the device's cost, gradient or
-/// Hessian values differ from the CPU's beyond [`check_tolerance`] of the
-/// model's narrowest scalar (the root's, or a leaf's: an `f32` entity in an
-/// `f64` root has its rows computed in `f32` on the CPU). Any
-/// test suite then tests the device assembly of the models it solves:
+/// The environment variable that turns on the device check: set (to
+/// anything but `0`), every solve checks the device assembly against the
+/// host's. The first solve of each root type with a device assembly also
+/// assembles that root on the device, near its starting point (each
+/// parameter moved by up to three thousandths of its size, or absolutely
+/// below 1), in both wide scalars ([`device_check`]), and panics where the
+/// device's cost, gradient or Hessian values differ from the host's beyond
+/// [`check_tolerance`] of the model's narrowest scalar (the root's, or a
+/// leaf's: an `f32` entity in an `f64` root has its rows computed in `f32`
+/// on the host). A test suite run with it set checks the device assembly
+/// of every model it solves:
 ///
 /// ```sh
 /// ARAEL_DEVICE_CHECK=1 cargo test --features gpu-cuda
@@ -1575,8 +1587,8 @@ pub const DEVICE_CHECK_LOG_VAR: &str = "ARAEL_DEVICE_CHECK_LOG";
 
 /// The device check's tolerance for a model whose narrowest scalar (the
 /// root's, or a leaf's, [`DeviceCheck::leaf_bits`]) carries `bits`
-/// significand bits: relative to the CPU's cost, and to the largest CPU
-/// entry of the gradient and of the Hessian. Where it is `f32` the CPU
+/// significand bits: relative to the host's cost, and to the largest host
+/// entry of the gradient and of the Hessian. Where it is `f32` the host
 /// computes and sums in it, the device in its own scalars.
 pub fn check_tolerance(bits: u32) -> f64 {
     match bits {
@@ -1586,12 +1598,11 @@ pub fn check_tolerance(bits: u32) -> f64 {
     }
 }
 
-/// The device check's tolerance for the cost, relative to the CPU's:
+/// The device check's tolerance for the cost, relative to the host's:
 /// [`check_tolerance`] of the narrowest scalar's `bits`, plus the rounding
-/// of the CPU's cost sum, a chain of up to `chain` adds in the root's
+/// of the host's cost sum, a chain of up to `chain` adds in the root's
 /// scalar of `root_bits` significand bits (`chain * 2^-root_bits`, the
-/// bound for positive terms; the device sums in trees). An f32 root's sum
-/// of 204k terms, as Ladybug-372's, is good to about 1.2%:
+/// bound for positive terms; the device sums in trees):
 ///
 /// ```ignore
 /// check_cost_tolerance(24, 24, 204_472) // 1e-4 + 1.2e-2
@@ -1691,7 +1702,7 @@ where
 
 /// [`check_solve`]'s check of the root `name`: its largest differences,
 /// or a panic where one is beyond [`check_tolerance`]; `Err` with the
-/// message of a panic of the CPU's assembly.
+/// message of a panic of the host's assembly.
 #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip", feature = "gpu-cpu", gpu_metal))]
 fn check_root<T, P>(problem: &mut P, x0: &[T], name: &str) -> Result<String, String>
 where
@@ -1724,12 +1735,12 @@ where
         bits = root_bits.min(chk.leaf_bits);
         let tol = check_tolerance(bits);
         cost_tol = check_cost_tolerance(bits, root_bits, chk.chain);
-        let cost = (chk.device_cost - chk.cpu_cost).abs() / chk.cpu_cost.abs().max(f64::MIN_POSITIVE);
+        let cost = (chk.device_cost - chk.host_cost).abs() / chk.host_cost.abs().max(f64::MIN_POSITIVE);
         if !(cost <= cost_tol && chk.grad_err <= tol && chk.hess_err <= tol) {
             panic!(
-                "{DEVICE_CHECK_VAR}: `{name}` assembles on the device ({wide:?} sums) other than on the CPU: \
+                "{DEVICE_CHECK_VAR}: `{name}` assembles on the device ({wide:?} sums) other than on the host: \
                  cost {} against {} ({cost:.1e}, tolerance {cost_tol:.1e}), gradient {:.1e}, Hessian {:.1e}, tolerance {tol:.0e}",
-                chk.device_cost, chk.cpu_cost, chk.grad_err, chk.hess_err
+                chk.device_cost, chk.host_cost, chk.grad_err, chk.hess_err
             );
         }
         for (w, e) in worst.iter_mut().zip([cost, chk.grad_err, chk.hess_err]) {

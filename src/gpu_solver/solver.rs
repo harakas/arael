@@ -113,7 +113,7 @@ impl<T, D: Device> DeviceSolver<T, D> {
     }
 
     /// The scalar of the vectors, H and the gradient: the root's, as the
-    /// CPU's route keeps them.
+    /// host keeps them.
     fn values(&self) -> Values {
         Values::of(core::mem::size_of::<T>(), self.wide)
     }

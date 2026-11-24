@@ -472,10 +472,10 @@ fn f32_supernodal_schur_route_solves() {
     assert!(r.end_cost < 1e-6, "end_cost {}", r.end_cost);
 }
 
-/// On an f32 solver the factor is single precision already; the setting
-/// adds the refinement, in f64 over the f32 matrix, and the route still
-/// lands on the optimum at the solver's precision with the plan reporting
-/// the factor and the steps.
+/// On an f32 solver the factor is single precision already, and the plan
+/// says so with no refinement; the setting adds the refinement, in f64 over
+/// the f32 matrix, and the route still lands on the optimum at the solver's
+/// precision with the plan reporting the factor and the steps.
 #[test]
 fn f32_solver_with_mixed_precision_refines_and_solves() {
     let run = |mixed: Option<MixedPrecision>| {
@@ -493,7 +493,7 @@ fn f32_solver_with_mixed_precision_refines_and_solves() {
         (r.end_cost, r.x, plan.f32_factor, plan.refinements)
     };
     let (c_plain, x_plain, f_plain, steps_plain) = run(None);
-    assert!(!f_plain && steps_plain.is_none());
+    assert!(f_plain && steps_plain.is_none(), "an f32 solver's factor is f32, without refinement");
     let (c_mixed, x_mixed, f_mixed, steps_mixed) = run(Some(MixedPrecision::default()));
     assert!(f_mixed, "the plan reports the f32 factor on an f32 solver too");
     assert!(steps_mixed.expect("refinement counted") > 0);

@@ -10,7 +10,7 @@ gauge requirement.
 
 At the solution the parameter covariance is `Sigma = (J^T J)^-1`. arael assembles
 `H = 2 J^T J` (the cost is `sum r^2`, so `add_residual` carries a factor of 2),
-so `Sigma = 2 H^-1`. Covariances come back in **local tangent coordinates**, the
+so `Sigma = 2 H^-1`. Covariances come back in local tangent coordinates, the
 parameters' own steps, so there is no manifold projection to undo. A rotation
 (`QuaternionParam`, `EulerAngleParam` to first order, a `TransformParam`'s) steps
 on the right by a rotation vector, `R = R_ref exp(w)`: its block is in the body
@@ -77,7 +77,7 @@ let n  = cov.dim();                                // number of optimized scalar
 Factor `H` once; answer each query by solving for that entity's columns of the
 inverse. faer picks a supernodal factor where it pays off. The factorization is
 shared across queries, so cost is roughly one factor plus one triangular solve
-per queried entity. **Use it for a handful of entities.**
+per queried entity. Use it for a handful of entities.
 
 ### `AllMarginals`
 
@@ -85,7 +85,7 @@ Also run a *selected inverse* up front: a block Takahashi recursion over the
 supernodal factor (BLAS-3 dense kernels) that computes every covariance entry
 inside the factor's sparsity pattern -- which always includes every diagonal
 block. Every marginal, and every cross block that lands in-pattern, then becomes a
-lookup. **Use it when you want many or all marginals** (an uncertainty ellipse per
+lookup. Use it when you want many or all marginals (an uncertainty ellipse per
 pose, a covariance per landmark). It computes them all in one pass at a cost that
 does not grow with how many you read back.
 
@@ -93,7 +93,7 @@ does not grow with how many you read back.
 
 For a block-tridiagonal `H` -- a localization pose chain against a fixed map, with
 no loop closures, so consecutive poses couple and nothing else does. It runs a
-forward Schur pass over the band with **no factorization at all**: the last pose's
+forward Schur pass over the band with no factorization at all: the last pose's
 covariance is `2 S_last^-1`, free once the forward pass reaches the end (and the
 solve already needs that pass). Querying an interior pose triggers a single
 backward pass, cached, after which interior marginals are `2 (S_i + R_i - D_i)^-1`.
@@ -128,10 +128,10 @@ let mut ctx = Context::new();
 let cov = model.assemble_covariance_with(CovMode::PerQuery, &opts, &mut ctx)?;
 ```
 
-**The context** is what a loop of assemblies reuses instead of rebuilding
+The context is what a loop of assemblies reuses instead of rebuilding
 per call; `model.assemble_covariance(mode)` makes a fresh one each time.
 
-**`ordering`** picks the elimination order. `Auto` (the default) prices minimum
+`ordering` picks the elimination order. `Auto` (the default) prices minimum
 degree against nested dissection over the model's block graph and keeps
 whichever factors in fewer flops -- the same determination the solver makes for
 a solve. `Amd` and `Natural` force the choice; `NestedDissection` forces
@@ -140,8 +140,8 @@ figure-8 crossing), since poses far apart in the ordering are coupled there and
 minimum degree has no separator to find.
 
 Pricing is not free: it builds a symbolic analysis per candidate and discards
-the loser. Where minimum degree wins regardless, naming `Amd` skips that and
-halves the setup. A block graph of many small blocks is the case -- a bundle
+the loser. Where minimum degree wins regardless, naming `Amd` skips that. A
+block graph of many small blocks is the case -- a bundle
 adjustment with tens of thousands of 3-DOF points, where minimum degree
 wins. A trajectory that revisits is the opposite case, and
 there the comparison pays for itself.
@@ -150,7 +150,7 @@ Ordering over the block graph rather than `H`'s scalar columns is the same
 coupling with the entity sizes divided out: a 6-DOF pose against a 3-DOF
 landmark is one edge there and 18 scalar ones in `H`.
 
-**`block_supernodal`** factorizes in block form with arael's supernodal
+`block_supernodal` factorizes in block form with arael's supernodal
 Cholesky instead of faer's scalar one, which also skips the scalar triplets and
 the scalar CSC. `AllMarginals` ignores it and stays on the scalar factor: its
 selected inverse reads faer's supernode panels. `CovAssembly::took_block_route`
@@ -168,16 +168,16 @@ pricing ran and what it bought.
 
 ## Block types
 
-- **`marginal_cov`** -- the entity's covariance with every *other* parameter
+- `marginal_cov` -- the entity's covariance with every *other* parameter
   integrated out. This is the covariance you usually want: it folds in the
   uncertainty of the variables the entity couples to.
-- **`conditional_cov`** -- the entity's uncertainty with every other parameter held
+- `conditional_cov` -- the entity's uncertainty with every other parameter held
   fixed, `2 (H_ee)^-1`, the inverse of its own information block. Never larger than
   the marginal; `O(dof^3)` with no factor solve. An entity with no self-information
   yields infinities.
-- **`cross_cov(a, b)`** -- the off-diagonal `A x B` block of the joint covariance,
+- `cross_cov(a, b)` -- the off-diagonal `A x B` block of the joint covariance,
   the correlation between two entities. Available in `PerQuery` and `AllMarginals`.
-- **`std_dev`** -- the square root of the marginal diagonal, one value per scalar
+- `std_dev` -- the square root of the marginal diagonal, one value per scalar
   parameter. Convenience over `marginal_cov`.
 
 ## The gauge

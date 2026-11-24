@@ -884,6 +884,7 @@ fn root_level_optional_remote_prior() {
 struct ASkip {
     live: std::vec::Vec<P>,
     #[arael(skip)]
+    #[allow(dead_code)]  // never read on purpose: the point is that it is skipped
     dead: std::vec::Vec<P>,
 }
 

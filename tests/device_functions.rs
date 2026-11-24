@@ -304,9 +304,9 @@ fn disagreements<T: Float, R: RootProblem<T> + LmProblemInternals<T>>(dev: &std:
     let wides = if dev.arch().has_f64 { vec![Wide::F64, Wide::Df32] } else { vec![Wide::Df32] };
     for wide in wides {
         let chk = arael::__gpu::device_check(&mut root, &x, &x1, dev, wide);
-        let cost_err = (chk.device_cost - chk.cpu_cost).abs() / chk.cpu_cost.abs().max(f64::MIN_POSITIVE);
+        let cost_err = (chk.device_cost - chk.host_cost).abs() / chk.host_cost.abs().max(f64::MIN_POSITIVE);
         if !(cost_err <= tol && chk.grad_err <= tol && chk.hess_err <= tol) {
-            out.push(format!("{what} {wide:?}: cost {} against the CPU's {}, gradient {:.1e}, Hessian {:.1e}", chk.device_cost, chk.cpu_cost, chk.grad_err, chk.hess_err));
+            out.push(format!("{what} {wide:?}: cost {} against the CPU's {}, gradient {:.1e}, Hessian {:.1e}", chk.device_cost, chk.host_cost, chk.grad_err, chk.hess_err));
         }
     }
     out

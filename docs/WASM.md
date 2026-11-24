@@ -71,11 +71,11 @@ Python names in camelCase (`refAt`, `solveSparse`, `rotAngle`). In a
 crate exported from several roots every class carries its root's name
 in front (`DecayCell`, `DecayLmConfig`).
 
-**The root** is a class with a constructor: `new Graph()`. It carries
+The root is a class with a constructor: `new Graph()`. It carries
 the root's own fields, one accessor method per collection
 (`g.poses()`), the solve entries and the covariance assembly.
 
-**A collection accessor** (`GraphPoses`, one class per collection
+A collection accessor (`GraphPoses`, one class per collection
 field) reaches the collection through the root every time it is used,
 so it never goes stale:
 
@@ -100,7 +100,7 @@ so it never goes stale:
 A ref is a number; 4294967295 is none. Refs are what `Ref<T>` fields
 take and give.
 
-**An entity handle** (`Pose2`, the element classes) is what `push`,
+An entity handle (`Pose2`, the element classes) is what `push`,
 `at` and `get` return. It holds where the element is, not a pointer,
 and re-resolves it on every access, so growing the collection cannot
 leave it dangling; an access after the element is gone throws. Every
@@ -125,7 +125,7 @@ field is a property:
 
 Setters take the same shapes the getters give.
 
-**Bulk access.** For every settable value of an element type, the
+Bulk access. For every settable value of an element type, the
 collection accessor has `get<Name>N(start, n)` returning a typed array
 of `n` elements' values, interleaved for vectors and matrices, and
 `set<Name>N(start, values)` taking one. Numbers come as `Float64Array`,
@@ -224,8 +224,9 @@ frees it now. A handle or accessor is small; the root holds the model.
 
 ## What is absent
 
-Threads (`numThreads` and `assemblyThreads` are inert, and `threads()`
-reports one), the observer callback, the per-constraint cost table and
+Solving on a GPU, threads (`numThreads` and `assemblyThreads` are
+inert, and `threads()` reports one), the observer callback, the
+per-constraint cost table and
 `calcJacobian` of a `jacobian` root, the structured failure and the
 partial result of a failed solve, the transform views of the C++ and
 Python skins (the flat `<name>Translation` / `<name>Rotation` properties

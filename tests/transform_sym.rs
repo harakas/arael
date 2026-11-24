@@ -9,7 +9,7 @@ use arael::matrix::matrix3d;
 use arael::model::{CrossBlock, SelfBlock};
 use arael::quatern::quaternd;
 use arael::refs::{self, Ref};
-use arael::simple_lm::{LmConfig, LmProblem, RootProblem};
+use arael::simple_lm::{LmConfig, LmProblem};
 use arael::transform::{ScaledTransformParam, TransformParam};
 use arael::vect::vect3d;
 
