@@ -1,4 +1,4 @@
-# BAL bundle adjustment over the generated arael C++ interface, CPU or GPU.
+# BAL bundle adjustment over the generated arael C++ interface, on the host or a GPU.
 #   cmake -S . -B build [-DARAEL_GPU=cuda] && cmake --build build && ./build/bal_demo
 cmake_minimum_required(VERSION 3.16)
 project(bal_demo CXX)

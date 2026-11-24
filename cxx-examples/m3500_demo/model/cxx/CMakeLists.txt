@@ -18,14 +18,23 @@ set(_arael_capi_dir "${CMAKE_CURRENT_SOURCE_DIR}/../capi")
 set(_arael_cargo_target "${CMAKE_CURRENT_BINARY_DIR}/cargo")
 set(_arael_capi_lib "${_arael_cargo_target}/release/libm3500_demo_capi.a")
 
-# The GPU runtime the interface is built with, for SparseOptions::gpu:
-# cuda, hip, metal, cpu (the CPU device), or empty for none.
-set(ARAEL_GPU "" CACHE STRING "GPU runtime of the arael interface: cuda, hip, metal, cpu or empty")
+# The GPU runtimes the interface is built with, for SparseOptions::gpu: a
+# list of cuda, hip, metal, cpu (the CPU device), separated by commas or
+# semicolons (-DARAEL_GPU=cuda,hip), or empty for none.
+set(ARAEL_GPU "" CACHE STRING "GPU runtimes of the arael interface: a list of cuda, hip, metal, cpu, or empty")
+string(REPLACE "," ";" _arael_gpus "${ARAEL_GPU}")
+set(_arael_gpu_features "")
+foreach(_arael_gpu IN LISTS _arael_gpus)
+  if(_arael_gpu STREQUAL "cuda" OR _arael_gpu STREQUAL "hip" OR _arael_gpu STREQUAL "metal" OR _arael_gpu STREQUAL "cpu")
+    list(APPEND _arael_gpu_features gpu-${_arael_gpu})
+  else()
+    message(FATAL_ERROR "ARAEL_GPU is '${ARAEL_GPU}': a list of cuda, hip, metal, cpu, or empty")
+  endif()
+endforeach()
 set(_arael_features "")
-if(ARAEL_GPU STREQUAL "cuda" OR ARAEL_GPU STREQUAL "hip" OR ARAEL_GPU STREQUAL "metal" OR ARAEL_GPU STREQUAL "cpu")
-  set(_arael_features --features gpu-${ARAEL_GPU})
-elseif(NOT ARAEL_GPU STREQUAL "")
-  message(FATAL_ERROR "ARAEL_GPU is '${ARAEL_GPU}': cuda, hip, metal, cpu or empty")
+if(_arael_gpu_features)
+  list(JOIN _arael_gpu_features "," _arael_feature_list)
+  set(_arael_features --features ${_arael_feature_list})
 endif()
 
 add_custom_target(m3500_demo_capi_build
@@ -44,7 +53,7 @@ if(UNIX)
     INTERFACE_LINK_LIBRARIES pthread dl m)
 endif()
 # The Metal runtime's frameworks: a staticlib carries no link dependencies.
-if(APPLE AND ARAEL_GPU STREQUAL "metal")
+if(APPLE AND "metal" IN_LIST _arael_gpus)
   set_property(TARGET arael_m3500_demo APPEND PROPERTY INTERFACE_LINK_LIBRARIES
     "-framework Metal" "-framework Foundation" "-framework CoreFoundation" "-framework IOKit" objc)
 endif()

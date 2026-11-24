@@ -4,7 +4,7 @@
 // deterministic solver, so every printed value must round-trip
 // EXACTLY. Skipped with a note when no C++ compiler is available.
 
-#[path = "parity_verify.rs"]
+#[path = "common/parity_verify.rs"]
 mod parity_verify;
 
 use std::collections::HashMap;

@@ -4,7 +4,7 @@
 // smoke binary. Skipped with a note when cmake or a C++ compiler is
 // missing.
 
-#[path = "gpu_report.rs"]
+#[path = "common/gpu_report.rs"]
 mod gpu_report;
 
 use std::path::{Path, PathBuf};
@@ -105,6 +105,63 @@ fn cmake_consumer_reports_the_gpu() {
     assert!(out.status.success(), "smoke_gpu failed: {}{}",
         String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     gpu_report::verify(&String::from_utf8(out.stdout).unwrap());
+}
+
+/// The interface built with two runtimes (`-DARAEL_GPU=cpu,cuda`): both
+/// compiled in (CUDA's libraries load at run time, so it builds without
+/// the toolkit), the line fit's GPU report on the CPU device the
+/// one-runtime build's, and the machine's CUDA GPUs, if any, listed.
+#[test]
+fn cmake_consumer_builds_with_a_list_of_runtimes() {
+    if !have("cmake") || !have("c++") {
+        eprintln!("cmake consumer with two runtimes: cmake or c++ missing, skipping");
+        return;
+    }
+    let ws: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let build = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cmake_build_gpu_list");
+    let _ = std::fs::remove_dir_all(&build);
+
+    let status = Command::new("cmake")
+        .arg("-S").arg(ws.join("runner/tests/cmake_consumer"))
+        .arg("-B").arg(&build)
+        .arg(format!("-DMODEL_CXX_DIR={}", ws.join("model/cxx").display()))
+        .arg("-DARAEL_GPU=cpu,cuda")
+        .status().expect("cmake spawn");
+    assert!(status.success(), "cmake configure failed");
+
+    let status = Command::new("cmake")
+        .arg("--build").arg(&build)
+        .status().expect("cmake build spawn");
+    assert!(status.success(), "cmake build failed");
+
+    let out = Command::new(build.join("smoke_gpu")).output().expect("smoke_gpu run");
+    assert!(out.status.success(), "smoke_gpu failed: {}{}",
+        String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    gpu_report::verify_with_other_runtimes(&String::from_utf8(out.stdout).unwrap());
+}
+
+/// A runtime the glue does not know, alone or in a list, fails the
+/// configure step and names the value.
+#[test]
+fn cmake_glue_refuses_an_unknown_runtime() {
+    if !have("cmake") {
+        eprintln!("cmake glue: cmake missing, skipping");
+        return;
+    }
+    let ws: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    for (i, value) in ["vulkan", "cpu,vulkan"].iter().enumerate() {
+        let build = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("cmake_build_bad_gpu_{i}"));
+        let _ = std::fs::remove_dir_all(&build);
+        let out = Command::new("cmake")
+            .arg("-S").arg(ws.join("runner/tests/cmake_consumer"))
+            .arg("-B").arg(&build)
+            .arg(format!("-DMODEL_CXX_DIR={}", ws.join("model/cxx").display()))
+            .arg(format!("-DARAEL_GPU={value}"))
+            .output().expect("cmake spawn");
+        assert!(!out.status.success(), "{value}: configure succeeded");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(&format!("ARAEL_GPU is '{value}'")), "{value}: {err}");
+    }
 }
 
 /// The consumer with the interface built for Metal (`-DARAEL_GPU=metal`):

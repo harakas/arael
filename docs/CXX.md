@@ -2,7 +2,7 @@
 
 `cargo arael export` turns a crate holding an `#[arael(root)]` model
 into a C++ interface: build the problem from C++, solve, read the
-results back -- with the same math vocabulary as the Rust side.
+results back, with the same math types as the Rust side.
 
 ## Model author
 
@@ -29,38 +29,36 @@ entity to fill), containers spelled `refs::Vec<..>` /
 | `python/<ns>/` | the Python interface (docs/PYTHON.md) |
 | `wasm/` | the JavaScript interface, a wasm-bindgen crate (docs/WASM.md) |
 
-`export` also adds a macro build profile to the workspace `Cargo.toml`
-when it is missing: the arael macro crates at `opt-level = 3` in the
-dev and release profiles. Model code generation runs inside those
-crates at compile time, and cargo builds proc-macros unoptimized in
-every profile, so without it a large model spends most of its build
-expanding. Only the entries the manifest lacks are added, in the
-workspace root, which is where cargo reads profiles from. `cargo arael
-setup` does just that step on its own.
+`export` also adds, when missing, a build profile to the workspace
+`Cargo.toml` that compiles the arael macro crates at `opt-level = 3` in
+the dev and release profiles. The model's code is generated inside those
+crates at compile time, and cargo builds macro crates unoptimized, so
+without the profile a large model builds slowly. Only the missing
+entries are added. `cargo arael setup` adds the profile alone.
 
-Commit the generated files; `cargo arael check` fails when they are
-stale (run it in CI). It modifies nothing, and notes a missing macro
-build profile since it builds the model too. Rerun `export` after
-model changes. Every
-command takes `--manifest-dir <path>` to name the model crate instead
-of the current directory.
+Commit the generated files and rerun `export` after model changes.
+`cargo arael check` fails when they are stale (run it in CI); it changes
+nothing, and notes a missing macro build profile. Every command takes
+`--manifest-dir <path>` to name the model crate instead of the current
+directory.
+
 `interfaces = ["cxx"]` under `[package.metadata.arael]` in the model
 crate's `Cargo.toml` limits `export` and `check` to the trees listed
 (`capi`, `cxx`, `python`, `wasm`; `cxx` and `python` bring `capi`,
-which they call); without it all four are written, and `--interfaces
+which they call). Without it all four are written; `--interfaces
 <list>` overrides it for one run.
-`capi/Cargo.toml` is written once and then left alone -- edit it
-freely (dependencies, crate settings); delete the file to regenerate
-it. Only its generated first line is kept up to date. Everything else
-is regenerated on every export, but a file whose content did not
-change is not rewritten, so its timestamp stays and a consumer's build
+
+`capi/Cargo.toml` is written once and then left alone: edit it freely,
+or delete it to regenerate it. Only its generated first line is kept up
+to date. Every other file is regenerated on each export, but a file
+whose content did not change is not rewritten, so a consumer's build
 recompiles only what the export changed.
 
-A generated file the export no longer writes is removed: a dropped
-root's header and module, a tree left out of `interfaces`. Only files
-carrying cargo-arael's stamp on their first line are removed, never a
-written-once `Cargo.toml` or a file of your own, and a directory goes
-only once it is empty. `check` lists such files as stale.
+`export` removes the generated files it did not write this time: a
+dropped root's header and module, a tree left out of `interfaces`. It
+removes only files carrying cargo-arael's stamp on their first line,
+never a written-once `Cargo.toml` or a file of your own, and a
+directory only once it is empty. `check` lists such files as stale.
 
 Several roots in one crate work: the one capi crate carries every
 root's shim (symbols are root-prefixed), each root gets its own
@@ -87,12 +85,12 @@ On Linux the target also links with `--exclude-libs,lib<model>_capi.a`,
 which keeps the staticlib's symbols inside a shared library built on
 it. Without CMake, pass `-Wl,--exclude-libs,lib<model>_capi.a` when
 linking a shared library. Exported, the assembly routines faer uses on
-x86-64 call one another through lazily bound PLT slots, and crash or
-compute wrong results.
+x86-64 call one another through lazily bound PLT (procedure linkage
+table) slots, and crash or compute wrong results.
 
 ```cpp
 #include <mymodel.hpp>
-using namespace mymodel;   // the model AND the re-exported arael math
+using namespace mymodel;   // the model and the re-exported arael math
 
 Fit fit;
 auto p = fit.poses().push_back();       // stable pointer wrapper
@@ -124,11 +122,11 @@ namespace is the arael version the shim was built with, an
 `AraelVersion`: `major`, `minor`, `patch` and `pre`, the tag after the
 dash (`"dev"` in `0.9.0-dev`, empty for a release).
 
-## The API surface
+## The generated interface
 
-The generated interface lives in a namespace named after the MODEL
-CRATE (hyphens as underscores; override with `namespace = "..."`
-under `[package.metadata.arael]`) -- the model is the project's, not
+The generated interface lives in a namespace named after the model
+crate (hyphens as underscores; override with `namespace = "..."`
+under `[package.metadata.arael]`): the model is the project's, not
 arael's. It re-exports the arael value types it uses, so one
 `using namespace mymodel;` brings both; the vendored headers
 themselves stay in `namespace arael`. Different generated models
@@ -140,28 +138,28 @@ u32 handle -- the C++ spelling of Rust's `Ref<Pose>`. Collection
 views are named by their container's nature: `PathPosesDeque`,
 `PathLandmarksArena`, `LandmarkFrinesVec`.
 
+### Values
 
-- **N-dimensional types**: a model field of `vect<T, N>` /
+- N-dimensional types: a model field of `vect<T, N>` /
   `matrix<T, R, C>` (or the `vectf/vectd/matrixf/matrixd` aliases)
   maps to the header templates `arael::vect<double, N>` /
   `arael::matrix<double, R, C>` (float for f32 models) -- plain
   aggregates (`T e[N]` / `vect<T, C> rows[R]`) with the core operator
   set (`+ - *` including dot/matvec/matmul, `[]`, `transpose`,
   `norm`), passed by value like the fixed types.
-
-- **Math types** (`vect2/3`, `matrix2/3`, `quatern`, f/d suffixes)
+- Math types (`vect2/3`, `matrix2/3`, `quatern`, f/d suffixes)
   mirror the Rust types: `*` is dot, `%` is cross, euler is x=roll,
   y=pitch, z=yaw with `R = R(z)R(y)R(x)`, quaternions store the
   scalar part first. `matrix2/3::symmetric_eigen()` matches the Rust
-  one (ascending eigenvalues, eigenvector columns) to precision, not
-  bits. `arael/geometry.hpp` carries the pinhole camera
-  (`cameraf` / `camerad`; `Camera` is a legacy alias of `cameraf`);
+  one (ascending eigenvalues, eigenvector columns) to rounding.
+  `arael/geometry.hpp` carries the pinhole camera
+  (`cameraf` / `camerad`; `Camera` is an alias of `cameraf`);
   `arael/g2o.hpp` the pose-graph file I/O (`Dataset2` for
   VERTEX_SE2/EDGE_SE2 with `iso_sqrt_info`/`eigen_sqrt_info`
   whitening accessors, `Dataset3` for VERTEX_SE3:QUAT/EDGE_SE3:QUAT
   with sqrt-information Cholesky blocks; `to_g2o()`/`save(path)`
-  write the graph back out, byte-identical to the Rust writer).
-- **Eigen interop**: `#include <arael/eigen.hpp>` (after Eigen is on
+  write the graph back out in the Rust writer's format).
+- Eigen interop: `#include <arael/eigen.hpp>` (after Eigen is on
   the include path) and every value type converts both ways.
   `v.to_eigen()` returns the plain Eigen value (`Eigen::Matrix<T, N,
   1>` / `<T, R, C>`, `Eigen::Quaternion<T>` with `w() = t`, an
@@ -176,7 +174,7 @@ views are named by their container's nature: `PathPosesDeque`,
   nothing changes: the math headers never name an Eigen type, and a
   `to_eigen()` call in a file that did not include it fails at that
   call with a message pointing at the header to include.
-- **Params** read/write their value; `set_<p>_optimize(false)` fixes
+- Params read/write their value; `set_<p>_optimize(false)` fixes
   one. Rotation params take euler `vect3` (or a quaternion for
   `QuaternionParam`); `TransformParam` exposes translation, rotation,
   and per-half optimize flags, `ScaledTransformParam` those plus
@@ -187,7 +185,7 @@ views are named by their container's nature: `PathPosesDeque`,
   sub-models: their fields (set-before / read-after values included)
   behind an accessor. Entity wrappers carry
   `static constexpr param_count`.
-- **Transforms**: a `TransformParam` / `ScaledTransformParam` field is
+- Transforms: a `TransformParam` / `ScaledTransformParam` field is
   also a live view, `frame.pose()`, whose parts read and write through
   (`translation()`, `set_rotation(q)`, `set_optimize_scale(false)`)
   and which acts like a transform, with `r2w` reading as "robot to
@@ -207,32 +205,44 @@ views are named by their container's nature: `PathPosesDeque`,
   methods and `operator*`; `to_transform()` / `to_scaled_transform()`
   are the snapshots. A scaled transform acts as `s (R x) + t`, its
   inverse as `R^T (x - t) / s`; `rotate` never scales.
-- **Collections**: `push` (deque: `push_back`/`push_front`) returns an
-  element wrapper; `refs::`-backed containers also give `ref_at(i)` /
-  `get(ref)` / `contains(ref)` / `try_get(ref)` (an `option`, empty
-  for a stale ref where `get` would abort), and an `Arena` `push`
-  returns the ref itself (`remove` takes it back). A
-  default-constructed ref is the null sentinel, same as Rust
-  `Ref::default()`; `ref.valid()` tests it. Vec gives
-  `first_ref()`/`last_ref()` and deque `front_ref()`/`back_ref()`
-  (null when empty). Every view has `size()`, `empty()`, and
-  `reserve(n)`; vec and deque add `front()`/`back()` (empty container
-  is UB, like the STL). Removal mirrors Rust: vec
-  `pop`/`truncate`/`clear`, deque
-  `pop_back`/`pop_front`/`truncate`/`clear`, arena
-  `remove`/`clear` (pops report whether anything was dropped; the
-  value itself is dropped in place). All views carry canonical
-  BIDIRECTIONAL iterators (`for (auto e : view)`, `++`/`--` pre and
-  post, `==`/`!=`, `->`, `rbegin()`/`rend()`, the std iterator
-  typedefs) -- the arena walks its live slots in both directions and
-  its iterator also exposes `.ref()`. Dereference yields a value wrapper (like
-  `vector<bool>`). Standard C++ contract: modifying a container while
-  iterating it is undefined behavior. `refs::` element pointers are stable across
-  pushes; `std::vec::Vec` ones are not -- re-fetch after a push.
-- **Option entities**: `has_x()` / `make_x()` / `clear_x()` and `x()`
+
+### Collections
+
+- `push` (deque: `push_back`/`push_front`) returns an element
+  wrapper; an `Arena` `push` returns the ref itself (`remove` takes it
+  back).
+- `refs::`-backed containers also give `ref_at(i)`, `get(ref)`,
+  `contains(ref)` and `try_get(ref)` (an `option`, empty for a stale
+  ref where `get` would abort). Vec gives `first_ref()`/`last_ref()`
+  and deque `front_ref()`/`back_ref()` (null when empty). A
+  default-constructed ref is the null sentinel, as Rust's
+  `Ref::default()`; `ref.valid()` tests it.
+- Every view has `size()`, `empty()` and `reserve(n)`; vec and deque
+  add `front()`/`back()` (undefined on an empty container, like the
+  STL).
+- Removal mirrors Rust: vec `pop`/`truncate`/`clear`, deque
+  `pop_back`/`pop_front`/`truncate`/`clear`, arena `remove`/`clear`.
+  The pops report whether anything was dropped; the value itself is
+  dropped in place.
+- Every view has bidirectional iterators (`for (auto e : view)`,
+  `++`/`--` pre and post, `==`/`!=`, `->`, `rbegin()`/`rend()`, the
+  std iterator typedefs); the arena's iterators walk its live slots
+  and also expose `.ref()`. Dereference yields a value wrapper (like
+  `vector<bool>`). Modifying a container while iterating it is
+  undefined behavior.
+- `refs::` element pointers are stable across pushes;
+  `std::vec::Vec` ones are not: fetch them again after a push.
+- Option entities: `has_x()` / `make_x()` / `clear_x()` and `x()`
   returning `option<X>`.
-- **LmConfig** is a plain struct holding the chosen preset's
-  Rust values (fetched through the FFI at construction) -- inspect the
+
+### Solving
+
+- `solve_dense` / `solve_sparse` / `solve_band(kd)` -- the last a
+  band Cholesky for banded Hessians, `kd` the half-bandwidth in
+  scalar parameters. `cost()` on the root evaluates the total cost at
+  the current parameter values (no solve).
+- `LmConfig` is a plain struct holding the chosen preset's
+  Rust values (fetched from the Rust library at construction) -- inspect the
   real defaults, edit fields, pass it back whole. Presets:
   `defaults()`, `conservative()`, `well_conditioned()`,
   `ill_conditioned()` (the Nielsen lambda driver). Every Rust field is
@@ -242,113 +252,44 @@ views are named by their container's nature: `PathPosesDeque`,
   `time_limit_seconds`, `max_accepted_iters` and `assembly_threads` as
   `option<uint32_t>`, `covariance` as `option<CovMode>` with
   `covariance_ordering` and `covariance_block_supernodal` beside it. The shared
-  solver surface lives in `arael/solver.hpp`.
+  solver types live in `arael/solver.hpp`.
   Warm restart: `cfg.initial_lambda = r.final_lambda` re-enters at
   the previous damping (Rust's `continue_from`); the optimized
   parameters already live in the model.
   `set_log_level(LogLevel::Warn)` quiets arael's diagnostics
   process-wide (Info, everything, is the default).
-- **Observer**: `cfg.observer` (+ `cfg.observer_user`, passed back as
+- Observer: `cfg.observer` (+ `cfg.observer_user`, passed back as
   its first argument) is called once per damped attempt with an
   `LmIter` -- iteration counts, accepted flag, costs, lambda, and the
-  current parameter vector. Return false to stop the solve (status
-  `ObserverTerminated`, current best state kept). A capture-less
-  lambda converts directly.
-- **Timing**: set `cfg.gather_timing`; the result then carries
-  `timing` (per-phase wall-clock seconds plus call counts,
-  `has_timing` flags validity; `timing.setup`, an
-  `option<SetupTiming>`, is where the analysis went, and `timing.gpu`,
-  an `option<GpuTiming>`, the device's own assembly and attempt time
-  on a GPU and within the attempts the conjugate gradients' iterations
-  (`cg`, `cg_rounds`), see docs/SOLVERS.md) and `r.steps()` -- the per-attempt
-  timeline as a vector of `LmStep` (attempt and retry indices,
-  accepted, lambda, costs, step and gradient norms, per-phase
-  seconds; a damping retry is its own record).
-- **Sparse backend options**: `solve_sparse(cfg, opts)` takes a
-  `SparseOptions` -- the Schur policy as `schur` (Rust's `policy`:
-  Auto / Force / Never, with the Auto pricing's tuning), elimination ordering (Auto / Amd /
-  MarginalizeFirst / Natural / NestedDissection), the envelope route
-  for the reduced system (Auto / Always / Never, plus panel width),
-  supernodal on/off, narrow band, and the block supernodal Cholesky
-  (`BlockSupernodalMode` Auto / Always / Never, its batching ratio,
-  its memory-lean amalgamation, and `mixed_precision` with
-  `max_refinements` and `refine_tol`: an f32 factor refined against the
-  f64 matrix, reported by the plan's `f32_factor`, `refinements` and
-  `refinement_shortfalls`). Constructed with the actual Rust
-  defaults; the one-argument `solve_sparse(cfg)` uses them.
-- **GPU**: `SparseOptions::gpu` (`GpuBackend` None / Cuda / Hip / Cpu /
-  Metal; Cpu is the CPU running the GPU kernels, for tests without a
-  GPU) and `gpu_index` run the block supernodal route, or with
-  `schur_solve = SchurSolve::Iterative` conjugate gradients on the
-  reduced system, on that device, the
-  process's shared state of it, so repeated solves reuse its buffers;
-  `gpu_assembly` (on by default) also assembles there and keeps the LM
-  loop on the device when the model has a device form; `gpu_wide`
-  (`GpuWide` F64 / Df32 / Default) keeps the device's wide values in f64,
-  in df32 (two floats, for cards whose f64 is slow) or in the device's
-  default (the default: df32 on Metal, else f64). Metal has no f64
-  (`arael::has_f64(GpuBackend)` is false for it): an f64 model on it
-  needs `mixed_precision` (the f32 factor, refined), and `GpuWide::F64`
-  fails the solve with `SolverUnavailable`. `gpu_staging`
-  (`GpuStaging` Pinned / Pageable) writes the device assembly's image
-  into pinned host memory (asynchronous copies, the default) or into
-  ordinary memory (for platforms where copies from pinned memory are
-  slow). An f32 solve without `mixed_precision` forms the system it
-  factorizes in f32, as the CPU's f32 route; with `mixed_precision` it
-  forms it in the wide values (with `max_refinements` 0: formed wide,
-  not refined). With conjugate gradients on the device
-  (`SchurSolve::Iterative`), which have no factor, an f64 solve under
-  `mixed_precision` forms and solves the reduced system in f32, its
-  assembly, costs and step f64. `LmResult::gpu()` returns what the solve did on the
-  device, an `option<GpuReport>` (empty without a GPU): the device's
-  `name` and compile `target`, `wide`, `solve` (`GpuSolve` None /
-  Factor / FactorF32 / ConjugateGradients: how the device solves the
-  system), `f32_system`,
-  `work` (`GpuWork` Unused / Solves / Loop: nothing, the damped solves,
-  or the assembly, the solves and the LM loop), `host_assembly`
-  (`HostAssembly` None / Asked / NoDeviceForm / NoF64: why the assembly
-  ran on the host) with the reason in `no_device_form`, and the device
-  memory in `reserved_bytes` and `buffers_created`; its strings live as
-  long as the result. The text report prints it as a `gpu` block.
-  The interface must
-  be built with the runtime: the CMake cache variable `ARAEL_GPU`
-  (`cuda`, `hip`, `metal` or `cpu`) builds the capi crate with the
-  feature of that name (`gpu-cuda`, `gpu-hip`, `gpu-metal`, `gpu-cpu`);
-  without it the solve fails with
-  `SolverUnavailable`. On such a solve the observer gets the parameters
-  and a driver the vectors only when `LmConfig::device_observer_params`
-  and `device_driver_vectors` ask. Compiled kernels are kept in a disk
-  cache, `ARAEL_KERNEL_CACHE` naming its directory or `off`
-  (docs/SOLVERS.md, GPU):
-
-  ```cpp
-  // cmake -S cxx -B build -DARAEL_GPU=cuda
-  SparseOptions so;
-  so.gpu = GpuBackend::Cuda;
-  so.mixed_precision = true;    // optional: an f32 factor, refined
-  auto r = model.solve_sparse(cfg, so);
-
-  // cmake -S cxx -B build -DARAEL_GPU=metal
-  so.gpu = GpuBackend::Metal;
-  so.mixed_precision = !arael::has_f64(so.gpu);   // an f64 model needs it
-  ```
-
-  `detect_gpu()` picks the machine's GPU and `available_gpus()` lists
-  them (`GpuInfo`: `backend`, `index`, `name`, `integrated`), of the
-  runtimes the interface was built with: discrete before integrated,
-  then CUDA, HIP, Metal, then by index. No device is opened, and the CPU
-  device is not listed. `detect_gpu()` logs what it found:
-
-  ```cpp
-  if (auto gpu = detect_gpu()) {        // empty without a GPU: the solve stays on the CPU
-      so.gpu = gpu->backend;
-      so.gpu_index = gpu->index;
-      so.mixed_precision = !arael::has_f64(so.gpu);
-  }
-  for (const GpuInfo& gpu : available_gpus())
-      std::puts(gpu.name);              // NVIDIA GeForce RTX 4090
-  ```
-- **LmSession**: warm reuse over repeated sparse solves --
+  current parameter vector (on a GPU, see `device_observer_params`
+  under [Solving on a GPU](#solving-on-a-gpu)). Return false to stop
+  the solve (status `ObserverTerminated`, current best state kept). A
+  capture-less lambda converts directly.
+- Sparse backend options: `solve_sparse(cfg, opts)` takes a
+  `SparseOptions`, constructed with the Rust defaults (the
+  one-argument `solve_sparse(cfg)` uses them):
+  - `schur`, the Schur policy (Rust's `policy`: Auto / Force / Never),
+    with the Auto pricing's tuning `flop_margin` and
+    `obvious_flop_ratio`;
+  - `ordering`, the elimination ordering (Auto / Amd /
+    MarginalizeFirst / Natural / NestedDissection);
+  - `envelope`, the envelope route for the reduced system (Auto /
+    Always / Never), with `envelope_panel_width`;
+  - `supernodal` and `narrow_band`;
+  - `schur_solve`, how the reduced system is solved (`SchurMethod`
+    Factorize / Iterative / IterativeImplicit: Cholesky, or
+    preconditioned conjugate gradients on the formed or the implicit
+    reduced system; the iterative ones need `schur = Force`), with
+    `cg_tol`, `cg_max_iters` and `cg_restart_every`;
+  - the block supernodal Cholesky: `block_supernodal`
+    (`BlockSupernodalMode` Auto / Always / Never), its batching ratio
+    `block_supernodal_batch`, its memory-lean amalgamation
+    `block_supernodal_memory_lean`, and `mixed_precision` with
+    `max_refinements` and `refine_tol`: an f32 factor, each damped
+    solve refined against the matrix, reported by the plan's
+    `f32_factor`, `refinements` and `refinement_shortfalls`;
+  - the GPU options, under [Solving on a GPU](#solving-on-a-gpu).
+- LmSession: warm reuse over repeated sparse solves --
   `LmSession sess;` (optionally over a `SparseOptions`), then
   `sess.solve(model, cfg)` keeps the sparsity analysis (pattern,
   ordering, symbolic factorization, Schur plan) across solves, so
@@ -356,82 +297,213 @@ views are named by their container's nature: `PathPosesDeque`,
   change: without it a changed parameter or block count panics, which
   reaches C++ as `arael::PanicError`, and a change that keeps every
   count solves warm through stale analysis.
-- **cost_table()** -- only when the root is `#[arael(root, jacobian)]`:
-  per-constraint cost breakdown, label -> that group's robustified
-  cost, sorted by label and summing to `cost()`. Labels come from
-  `name = "..."` on the constraint attribute, else the struct name.
-- **calc_jacobian()** -- same gate: an owned snapshot of the sparse
-  Jacobian for DOF/rank analysis. `num_residuals()` / `num_params()`,
-  `singular_values()` (descending, always f64; pass `true` to
-  column-normalise first, so near-zero values count the free DOF
-  without per-parameter scale leaking in), `column_l2_norms()`.
-  Copies share it, the last copy releases it; later solves or edits
-  do not touch it.
-- **Reports and the plan**: the returned `LmResult` owns the full
-  Rust-side result. `r.report()` / `r.pretty_report()` render it --
-  status, costs, iterations, the timing breakdown, the backend's
+- Status helpers: `is_success(r->status)` / `as_str(r->status)`
+  mirror the Rust helpers. Success is not `code >= 0`: hitting
+  max_iters or the time limit is Ok-side but not a success.
+- Failures: a solve failure comes back as
+  `Err(SolveError{status, message, partial, failure})` (Rust's
+  `SolveFailure`). `partial` holds the best accepted state when the
+  solve got past its first assembly, usable for diagnosis (its report
+  renders like any result). `failure` is the structured cause:
+  `SolveFailureKind` (Rust's, with the setup error's data flattened
+  in) plus the indices a caller can act on -- the offending parameter
+  for `UnconstrainedParameter` / `DegenerateDiagonal` with its
+  `DiagonalFault`, row/col/kd for `BandOverflow`, and so on; -1 where
+  not applicable. A caught Rust panic (a stale ref, an unguarded
+  Option read, a bad options tag) throws `arael::PanicError` with the
+  panic text; the model's parameters are unchanged and a session in
+  use was invalidated. `validate()` returns the diagnostic text (""
+  when clean).
+
+### Results
+
+- The returned `LmResult` owns the full Rust-side result; copies of a
+  result share ownership. `r.report()` / `r.pretty_report()` render
+  it -- status, costs, iterations, the timing breakdown, the backend's
   plan -- and stay valid however many solves follow. `r.plan()`
   returns the sparse backend's `SchurPlan` as data (reduction taken
   or not, eliminated/kept parameters, ordering, bandwidth, whether the
   envelope or the block supernodal route factorized, the Auto policy's
   evidence); empty for dense and band solves. `r.threads()` returns
   what the solve's threads did (`ThreadReport`) and `r.threads_held()`
-  what each split store held. Copies of a result share ownership.
-- **result / option** mirror Rust's shapes; reading the wrong side
-  prints the failed check and aborts (`arael_assert_true` -- always
+  what each split store held.
+- Timing: set `cfg.gather_timing`; the result then carries `timing`
+  (per-phase wall-clock seconds plus call counts; `has_timing` flags
+  validity) and `r.steps()`, the per-attempt timeline as a vector of
+  `LmStep` (a damping retry is its own record). `timing.setup` is
+  where the analysis went (`option<SetupTiming>`) and `timing.gpu` the
+  GPU's own time (`option<GpuTiming>`); see
+  [docs/SOLVERS.md](SOLVERS.md#profiling-a-solve----lmtiming).
+- result / option mirror Rust's shapes; reading the wrong side
+  prints the failed check and aborts (`arael_assert_true`, always
   on).
-- **Status helpers**: `is_success(r->status)` / `as_str(r->status)`
-  mirror the Rust helpers -- note success is NOT `code >= 0` (hitting
-  max_iters or the time limit is Ok-side but not a success).
-- **Failures**: a solve failure comes back as
-  `Err(SolveError{status, message, partial, failure})` (Rust's
-  `SolveFailure`; its `failure` is Rust's `SolveFailureKind` with the
-  setup error's data flattened in) -- `partial`
-  holds the best accepted state when the solve got past its first
-  assembly, usable for diagnosis (its report renders like any
-  result); `failure` is the structured cause (`SolveFailureKind` plus
-  the indices a caller can act on: the offending parameter for
-  `UnconstrainedParameter` / `DegenerateDiagonal` with its
-  `DiagonalFault`, row/col/kd for `BandOverflow`, and so on; -1
-  where not applicable; `Device` for a GPU operation that failed,
-  the operation and the runtime's message in `message`). A caught
-  Rust panic (a stale ref, an unguarded Option read, a bad options
-  tag) THROWS `arael::PanicError` with the panic text; the model's
-  parameters are unchanged and a session in use was invalidated.
-  `validate()` returns the diagnostic text ("" when clean).
-- **Covariance**: `cfg.covariance = CovMode::AllMarginals;` makes the
-  solve assemble the parameter covariance at its solution, and
-  `r->covariance()` moves it out of the result into a `Covariance` view
-  (an error naming why when the config did not ask, an earlier call
-  took it, or the assembly failed).
-  `model.assemble_covariance(CovMode)` assembles one at the current
-  parameters without a solve; `sess.assemble_covariance(model, CovMode)`
-  over a session's context. The view's calls drop Rust's `_cov` suffix:
-  `cov->marginal(entity)` answers the
-  entity's marginal block, typed by size (1 param -> `double`, 2 ->
-  `matrix2d`, 3 -> `matrix3d`, larger via a caller buffer);
-  `cov->cross(a, b, out, cap)` the row-major pa x pb cross-covariance
-  between two entities (returns the row count or a negative code);
-  `cov->std_dev(entity, out, cap)` the per-parameter standard
-  deviations (works on every CovMode, including TriDiagonal);
-  `cov->conditional(entity, out, cap)` the conditional covariance
-  (all other parameters held fixed).
-  The view OWNS its assembly: copies share it, the last copy releases
-  it, and every `assemble_covariance` call is independent -- older
-  views keep answering from their own assembly. Entity arguments must
-  come from the live model; `last_error()` carries the failure text.
-  `cfg.covariance_ordering` (`CovOrdering`) and `cfg.covariance_block_supernodal`, or
-  `assemble_covariance(CovMode, const CovOptions&)` on the model and the
-  session, spell out the assembly instead.
-  `CovOrdering::Auto` builds a symbolic factorization per candidate
-  ordering to choose between them; naming the ordering skips that work.
-  `cov->plan()` returns a `CovPlan` saying which ordering the assembly
-  kept, what the candidates priced at, how many symbolics it built and
-  whether the block route ran.
-- **Solves**: `solve_dense` / `solve_sparse` / `solve_band(kd)` --
-  band Cholesky for banded Hessians, `kd` the half-bandwidth in
-  scalar parameters. `cost()` on the root evaluates the total cost at
-  the current parameter values (no solve).
+- `cost_table()`, only when the root is `#[arael(root, jacobian)]`:
+  per-constraint cost breakdown, label -> that group's robustified
+  cost, sorted by label and summing to `cost()`. Labels come from
+  `name = "..."` on the constraint attribute, else the struct name.
+- `calc_jacobian()`, same gate: an owned snapshot of the sparse
+  Jacobian for the analysis of rank and DOF (degrees of freedom). `num_residuals()` / `num_params()`,
+  `singular_values()` (descending, always f64; pass `true` to
+  column-normalise first, so near-zero values count the free DOF
+  without per-parameter scale leaking in), `column_l2_norms()`.
+  Copies share it, the last copy releases it; later solves or edits
+  do not touch it.
+
+### Covariance
+
+`cfg.covariance = CovMode::AllMarginals;` makes the solve assemble the
+parameter covariance at its solution, and `r->covariance()` moves it
+out of the result into a `Covariance` view (an error naming why when
+the config did not ask, an earlier call took it, or the assembly
+failed). `model.assemble_covariance(CovMode)` assembles one at the
+current parameters without a solve;
+`sess.assemble_covariance(model, CovMode)` over a session's context.
+
+The view's calls drop Rust's `_cov` suffix:
+
+- `cov->marginal(entity)`: the entity's marginal block, typed by size
+  (1 param -> `double`, 2 -> `matrix2d`, 3 -> `matrix3d`, larger via a
+  caller buffer);
+- `cov->cross(a, b, out, cap)`: the row-major pa x pb
+  cross-covariance between two entities (returns the row count or a
+  negative code);
+- `cov->std_dev(entity, out, cap)`: the per-parameter standard
+  deviations (every CovMode, TriDiagonal included);
+- `cov->conditional(entity, out, cap)`: the conditional covariance
+  (all other parameters held fixed);
+- `cov->plan()`: a `CovPlan` saying which ordering the assembly kept,
+  what the candidates priced at, how many symbolic factorizations it
+  built and whether the block route ran.
+
+The view owns its assembly: copies share it, the last copy releases
+it, and every `assemble_covariance` call is independent -- older views
+keep answering from their own assembly. Entity arguments must come
+from the live model; `last_error()` carries the failure text.
+
+`cfg.covariance_ordering` (`CovOrdering`) and
+`cfg.covariance_block_supernodal`, or `assemble_covariance(CovMode,
+const CovOptions&)` on the model and the session, choose how it is
+assembled. `CovOrdering::Auto` builds a symbolic factorization per
+candidate ordering to choose between them; naming the ordering skips
+that work.
+
+## Solving on a GPU
+
+A sparse solve can run on a GPU: the assembly, the damped solves and
+the Levenberg-Marquardt (LM) loop. A GPU pays where the factor is
+large, as in bundle adjustment from a few hundred cameras up and SLAM
+(simultaneous localization and mapping) maps with landmarks; pose
+graphs solve faster on the host. A GPU solve
+agrees with a host solve to rounding.
+[docs/SOLVERS.md](SOLVERS.md#solving-on-a-gpu) describes it in detail.
+
+### Building
+
+The CMake cache variable `ARAEL_GPU` builds the interface with GPU
+runtimes, one or a list separated by commas (`-DARAEL_GPU=cuda,hip`):
+
+| `ARAEL_GPU` | GPU | Needed at run time |
+|---|---|---|
+| `cuda` | NVIDIA | the CUDA driver library and NVRTC (CUDA's run-time compiler) |
+| `hip` | AMD | the HIP runtime and hipRTC, from ROCm |
+| `metal` | Apple silicon | macOS |
+| `cpu` | none: the GPU kernels run on the host, for tests | a C++ compiler |
+
+```
+cmake -S path/to/mymodel/cxx -B build -DARAEL_GPU=cuda,hip
+```
+
+The runtimes load their libraries at run time, so the build needs no
+CUDA toolkit or ROCm, and the program runs on machines without that
+GPU too; `detect_gpu()` picks among the runtimes built in. `ARAEL_GPU`
+builds the capi crate with the features `gpu-<runtime>`, which are
+declared in `capi/Cargo.toml`. `export` writes that file once: if yours
+has no `[features]` section, delete it and export again.
+
+### Solving
+
+```cpp
+SparseOptions so;
+if (auto gpu = detect_gpu()) {          // empty without a GPU: the solve stays on the host
+    so.gpu = gpu->backend;
+    so.gpu_index = gpu->index;
+    so.mixed_precision = !arael::has_f64(so.gpu);   // see Metal below
+}
+SolveResult r = fit.solve_sparse(cfg, so);
+if (r.is_ok()) {
+    if (auto g = r->gpu()) {            // empty for a solve without a GPU
+        if (g->work == GpuWork::Unused)
+            std::puts("the GPU was not used");      // the solve logged why
+        else
+            std::printf("solved on %s (%s)\n", g->name, g->target);
+    }
+}
+```
+
+`detect_gpu()` picks the machine's preferred GPU among the runtimes
+the interface was built with: a discrete one before an integrated one,
+then CUDA, HIP, Metal, then the lower index. It logs what it found.
+`available_gpus()` lists them all as `GpuInfo` values (`backend`,
+`index`, `name`, `integrated`), preferred first. Neither opens a
+device, and neither lists the CPU device.
+
+`r->gpu()` is a `GpuReport` of what the solve did on its GPU
+(`arael/solver.hpp` documents each field), and `r->report()` prints it
+as a `gpu` block. Its `work` says how much ran there: `Loop`, the
+assembly, the damped solves and the LM loop; `Solves`, the damped
+solves, while the host assembled (`host_assembly` says why); `Unused`,
+nothing.
+
+The GPU runs the block supernodal Cholesky, of the reduced system or
+of the whole one, and conjugate gradients on the formed reduced system
+(`SchurMethod::Iterative`). The other routes run on the host, and a GPU
+given to them is not used: `envelope` (`Auto` can choose the envelope
+for a reduced system; `EnvelopeMode::Never` keeps it on the GPU),
+`narrow_band`, `BlockSupernodalMode::Never` or a model without block
+structure, and `SchurMethod::IterativeImplicit`.
+
+The GPU assembles when every constraint has a device form: GPU
+kernels, which `#[arael(root)]` generates unless the constraint writes
+`coo` pairs or reads a value Rust code computes
+([details](SOLVERS.md#device-forms)). Otherwise the host assembles, and
+`host_assembly` is `NoDeviceForm` with the reason in `no_device_form`.
+
+With the LM loop on the GPU the parameters stay there: the observer's
+`LmIter::params` is empty unless `cfg.device_observer_params` is set,
+which reads them back after each accepted step.
+
+All solves of a process on one GPU share its memory, so solve after
+solve of the same structure allocates nothing (`buffers_created` stays
+the same). The GPU's kernels are compiled at their first use and kept
+in a disk cache, so only a program's first run on a machine compiles
+them. `ARAEL_KERNEL_CACHE` names the cache's directory, or `off`.
+
+A GPU whose runtime the interface was not built with fails the solve
+with `SolveFailureKind::SolverUnavailable`, the parameters untouched. A
+GPU that fails during the solve fails it with `SolveFailureKind::Device`,
+the operation and the runtime's message in `message`.
+
+### Options
+
+The GPU fields of `SparseOptions`:
+
+| Field | Default | What it does | When to change it |
+|---|---|---|---|
+| `gpu` | `None` | the runtime to solve on: `Cuda`, `Hip`, `Metal`, or `Cpu` (the GPU kernels on the host) | to solve on a GPU |
+| `gpu_index` | 0 | the GPU of that runtime, as the runtime numbers them | on a machine with several GPUs of one runtime |
+| `gpu_assembly` | true | the GPU also assembles and keeps the LM loop, when the model has a device form | off to have the host assemble, as to check a result against the host's assembly |
+| `gpu_wide` | `Default` | the wide scalar, which the GPU computes in where the host computes in f64: `F64`, `Df32` (two f32 whose sum is the value, about 48 bits of significand, in f32 arithmetic), or `Default`: `Df32` on Metal, else `F64` | `Df32` on a GPU whose f64 arithmetic is slow, as on most consumer cards |
+| `gpu_staging` | `Pinned` | where the GPU assembly writes the model's data before copying it to the GPU: `Pinned` host memory, whose copies run while the host goes on, or `Pageable` ordinary memory | `Pageable` on a platform where copies from pinned memory are slow |
+| `mixed_precision` | false | an f32 factor, each damped solve refined against the system; on a GPU it also sets the precision of the system the GPU solves ([precision](SOLVERS.md#precision)) | to factor in f32 |
+
+### Metal
+
+Metal has no f64 (`arael::has_f64(GpuBackend::Metal)` is false). Its
+wide scalar is df32, and `gpu_wide = GpuWide::F64` fails the solve with
+`SolverUnavailable`. An f64 solve that factorizes needs
+`mixed_precision`, or it fails the same way; conjugate gradients need
+nothing. An f64 model assembles on the host (`host_assembly` is
+`NoF64`).
 
 ## Contract
 
@@ -439,14 +511,15 @@ One model, one thread. Wrappers are plain pointers: they die with the
 model (or an `Arena::remove`). Whatever validity discipline the Rust
 API enforces at compile time is the C++ caller's responsibility here.
 
+## Examples
+
 Worked examples live in `cxx-examples/`: `slam2d_simple_demo` (2D
 SLAM, plotting, covariance ellipses), `slam_demo_gm` (visual-inertial
 SLAM with a robust loss, a graduated ramp, and relative covariance
 from `cross()`), `loc_demo` (localization against a known map on the
 band solver, TriDiagonal `std_dev`), `m3500_demo` (pose graph
-from a g2o file, digit-for-digit with the Rust example), and `bal_demo`
-(bundle adjustment of a BAL file on the CPU or a GPU, the in-house test
-bed of the GPU options).
+from a g2o file), and `bal_demo` (bundle adjustment of a BAL file,
+with or without a GPU).
 
-The Python interface over the same C ABI is docs/PYTHON.md -- the
-same export writes it, the same parity suite holds it.
+docs/PYTHON.md describes the Python interface, which the same export
+writes over the same C ABI.

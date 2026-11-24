@@ -4,7 +4,7 @@
 // fixture problem to the same result as Rust, exactly (needs the
 // wasm-bindgen CLI at the version the crate pins, and node). Each part
 // is skipped with a note when its tools are missing.
-#[path = "parity_verify.rs"]
+#[path = "common/parity_verify.rs"]
 mod parity_verify;
 
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus, RootProblem};
@@ -149,7 +149,7 @@ fn wasm_interface_matches_rust_exactly() {
     }
     // The session solve and the covariance over its context.
     {
-        use arael::covariance::{CovMode, Covariance};
+        use arael::covariance::CovMode;
         use arael::simple_lm::{LmSession, SparseFaer};
         let mut sess = LmSession::new(SparseFaer::new());
         let rs = sess.solve(&mut fit, &cfg).unwrap();

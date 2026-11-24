@@ -367,13 +367,9 @@ pub struct CLmConfig {
     pub covariance_ordering: u32,
     /// The BlockSupernodalMode tag (0 Auto, 1 Always, 2 Never).
     pub covariance_block_supernodal: u32,
-    /// On a solve whose vectors stay on the GPU, hand the observer the
-    /// parameters (a read per accepted step); otherwise its params are
-    /// empty there.
+    /// With the LM loop on a GPU, read the parameters back after each
+    /// accepted step, for the observer; off, its params are empty there.
     pub device_observer_params: bool,
-    /// On such a solve, hand the lambda driver the gradient, the diagonal
-    /// and the step (a read per attempt).
-    pub device_driver_vectors: bool,
 }
 
 fn cov_mode_of(tag: u32) -> CovMode {
@@ -426,14 +422,13 @@ fn cov_options_tags(o: &CovOptions) -> (u32, u32) {
 /// The sparse backend's options as plain data: constructed by
 /// path_sparse_options (which copies the actual Rust defaults),
 /// edited freely, passed to path_solve_sparse (null there means
-/// these defaults). Field order is C ABI. Not exposed: the
-/// marginalize range list (the model's own marginalize hint covers
-/// it) and the iterative Schur routes.
+/// these defaults). Field order is C ABI. The marginalize range list
+/// is not exposed: the model's marginalize hint covers it.
 #[repr(C)]
 pub struct CSparseOptions {
     /// SchurPolicy: 0 Auto, 1 Force, 2 Never.
     pub schur: u32,
-    /// FaerOrdering: 0 Auto, 1 Amd, 2 MarginalizeFirst, 3 Natural,
+    /// SolveOrdering: 0 Auto, 1 Amd, 2 MarginalizeFirst, 3 Natural,
     /// 4 NestedDissection.
     pub ordering: u32,
     /// EnvelopeMode: 0 Auto, 1 Always, 2 Never.
@@ -450,48 +445,47 @@ pub struct CSparseOptions {
     pub obvious_flop_ratio: f64,
     /// Conjugate-gradient tolerance for the iterative routes.
     pub cg_tol: f64,
-    /// SchurSolve: 0 Factorize, 1 Iterative, 2 IterativeImplicit.
+    /// SchurMethod: 0 Factorize, 1 Iterative, 2 IterativeImplicit.
     /// The iterative routes solve the reduced system by preconditioned
-    /// conjugate gradients; pair them with schur = Force (without a
-    /// reduction the solve fails rather than taking another route).
+    /// conjugate gradients, Iterative on the formed system (on a GPU
+    /// too), IterativeImplicit without forming it (on the host only).
+    /// Pair them with schur = Force: without a reduction the solve fails.
     pub schur_solve: u32,
-    /// CG iteration cap; 0 = unlimited.
+    /// Conjugate-gradient iteration cap; 0 = unlimited.
     pub cg_max_iters: u32,
-    /// CG restart interval; 0 = never.
+    /// Conjugate-gradient restart interval; 0 = never.
     pub cg_restart_every: u32,
     /// BlockSupernodalMode: 0 Auto, 1 Always, 2 Never. Auto takes the
-    /// block supernodal Cholesky on a sequential solve.
+    /// block supernodal Cholesky wherever the model has block structure.
     pub block_supernodal: u32,
     /// Update-batching acceptance ratio for the block supernodal route;
     /// 0 disables batching.
     pub block_supernodal_batch: f64,
     /// Memory-lean amalgamation for the block supernodal route.
     pub block_supernodal_memory_lean: bool,
-    /// Factor in single precision on the block supernodal route and
-    /// refine each solve against the double-precision matrix
-    /// (MixedPrecision). Off by default. An f32 solve on a GPU forms the
-    /// system it factorizes in f32, and under mixed_precision in the
-    /// device's wide values (max_refinements 0: formed wide, not refined).
+    /// Factor in f32 on the block supernodal route and refine each damped
+    /// solve against the matrix (MixedPrecision). On a GPU it also sets
+    /// the precision of the system the GPU solves. Off by default.
     pub mixed_precision: bool,
     /// Refinement steps at most per damped solve, under mixed_precision.
     pub max_refinements: u32,
     /// Relative residual the refinement stops at, under mixed_precision.
     pub refine_tol: f64,
-    /// The GPU the block supernodal route runs on: 0 none, 1 CUDA, 2 HIP,
-    /// 3 the CPU device, 4 Metal (the process's shared state of device
-    /// gpu_index). A capi built without the matching `gpu-cuda` /
-    /// `gpu-hip` / `gpu-cpu` / `gpu-metal` feature fails the solve with
-    /// SolverUnavailable.
+    /// The GPU runtime to solve on: 0 none (the default; the host),
+    /// 1 CUDA, 2 HIP, 3 the CPU device, 4 Metal. A capi built without the
+    /// matching `gpu-cuda` / `gpu-hip` / `gpu-cpu` / `gpu-metal` feature
+    /// fails the solve with SolverUnavailable.
     pub gpu: u32,
+    /// The GPU of that runtime, as the runtime numbers them.
     pub gpu_index: u32,
-    /// On a GPU, assemble on the device too when the model has a device
-    /// form (on by default).
+    /// Assemble on the GPU too and keep the LM loop there, when the model
+    /// has a device form (on by default); off, the host assembles.
     pub gpu_assembly: bool,
-    /// The GPU's wide values (GpuWide): 0 f64, 1 df32, 2 the device's
+    /// The GPU's wide scalar (GpuWide): 0 f64, 1 df32, 2 the GPU's
     /// default (df32 on Metal, else f64; the default).
     pub gpu_wide: u32,
-    /// Where the device assembly's image is staged (GpuStaging): 0 pinned,
-    /// 1 pageable.
+    /// Where the GPU assembly writes the model's data (GpuStaging):
+    /// 0 pinned host memory (the default), 1 ordinary host memory.
     pub gpu_staging: u32,
 }
 
@@ -703,7 +697,6 @@ pub unsafe extern "C" fn path_lm_config(preset: u32, out: *mut CLmConfig) {
         covariance_ordering: cov_options_tags(&c.covariance_options).0,
         covariance_block_supernodal: cov_options_tags(&c.covariance_options).1,
         device_observer_params: c.device_observer_params,
-        device_driver_vectors: c.device_driver_vectors,
     };
 }
 
@@ -733,7 +726,6 @@ impl CLmConfig {
         c.covariance = self.covariance.has.then(|| cov_mode_of(self.covariance.v));
         c.covariance_options = cov_options_of(self.covariance_ordering, self.covariance_block_supernodal);
         c.device_observer_params = self.device_observer_params;
-        c.device_driver_vectors = self.device_driver_vectors;
         if let Some(f) = self.observer {
             c = c.with_observer(CObserver { f, user: self.observer_user });
         }
@@ -756,9 +748,9 @@ pub struct CSetupTiming {
     pub gpu_layout: f64,
 }
 
-/// GpuTiming mirror: the device's own time in a GPU solve, in seconds,
-/// the linearizations and attempts timed, and within the attempts the
-/// conjugate gradients' iterations and their rounds.
+/// GpuTiming mirror: the GPU's own time in a GPU solve, in seconds, the
+/// linearizations and attempts timed, and within the attempts the
+/// conjugate gradients' part and their batches.
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct CGpuTiming {
@@ -811,7 +803,7 @@ pub struct CLmTiming {
     pub covariance: f64,
     /// Where `analysis` went, from the sparse backend.
     pub setup: COptSetupTiming,
-    /// The device's own time, in a solve on a GPU that keeps timestamps.
+    /// The GPU's own time, in a solve on a GPU.
     pub gpu: COptGpuTiming,
 }
 
@@ -1036,13 +1028,13 @@ pub struct CSchurPlan {
     /// Whether the block supernodal Cholesky factorized, rather than
     /// faer's scalar one.
     pub block_supernodal: bool,
-    /// Whether the factor was single precision (mixed_precision).
+    /// Whether the factor was f32: an f32 solve's, or one under
+    /// mixed_precision.
     pub f32_factor: bool,
-    /// Refinement steps summed over the solve, on a single-precision
-    /// factor.
+    /// Refinement steps summed over the solve, under mixed_precision.
     pub refinements: COptU32,
-    /// Damped solves that ended above the refinement tolerance, on a
-    /// single-precision factor.
+    /// Damped solves that ended above the refinement tolerance, under
+    /// mixed_precision.
     pub refinement_shortfalls: COptU32,
 }
 
@@ -1055,20 +1047,20 @@ pub struct CGpuReport {
     pub backend: u32,
     pub index: u32,
     /// The device's name and compile target; empty when the solve did not
-    /// use the device (work 0).
+    /// use the GPU (work 0).
     pub name: *const c_char,
     pub target: *const c_char,
     pub integrated: bool,
     /// GpuWide: 0 f64, 1 df32.
     pub wide: u32,
-    /// GpuSolve, how the device solves the system: 0 not at all (work 0),
+    /// GpuSolve, how the GPU solved the system: 0 not at all (work 0),
     /// 1 an f64 factor, 2 an f32 factor, 3 conjugate gradients.
     pub solve: u32,
     pub f32_system: bool,
     /// GpuWork: 0 unused, 1 the damped solves, 2 the assembly, the damped
     /// solves and the LM loop.
     pub work: u32,
-    /// HostAssembly, why the assembly ran on the CPU when work is 1: 1 asked,
+    /// HostAssembly, why the host assembled when work is 1: 1 asked,
     /// 2 no device form (the reason in no_device_form), 3 no f64; else 0.
     pub host_assembly: u32,
     pub no_device_form: *const c_char,

@@ -3,9 +3,9 @@
 // capi cdylib, verified against the same Rust mirror. Skipped with a
 // note when python3 is absent.
 
-#[path = "parity_verify.rs"]
+#[path = "common/parity_verify.rs"]
 mod parity_verify;
-#[path = "gpu_report.rs"]
+#[path = "common/gpu_report.rs"]
 mod gpu_report;
 
 use std::collections::HashMap;

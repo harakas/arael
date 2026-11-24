@@ -93,7 +93,7 @@ f = fit.Fit()
 fill(f)
 so = fit.SparseOptions()
 so.schur = fit.SchurPolicy.FORCE
-so.schur_solve = fit.SchurSolve.ITERATIVE
+so.schur_solve = fit.SchurMethod.ITERATIVE
 so.gpu = fit.GpuBackend.CPU
 cfg = fit.LmConfig()
 cfg.max_iters = 50

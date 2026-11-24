@@ -19,16 +19,19 @@ target_link_libraries(consumer_shared PRIVATE arael::cxx_fit)
 add_executable(smoke_shared smoke_shared.cpp)
 target_link_libraries(smoke_shared PRIVATE consumer_shared)
 
+# The runtimes the interface is built with (-DARAEL_GPU, a list).
+string(REPLACE "," ";" _consumer_gpus "${ARAEL_GPU}")
+
 # The interface built with the Metal runtime (-DARAEL_GPU=metal): a solve
 # on the device.
-if(ARAEL_GPU STREQUAL "metal")
+if("metal" IN_LIST _consumer_gpus)
   add_executable(smoke_metal metal.cpp)
   target_link_libraries(smoke_metal PRIVATE arael::cxx_fit)
 endif()
 
-# The interface built with the CPU device (-DARAEL_GPU=cpu): the result's
-# GPU report.
-if(ARAEL_GPU STREQUAL "cpu")
+# The interface built with the CPU device (-DARAEL_GPU=cpu, alone or among
+# others): the result's GPU report.
+if("cpu" IN_LIST _consumer_gpus)
   add_executable(smoke_gpu gpu.cpp)
   target_link_libraries(smoke_gpu PRIVATE arael::cxx_fit)
 endif()

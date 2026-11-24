@@ -226,8 +226,6 @@ r = h.solve_dense(fit.LmConfig.well_conditioned())
 v = h.items.get_v()             # the solved item parameters, one array
 ```
 
-Measurements behind these forms: docs/dev/FAST_PYTHON.md.
-
 ## Collections
 
 Every view has `len(view)`, `view[i]` (negative indices too),
@@ -374,8 +372,7 @@ A solver failure or a caught Rust panic raises
 `LmResult` when the solve got that far, `e.failure` the structured
 cause: a `SolveFailure` with its `SolveFailureKind`, the parameter /
 row / block indices (-1 where not applicable) and a `DiagonalFault`
-for a degenerate diagonal. `SolveFailureKind.DEVICE` is a GPU operation
-that failed, the operation and the runtime's message in `e.message`.
+for a degenerate diagonal.
 
 ```python
 try:
@@ -385,64 +382,34 @@ except fit.AraelError as e:
 ```
 
 `SparseOptions()` holds the sparse backend's Rust defaults; set its
-fields and pass it to `solve_sparse`: `schur` (`SchurPolicy`),
-`ordering` (`FaerOrdering`), `envelope` (`EnvelopeMode`) and
-`envelope_panel_width`, `supernodal`, `narrow_band`, `schur_solve`
-(`SchurSolve`), and the block supernodal Cholesky knobs
-`block_supernodal` (`BlockSupernodalMode`), `block_supernodal_batch`,
-`block_supernodal_memory_lean`, and `mixed_precision` with
-`max_refinements` and `refine_tol` (an f32 factor refined against the
-f64 matrix; the plan's `f32_factor`, `refinements` and
-`refinement_shortfalls` report it), and the GPU: `gpu` (`GpuBackend`
-NONE / CUDA / HIP / CPU / METAL; CPU is the CPU running the GPU kernels)
-with `gpu_index`, `gpu_assembly`, `gpu_wide` (`GpuWide` F64 / DF32 /
-DEFAULT, the default: the device's own, df32 on Metal, else f64),
-and `gpu_staging` (`GpuStaging` PINNED / PAGEABLE), as in the
-C++ interface (docs/CXX.md). An f32 solve forms the system it
-factorizes in f32, and under `mixed_precision` in the wide values (with
-`max_refinements` 0: formed wide, not refined). With conjugate gradients
-on the device (`SchurSolve.ITERATIVE`), which have no factor, an f64
-solve under `mixed_precision` forms and solves the reduced system in
-f32, its assembly, costs and step f64. `LmResult.gpu` is what
-the solve did on the device, a `GpuReport` (`None` without a GPU):
-`name`, `target`, `integrated`, `wide`, `solve` (`GpuSolve` NONE /
-FACTOR / FACTOR_F32 / CONJUGATE_GRADIENTS: how the device solves the
-system; with `schur_solve = SchurSolve.ITERATIVE` the conjugate
-gradients run on the device), `f32_system`,
-`work` (`GpuWork` UNUSED / SOLVES / LOOP), `host_assembly` (`HostAssembly`
-NONE / ASKED / NO_DEVICE_FORM / NO_F64) with `no_device_form`,
-`reserved_bytes` and `buffers_created`. Metal has no f64 (`GpuBackend.METAL.has_f64` is false):
-an f64 model on it needs `mixed_precision`, and `GpuWide.F64` fails the
-solve with `SolverUnavailable`. The cdylib must be built with the
-runtime's feature (`cargo build --release -p <crate>-capi --features
-gpu-cuda`, `gpu-hip`, `gpu-metal` or `gpu-cpu`), or the solve fails with
-`SolverUnavailable`. An enum setter rejects a value outside the enum with
-`ValueError`.
+fields and pass it to `solve_sparse`. `help(fit.SparseOptions)`
+describes each field:
+
+- `schur` (`SchurPolicy`), with the Auto pricing's tuning
+  `flop_margin` and `obvious_flop_ratio`;
+- `ordering` (`SolveOrdering`);
+- `envelope` (`EnvelopeMode`) and `envelope_panel_width`;
+- `supernodal`, `narrow_band`;
+- `schur_solve` (`SchurMethod`: Cholesky, or preconditioned conjugate
+  gradients on the formed or the implicit reduced system; the
+  iterative ones need `schur = SchurPolicy.FORCE`), with `cg_tol`,
+  `cg_max_iters` and `cg_restart_every`;
+- the block supernodal Cholesky's `block_supernodal`
+  (`BlockSupernodalMode`), `block_supernodal_batch` and
+  `block_supernodal_memory_lean`, and `mixed_precision` with
+  `max_refinements` and `refine_tol` (an f32 factor, each damped solve
+  refined against the matrix; the plan's `f32_factor`, `refinements`
+  and `refinement_shortfalls` report it);
+- the GPU fields, under [Solving on a GPU](#solving-on-a-gpu).
+
+An enum field rejects a value outside its enum with `ValueError`.
 
 ```python
 so = fit.SparseOptions()
 so.schur = fit.SchurPolicy.FORCE
-so.ordering = fit.FaerOrdering.AMD
+so.ordering = fit.SolveOrdering.AMD
 r = f.solve_sparse(cfg, so)
 r.plan                       # the SchurPlan the backend used; None for dense and band solves
-
-so.gpu = fit.GpuBackend.METAL               # cdylib built with --features gpu-metal
-so.mixed_precision = not so.gpu.has_f64     # an f64 model needs it there
-```
-
-`detect_gpu()` picks the machine's GPU and `available_gpus()` lists them
-(`GpuInfo`: `backend`, `index`, `name`, `integrated`), of the runtimes
-the cdylib was built with: discrete before integrated, then CUDA, HIP,
-Metal, then by index. No device is opened, and the CPU device is not
-listed. `detect_gpu()` logs what it found:
-
-```python
-gpu = fit.detect_gpu()                      # None without a GPU: the solve stays on the CPU
-if gpu is not None:
-    so.gpu, so.gpu_index = gpu.backend, gpu.index
-    so.mixed_precision = not so.gpu.has_f64
-for gpu in fit.available_gpus():
-    print(gpu)                              # cuda:0 NVIDIA GeForce RTX 4090
 ```
 
 `LmSession(opts=None)` keeps the sparsity analysis (pattern,
@@ -459,18 +426,19 @@ r2 = sess.solve(f, cfg)      # warm
 ```
 
 The result owns the whole Rust-side solve and stays valid however
-many solves follow. `r.report()` and `r.pretty_report()` render
-status, costs, the timing breakdown and the backend's plan. With
-`cfg.gather_timing = True`, `r.timing` holds the breakdown
-(`r.timing.setup`, a `SetupTiming` or `None`, is where the analysis
-went, and `r.timing.gpu`, a `GpuTiming` or `None`, the device's own
-assembly and attempt time on a GPU and within the attempts the
-conjugate gradients' iterations, `cg` and `cg_rounds`) and
-`r.steps` the per-attempt timeline (a list of `LmStep`). `r.threads`
-holds what the solve's threads did (a `ThreadReport`) and
-`r.threads_held` what each split store held. A warm
-restart re-enters at the previous damping; the optimized parameters
-already live in the model:
+many solves follow:
+
+- `r.report()` and `r.pretty_report()` render status, costs, the
+  timing breakdown and the backend's plan.
+- With `cfg.gather_timing = True`, `r.timing` is the breakdown, an
+  `LmTiming`: its `setup` is where the analysis went and its `gpu` the
+  GPU's own time ([docs/SOLVERS.md](SOLVERS.md#profiling-a-solve----lmtiming)).
+  `r.steps` is the per-attempt timeline, a list of `LmStep`.
+- `r.threads` is what the solve's threads did (a `ThreadReport`) and
+  `r.threads_held` what each split store held.
+
+A warm restart re-enters at the previous damping; the optimized
+parameters already live in the model:
 
 ```python
 cfg.initial_lambda = r.final_lambda
@@ -479,9 +447,12 @@ r = f.solve_dense(cfg)
 
 `cfg.observer = fn` is called with an `LmIter` per damped attempt
 (`it.lambda_`, `it.params_len`, `it.param(i)`, `it.param_list()`);
-returning `False` stops the solve. `f.cost()` is the total cost at
-the current values, `f.validate()` the diagnostic text (empty when
-the model is clean), `f.last_error()` the last message.
+returning `False` stops the solve. On a GPU, see
+`device_observer_params` under [Solving on a GPU](#solving-on-a-gpu).
+
+`f.cost()` is the total cost at the current values, `f.validate()` the
+diagnostic text (empty when the model is clean), `f.last_error()` the
+last message.
 `fit.set_log_level(fit.LogLevel.WARN)` quiets arael's diagnostics
 process-wide (INFO is the default). A model is freed on garbage
 collection; `free()` forces it.
@@ -524,15 +495,130 @@ owned snapshot for rank analysis: `num_residuals`, `num_params`,
 `singular_values(column_normalised=False)` and `column_l2_norms()`
 as lists.
 
+## Solving on a GPU
+
+A sparse solve can run on a GPU: the assembly, the damped solves and
+the Levenberg-Marquardt (LM) loop. A GPU pays where the factor is
+large, as in bundle adjustment from a few hundred cameras up and SLAM
+(simultaneous localization and mapping) maps with landmarks; pose
+graphs solve faster on the host. A GPU solve
+agrees with a host solve to rounding.
+[docs/SOLVERS.md](SOLVERS.md#solving-on-a-gpu) describes it in detail.
+
+### Building
+
+The cdylib is built with GPU runtimes as cargo features:
+
+| Feature | GPU | Needed at run time |
+|---|---|---|
+| `gpu-cuda` | NVIDIA | the CUDA driver library and NVRTC (CUDA's run-time compiler) |
+| `gpu-hip` | AMD | the HIP runtime and hipRTC, from ROCm |
+| `gpu-metal` | Apple silicon | macOS |
+| `gpu-cpu` | none: the GPU kernels run on the host, for tests | a C++ compiler |
+
+```
+cargo build --release -p <crate>-capi --features gpu-cuda,gpu-hip
+```
+
+The runtimes load their libraries at run time, so the build needs no
+CUDA toolkit or ROCm, and the package runs on machines without that
+GPU too. The features are declared in `capi/Cargo.toml`, which
+`export` writes once: if yours has no `[features]` section, delete it
+and export again.
+
+### Solving
+
+```python
+so = fit.SparseOptions()
+gpu = fit.detect_gpu()                  # None without a GPU: the solve stays on the host
+if gpu is not None:
+    so.gpu, so.gpu_index = gpu.backend, gpu.index
+    so.mixed_precision = not gpu.backend.has_f64   # see Metal below
+r = f.solve_sparse(cfg, so)
+g = r.gpu                               # None for a solve without a GPU
+if g is not None:
+    if g.work == fit.GpuWork.UNUSED:
+        print("the GPU was not used")   # the solve logged why
+    else:
+        print("solved on", g.name, g.target)
+```
+
+`detect_gpu()` picks the machine's preferred GPU among the runtimes
+the cdylib was built with: a discrete one before an integrated one,
+then CUDA, HIP, Metal, then the lower index. It logs what it found.
+`available_gpus()` lists them all as `GpuInfo` values (`backend`,
+`index`, `name`, `integrated`), preferred first; `print(gpu)` gives
+`cuda:0 NVIDIA GeForce RTX 4090`. Neither opens a device, and neither
+lists the CPU device.
+
+`r.gpu` is a `GpuReport` of what the solve did on its GPU
+(`help(fit.GpuReport)` describes each field), and `r.report()` prints
+it as a `gpu` block. Its `work` says how much ran there: `LOOP`, the
+assembly, the damped solves and the LM loop; `SOLVES`, the damped
+solves, while the host assembled (`host_assembly` says why); `UNUSED`,
+nothing.
+
+The GPU runs the block supernodal Cholesky, of the reduced system or
+of the whole one, and conjugate gradients on the formed reduced system
+(`SchurMethod.ITERATIVE`). The other routes run on the host, and a GPU
+given to them is not used: `envelope` (`AUTO` can choose the envelope
+for a reduced system; `EnvelopeMode.NEVER` keeps it on the GPU),
+`narrow_band`, `BlockSupernodalMode.NEVER` or a model without block
+structure, and `SchurMethod.ITERATIVE_IMPLICIT`.
+
+The GPU assembles when every constraint has a device form: GPU
+kernels, which `#[arael(root)]` generates unless the constraint writes
+`coo` pairs or reads a value Rust code computes
+([details](SOLVERS.md#device-forms)). Otherwise the host assembles, and
+`host_assembly` is `NO_DEVICE_FORM` with the reason in
+`no_device_form`.
+
+With the LM loop on the GPU the parameters stay there: the observer's
+`it.param_list()` is empty unless `cfg.device_observer_params = True`,
+which reads them back after each accepted step.
+
+All solves of a process on one GPU share its memory, so solve after
+solve of the same structure allocates nothing (`buffers_created` stays
+the same). The GPU's kernels are compiled at their first use and kept
+in a disk cache, so only a program's first run on a machine compiles
+them. `ARAEL_KERNEL_CACHE` names the cache's directory, or `off`.
+
+A GPU whose runtime the cdylib was not built with fails the solve with
+an `AraelError` whose `e.failure.kind` is
+`SolveFailureKind.SOLVER_UNAVAILABLE`, the parameters untouched. A GPU
+that fails during the solve fails it with `SolveFailureKind.DEVICE`,
+the operation and the runtime's message in `e.message`.
+
+### Options
+
+The GPU fields of `SparseOptions`:
+
+| Field | Default | What it does | When to change it |
+|---|---|---|---|
+| `gpu` | `GpuBackend.NONE` | the runtime to solve on: `CUDA`, `HIP`, `METAL`, or `CPU` (the GPU kernels on the host) | to solve on a GPU |
+| `gpu_index` | 0 | the GPU of that runtime, as the runtime numbers them | on a machine with several GPUs of one runtime |
+| `gpu_assembly` | `True` | the GPU also assembles and keeps the LM loop, when the model has a device form | off to have the host assemble, as to check a result against the host's assembly |
+| `gpu_wide` | `GpuWide.DEFAULT` | the wide scalar, which the GPU computes in where the host computes in f64: `F64`, `DF32` (two f32 whose sum is the value, about 48 bits of significand, in f32 arithmetic), or `DEFAULT`: `DF32` on Metal, else `F64` | `DF32` on a GPU whose f64 arithmetic is slow, as on most consumer cards |
+| `gpu_staging` | `GpuStaging.PINNED` | where the GPU assembly writes the model's data before copying it to the GPU: `PINNED` host memory, whose copies run while the host goes on, or `PAGEABLE` ordinary memory | `PAGEABLE` on a platform where copies from pinned memory are slow |
+| `mixed_precision` | `False` | an f32 factor, each damped solve refined against the system; on a GPU it also sets the precision of the system the GPU solves ([precision](SOLVERS.md#precision)) | to factor in f32 |
+
+### Metal
+
+Metal has no f64 (`GpuBackend.METAL.has_f64` is `False`). Its wide
+scalar is df32, and `gpu_wide = GpuWide.F64` fails the solve with
+`SOLVER_UNAVAILABLE`. An f64 solve that factorizes needs
+`mixed_precision`, or it fails the same way; conjugate gradients need
+nothing. An f64 model assembles on the host (`host_assembly` is
+`NO_F64`).
+
 ## Support library
 
 `arael.geometry` holds the pinhole camera (`cameraf` / `camerad`;
-`Camera` is a legacy alias of `cameraf`). `arael.g2o` reads and
+`Camera` is an alias of `cameraf`). `arael.g2o` reads and
 writes pose-graph files: `Dataset2` for SE2 with the
 `iso_sqrt_info` / `eigen_sqrt_info` whitening accessors, `Dataset3`
 for SE3:QUAT with sqrt-information Cholesky blocks; `to_g2o()` and
-`save(path)` write the graph back out byte-identical to the Rust
-writer.
+`save(path)` write the graph back out in the Rust writer's format.
 
 ## Notes
 
@@ -540,12 +626,8 @@ writer.
   spells them `view[0]` / `view[-1]` / `len(view)`; where C++ returns
   `option<T>` from a method (`r.plan()`), Python has a property
   returning the value or `None` (`r.plan`).
-- One model, one thread. The GIL is released around foreign calls, so
-  a solve does not block other Python threads.
+- One model, one thread. The GIL (global interpreter lock) is released
+  around foreign calls, so a solve does not block other Python threads.
 - Worked examples: `cxx-examples/<demo>/python/`, each next to the
-  same demo's C++ driver; the m3500 twin matches the Rust and C++
-  output digit for digit.
-- The parity suite (`cxx-tests/runner/tests/python.rs`) builds the
-  fixture problem through the generated package and compares every
-  value exactly against the Rust mirror. Design notes:
-  docs/dev/PYTHON.md; docs/CXX.md is the C++ side of the same surface.
+  same demo's C++ driver.
+- docs/CXX.md describes the C++ side of the same interface.

@@ -5,8 +5,19 @@
 #include <cstring>
 #include <cmath>
 #include <string>
+#include <type_traits>
 
 using namespace cxx_fit;
+
+// The former names of SolveOrdering and SchurMethod still compile, as
+// deprecated aliases, in the model's namespace and in arael's.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+static_assert(std::is_same<FaerOrdering, SolveOrdering>::value, "FaerOrdering is SolveOrdering");
+static_assert(std::is_same<SchurSolve, SchurMethod>::value, "SchurSolve is SchurMethod");
+static_assert(std::is_same<arael::FaerOrdering, arael::SolveOrdering>::value, "arael::FaerOrdering");
+static_assert(std::is_same<arael::SchurSolve, arael::SchurMethod>::value, "arael::SchurSolve");
+#pragma GCC diagnostic pop
 
 static void p(const char* n, double v) { std::printf("%s %.17e\n", n, v); }
 static void pi(const char* n, long v) { std::printf("%s %ld\n", n, v); }
@@ -84,7 +95,6 @@ int main() {
     pi("cfg_time_has", defs.time_limit_seconds.has_value() ? 1 : 0);
     pi("cfg_maxacc_has", defs.max_accepted_iters.has_value() ? 1 : 0);
     pi("cfg_dev_obs", defs.device_observer_params ? 1 : 0);
-    pi("cfg_dev_drv", defs.device_driver_vectors ? 1 : 0);
     p("cfg_wc_lambda", LmConfig::well_conditioned().initial_lambda);
 
     // The ill_conditioned preset selects the Nielsen lambda driver;
@@ -246,7 +256,7 @@ int main() {
     fill(f11);
     SparseOptions so11;
     so11.schur = SchurPolicy::Force;
-    so11.ordering = FaerOrdering::Natural;
+    so11.ordering = SolveOrdering::Natural;
     so11.envelope = EnvelopeMode::Always;
     LmResult r11 = f11.solve_sparse(cfg, so11).value();
     p("opt_end", r11.end_cost);
@@ -259,7 +269,7 @@ int main() {
     fill(f12);
     SparseOptions so12;
     so12.schur = SchurPolicy::Force;
-    so12.ordering = FaerOrdering::Amd;
+    so12.ordering = SolveOrdering::Amd;
     so12.envelope = EnvelopeMode::Never;
     so12.supernodal = false;
     LmResult r12 = f12.solve_sparse(cfg, so12).value();
@@ -339,7 +349,7 @@ int main() {
     fill(f14);
     SparseOptions so14;
     so14.schur = SchurPolicy::Force;
-    so14.ordering = FaerOrdering::Natural;
+    so14.ordering = SolveOrdering::Natural;
     so14.envelope = EnvelopeMode::Always;
     LmSession sessf(so14);
     LmResult rs5 = sessf.solve(f14, cfg).value();
@@ -352,7 +362,7 @@ int main() {
     fill(f15);
     SparseOptions so15;
     so15.schur = SchurPolicy::Force;
-    so15.schur_solve = SchurSolve::Iterative;
+    so15.schur_solve = SchurMethod::Iterative;
     LmResult r15 = f15.solve_sparse(cfg, so15).value();
     p("cg_end", r15.end_cost);
     SchurPlan p15 = r15.plan().value();

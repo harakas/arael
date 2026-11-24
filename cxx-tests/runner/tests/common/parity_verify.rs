@@ -1,7 +1,9 @@
-// The Rust mirror shared by the C++ (parity.rs) and Python
-// (python.rs) parity tests: rebuilds the fixture problem with the
-// model crate directly and compares every value the other side
-// printed EXACTLY (same deterministic solver, %.17e round-trip).
+// The Rust mirror shared by the C++ (parity.rs), Python (python.rs) and
+// JavaScript (wasm.rs) parity tests: rebuilds the fixture problem with the
+// model crate directly and compares every value the other side printed
+// exactly (the same Rust solver behind the interface, %.17e round-trip).
+// Each test binary uses a part of it.
+#![allow(dead_code, unused_imports)]
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::Ref;
@@ -125,7 +127,6 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("cfg_time_has"), d.time_limit.is_some() as u8 as f64);
         assert_eq!(g("cfg_maxacc_has"), d.max_accepted_iters.is_some() as u8 as f64);
         assert_eq!(g("cfg_dev_obs"), LmConfig::<f64>::default().device_observer_params as u8 as f64);
-        assert_eq!(g("cfg_dev_drv"), LmConfig::<f64>::default().device_driver_vectors as u8 as f64);
         assert_eq!(g("cfg_wc_lambda"), LmConfig::<f64>::well_conditioned().initial_lambda);
     }
 

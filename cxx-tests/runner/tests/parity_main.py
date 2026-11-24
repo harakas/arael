@@ -16,6 +16,23 @@ from cxx_fit.arael.math import matrix3d, quaternd, vect3d  # noqa: E402
 # Binds and runs; a no-op in this build, which has no worker threads.
 fit.pool_shutdown()
 
+# The former names of SolveOrdering and SchurMethod: the new classes, each
+# with a DeprecationWarning, from the model's module and from arael's.
+import warnings  # noqa: E402
+from cxx_fit.arael import solver as _solver  # noqa: E402
+with warnings.catch_warnings(record=True) as _w:
+    warnings.simplefilter("always")
+    assert fit.FaerOrdering is fit.SolveOrdering
+    assert fit.SchurSolve is fit.SchurMethod
+    assert _solver.FaerOrdering is _solver.SolveOrdering
+    assert _solver.SchurSolve is _solver.SchurMethod
+    assert len(_w) == 4 and all(issubclass(x.category, DeprecationWarning) for x in _w), _w
+try:
+    fit.NoSuchName
+    raise AssertionError("an unknown name resolved")
+except AttributeError:
+    pass
+
 
 def p(n, v):
     print("%s %.17e" % (n, v))
@@ -89,7 +106,6 @@ pi("cfg_grad_has", 1 if defs.gradient_tolerance is not None else 0)
 pi("cfg_time_has", 1 if defs.time_limit_seconds is not None else 0)
 pi("cfg_maxacc_has", 1 if defs.max_accepted_iters is not None else 0)
 pi("cfg_dev_obs", 1 if defs.device_observer_params else 0)
-pi("cfg_dev_drv", 1 if defs.device_driver_vectors else 0)
 p("cfg_wc_lambda", fit.LmConfig.well_conditioned().initial_lambda)
 
 # The ill_conditioned preset selects the Nielsen lambda driver; its
@@ -247,7 +263,7 @@ f11 = fit.Fit()
 fill(f11)
 so11 = fit.SparseOptions()
 so11.schur = fit.SchurPolicy.FORCE
-so11.ordering = fit.FaerOrdering.NATURAL
+so11.ordering = fit.SolveOrdering.NATURAL
 so11.envelope = fit.EnvelopeMode.ALWAYS
 r11 = f11.solve_sparse(cfg, so11)
 p("opt_end", r11.end_cost)
@@ -260,7 +276,7 @@ f12 = fit.Fit()
 fill(f12)
 so12 = fit.SparseOptions()
 so12.schur = fit.SchurPolicy.FORCE
-so12.ordering = fit.FaerOrdering.AMD
+so12.ordering = fit.SolveOrdering.AMD
 so12.envelope = fit.EnvelopeMode.NEVER
 so12.supernodal = False
 r12 = f12.solve_sparse(cfg, so12)
@@ -344,7 +360,7 @@ f14 = fit.Fit()
 fill(f14)
 so14 = fit.SparseOptions()
 so14.schur = fit.SchurPolicy.FORCE
-so14.ordering = fit.FaerOrdering.NATURAL
+so14.ordering = fit.SolveOrdering.NATURAL
 so14.envelope = fit.EnvelopeMode.ALWAYS
 sessf = fit.LmSession(so14)
 rs5 = sessf.solve(f14, cfg)
@@ -357,7 +373,7 @@ f15 = fit.Fit()
 fill(f15)
 so15 = fit.SparseOptions()
 so15.schur = fit.SchurPolicy.FORCE
-so15.schur_solve = fit.SchurSolve.ITERATIVE
+so15.schur_solve = fit.SchurMethod.ITERATIVE
 r15 = f15.solve_sparse(cfg, so15)
 p("cg_end", r15.end_cost)
 p15 = r15.plan

@@ -1,8 +1,7 @@
 // Bundle adjustment of a BAL ("Bundle Adjustment in the Large") problem
-// over the generated arael C++ interface, on the CPU or a GPU -- the C++
-// twin of examples/bal_demo.rs and the in-house test bed of the GPU
-// routes through the exports. The model and the solver are Rust (model/);
-// loading the file, composing the scene, choosing the route and
+// over the generated arael C++ interface, on the host or a GPU: the C++
+// twin of examples/bal_demo.rs. The model and the solver are Rust
+// (model/); loading the file, composing the scene, choosing the route and
 // reporting are C++.
 //
 //   ./bal_demo [path/to/problem.txt] [--gpu cuda|hip] [--device N]
@@ -10,10 +9,10 @@
 //              [--compare] [--threads N] [--timing]
 //
 // Every run solves the reduced (Schur) system with the block supernodal
-// Cholesky, the route the GPU runs, so a CPU and a GPU run compute the
-// same thing. --repeat solves the problem N times from its initial state
-// (the device state and the compiled kernels carry over); --compare adds
-// a CPU run and prints the relative difference of the final costs;
+// Cholesky, the route the GPU runs, so a host run and a GPU run take the
+// same route. --repeat solves the problem N times from its initial state
+// (the GPU's state and the compiled kernels carry over); --compare adds
+// a host run and prints the relative difference of the final costs;
 // --timing prints each solve's phases.
 // VERBOSE=1 prints the solver's iteration lines. The exit code is 0 on a
 // converged solve, 1 otherwise.

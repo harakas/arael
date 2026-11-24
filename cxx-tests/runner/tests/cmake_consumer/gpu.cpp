@@ -87,7 +87,7 @@ int main() {
     }
     SparseOptions so;
     so.schur = SchurPolicy::Force;
-    so.schur_solve = SchurSolve::Iterative;
+    so.schur_solve = SchurMethod::Iterative;
     so.gpu = GpuBackend::Cpu;
     SolveResult cg = fit.solve_sparse(cfg, so);
     if (cg.is_err()) {

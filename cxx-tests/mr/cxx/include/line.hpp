@@ -59,10 +59,12 @@ using arael::PhaseTiming;
 using arael::FormTiming;
 using arael::StoreFootprint;
 using arael::SchurPolicy;
-using arael::FaerOrdering;
+using arael::SolveOrdering;
+using FaerOrdering [[deprecated("renamed to SolveOrdering")]] = arael::SolveOrdering;
 using arael::EnvelopeMode;
 using arael::BlockSupernodalMode;
-using arael::SchurSolve;
+using arael::SchurMethod;
+using SchurSolve [[deprecated("renamed to SchurMethod")]] = arael::SchurMethod;
 using arael::GpuBackend;
 using arael::GpuWide;
 using arael::GpuStaging;
@@ -198,10 +200,10 @@ inline AraelVersion arael_version() {
     return v;
 }
 
-/// The machine's GPUs, the preferred first (Rust's
-/// GpuDevice::available): discrete before integrated, then CUDA, HIP,
-/// Metal, of the runtimes the interface was built with (ARAEL_GPU). No
-/// device is opened; the CPU device is not listed.
+/// The machine's GPUs among the runtimes the interface was built with
+/// (ARAEL_GPU), the preferred first: discrete before integrated, then
+/// CUDA, HIP, Metal, then the lower index. No device is opened; the CPU
+/// device is not listed.
 ///
 ///     for (const auto& gpu : available_gpus())
 ///         puts(gpu.name);
@@ -216,13 +218,13 @@ inline std::vector<GpuInfo> available_gpus() {
     return out;
 }
 
-/// The preferred GPU of the machine, the first of available_gpus()
-/// (Rust's GpuDevice::detect, which logs what it found); empty without
-/// one.
+/// The preferred GPU of the machine, the first of available_gpus(),
+/// logged; empty without one.
 ///
 ///     if (auto gpu = detect_gpu()) {
 ///         opts.gpu = gpu->backend;
 ///         opts.gpu_index = gpu->index;
+///         opts.mixed_precision = !arael::has_f64(gpu->backend);   // Metal: f64 solves factor in f32
 ///     }
 inline option<GpuInfo> detect_gpu() {
     GpuInfo gpu{};
