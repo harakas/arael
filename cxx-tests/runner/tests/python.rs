@@ -34,6 +34,7 @@ fn python_interface_matches_rust_exactly() {
     let out = Command::new("python3")
         .arg(ws.join("runner/tests/parity_main.py"))
         .env("ARAEL_CAPI", ws.join("target/release/libcxx_fit_capi.so"))
+        .env("ARAEL_PARITY_JSON", Path::new(env!("CARGO_TARGET_TMPDIR")).join("python_parity_fit.json"))
         .output().expect("python spawn");
     assert!(out.status.success(), "python run failed: {}",
         String::from_utf8_lossy(&out.stderr));

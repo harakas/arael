@@ -2,6 +2,7 @@
 // solves, and prints "name value" lines for the Rust side to compare.
 #include <fit.hpp>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <string>
@@ -552,6 +553,12 @@ int main() {
     f3.marks().remove(m1);
 
     pi("s3_clean", std::strlen(f3.validate()) == 0 ? 1 : 0);
+    // Saved before the solve, loaded into a fresh model after it: the
+    // refs, the deque's front, the arena's removal, the Option entity and
+    // the optimize flags come back, and the loaded model solves as this
+    // one does.
+    const char* json = std::getenv("ARAEL_PARITY_JSON");
+    pi("s3_saved", json != nullptr && f3.save_json(json) ? 1 : 0);
     LmResult r3 = f3.solve_dense(cfg).value();
     pi("s3_status", long(r3.status));
     p("s3_end", r3.end_cost);
@@ -573,6 +580,15 @@ int main() {
     pi("s3_has_gps1", ps[1].info().has_gps() ? 1 : 0);
     p("s3_gps0_y", ps[0].info().gps()->pos().y);
     p("s3_gps0_isigma", double(ps[0].info().gps()->isigma()));
+    {
+        Fit f3l;
+        pi("s3_loaded", json != nullptr && f3l.load_json(json) ? 1 : 0);
+        LmResult r3l = f3l.solve_dense(cfg).value();
+        p("s3_loaded_end", r3l.end_cost);
+        p("s3_loaded_p2_x", f3l.poses()[2].pos().x);
+        pi("load_missing", f3l.load_json("/nonexistent/fit.json") ? 1 : 0);
+        pi("load_missing_says", std::strlen(f3l.last_error()) > 0 ? 1 : 0);
+    }
     pi("s3_marks_len", f3.marks().size());
     // Range-for over every container kind: vec, deque, and the arena
     // cursor (which must skip the removed slot).

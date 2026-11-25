@@ -3,6 +3,7 @@
   "root": "Fit",
   "precision": "f64",
   "jacobian": true,
+  "serde": true,
   "types": {
     "AngleParam": {
       "role": "component",
@@ -172,11 +173,11 @@
     }
   },
   "constraints": [
-    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 22},
-    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 35},
-    {"on": "Pose", "label": "Pose", "file": "model/src/lib.rs", "line": 56},
-    {"on": "Vn", "label": "Vn", "file": "model/src/lib.rs", "line": 95},
-    {"on": "Tie", "label": "Tie", "file": "model/src/lib.rs", "line": 113},
-    {"on": "Rig", "label": "Rig", "file": "model/src/lib.rs", "line": 160}
+    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 23},
+    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 36},
+    {"on": "Pose", "label": "Pose", "file": "model/src/lib.rs", "line": 59},
+    {"on": "Vn", "label": "Vn", "file": "model/src/lib.rs", "line": 99},
+    {"on": "Tie", "label": "Tie", "file": "model/src/lib.rs", "line": 118},
+    {"on": "Rig", "label": "Rig", "file": "model/src/lib.rs", "line": 166}
   ]
 }

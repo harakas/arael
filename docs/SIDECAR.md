@@ -26,6 +26,7 @@ force expansion. `cargo arael export` handles this automatically.
   "root": "Path",
   "precision": "f32",
   "jacobian": false,
+  "serde": false,
   "types": { "<TypeName>": { ... }, ... },
   "constraints": [
     {"on": "PoseTie", "label": "PoseTie", "file": "src/model.rs", "line": 51}
@@ -35,6 +36,10 @@ force expansion. `cargo arael export` handles this automatically.
 
 `jacobian` says whether the root was declared `#[arael(root, jacobian)]`
 -- generators gate the per-constraint cost-table surface on it.
+
+`serde` says whether the root derives serde's `Serialize` and
+`Deserialize` -- generators then emit saving and loading the model as
+JSON.
 
 `types` holds every model type reachable from the root, keyed by bare
 type name. Each entry:

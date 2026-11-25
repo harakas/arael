@@ -50,7 +50,8 @@ fn cxx_interface_matches_rust_exactly() {
         .status().expect("compiler spawn");
     assert!(status.success(), "C++ compile/link failed");
 
-    let out = Command::new(&bin).output().expect("run");
+    let json = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cxx_parity_fit.json");
+    let out = Command::new(&bin).env("ARAEL_PARITY_JSON", &json).output().expect("run");
     assert!(out.status.success(), "C++ run failed: {}",
         String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8(out.stdout).unwrap();

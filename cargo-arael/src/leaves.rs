@@ -235,7 +235,7 @@ mod tests {
         let t = Type { role: "entity".into(), param_count: 0, self_block: None,
                        builtin: false, generic: false, fields };
         let m = Model { schema: 1, root: "R".into(), precision: "f64".into(),
-                        jacobian: false, types: BTreeMap::new(), constraints: vec![] };
+                        jacobian: false, serde: false, types: BTreeMap::new(), constraints: vec![] };
         (m, t)
     }
 

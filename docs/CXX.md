@@ -315,6 +315,26 @@ views are named by their container's nature: `PathPosesDeque`,
   use was invalidated. `validate()` returns the diagnostic text (""
   when clean).
 
+### Saving and loading
+
+A root that derives serde's `Serialize` and `Deserialize`, with every
+type in its model, gets `save_json(path)` and `load_json(path)`: the
+model as JSON, its entities, their data, and its parameters' values and
+optimize flags. Both return false on failure, the reason in
+`last_error()`. A load replaces the model; entity handles into the old
+one are invalid after it.
+
+```cpp
+Fit f;
+// ... build f ...
+if (!f.save_json("case.json")) std::fprintf(stderr, "%s\n", f.last_error());
+Fit g;
+g.load_json("case.json");  // g solves as f would
+```
+
+Rust reads the same file with serde_json:
+`let f: Fit = serde_json::from_reader(std::fs::File::open("case.json")?)?;`
+
 ### Results
 
 - The returned `LmResult` owns the full Rust-side result; copies of a

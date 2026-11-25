@@ -343,3 +343,42 @@ fn matrices_round_trip() {
     assert!((b2[0][0] - 1.0).abs() < 1e-15 && (b2[1][1] - 4.0).abs() < 1e-15);
 }
 
+
+// ----------------------------------------------------------------- angle
+
+#[test]
+fn angle_param_round_trips_its_angle_and_recomputes_its_caches() {
+    use arael::angle::AngleParam;
+    let mut a = AngleParam::new(0.7f64);
+    a.angle.optimize = false;
+    let json = serde_json::to_string(&a).unwrap();
+    assert!(!json.contains("sin") && !json.contains("cos"), "the caches must not be written: {json}");
+    let b: AngleParam = serde_json::from_str(&json).unwrap();
+    assert_eq!(b.angle.value, 0.7);
+    assert!(!b.angle.optimize);
+    assert_eq!((b.sin, b.cos), 0.7f64.sin_cos());
+}
+
+// ------------------------------------------------------- scaled transform
+
+#[test]
+fn scaled_transform_param_round_trips_its_similarity_and_flags() {
+    use arael::transform::ScaledTransformParam;
+    use arael::quatern::quaternd;
+    let q = quaternd::from_euler_angles(vect3d::new(0.1, -0.4, 0.9));
+    let mut a = ScaledTransformParam::new(vect3d::new(1.0, -2.0, 0.5), q, 1.7);
+    a.optimize_scale = false;
+    let json = serde_json::to_string(&a).unwrap();
+    for cache in ["rotation_matrix", "scale_factor", "ref_"] {
+        assert!(!json.contains(cache), "{cache} must not be written: {json}");
+    }
+    let b: ScaledTransformParam = serde_json::from_str(&json).unwrap();
+    let same = |m: matrix3d, n: matrix3d| (0..3).all(|i| (m.rows[i] - n.rows[i]).norm() < 1e-15);
+    assert!((b.translation - a.translation).norm() < 1e-15);
+    assert!(same(b.rotation.rotation_matrix(), a.rotation.rotation_matrix()));
+    assert_eq!(b.scale, 1.7);
+    assert_eq!((b.optimize_translation, b.optimize_rotation, b.optimize_scale), (true, true, false));
+    // the caches are rebuilt, as `new` builds them
+    assert!(same(b.rotation_matrix, a.rotation_matrix));
+    assert_eq!(b.scale_factor, 1.7);
+}

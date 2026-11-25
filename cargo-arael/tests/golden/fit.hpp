@@ -496,6 +496,8 @@ uint64_t fit_jac_num_residuals(const FitJac*);
 uint64_t fit_jac_num_params(const FitJac*);
 int64_t fit_jac_singular_values(FitJac*, bool, double*, uint64_t);
 int64_t fit_jac_column_l2_norms(FitJac*, double*, uint64_t);
+bool fit_save_json(Fit*, const char*);
+bool fit_load_json(Fit*, const char*);
 double fit_cost(Fit*);
 int32_t fit_solve_band(Fit*, uint32_t, const LmConfig*, LmResultT<double>*);
 void fit_lm_config(uint32_t, LmConfig*);
@@ -2266,6 +2268,15 @@ public:
     /// this model.
     const char* validate() { return ffi::fit_validate(h_); }
     const char* last_error() const { return ffi::fit_last_error(h_); }
+    /// Write the model to `path` as JSON: every entity, its data,
+    /// and its parameters' values and optimize flags. False on
+    /// failure, the reason in last_error().
+    bool save_json(const char* path) { return ffi::fit_save_json(h_, path); }
+    /// Replace the model with the one save_json() wrote to `path`.
+    /// Entity handles and references into the old model are invalid
+    /// after a load. False on failure, the model unchanged, the reason
+    /// in last_error().
+    bool load_json(const char* path) { return ffi::fit_load_json(h_, path); }
 
 private:
     friend class LmSession;

@@ -4,7 +4,8 @@
 //! removals, a nested sub-model with an Option entity, math-typed data
 //! and params, a fixed euler rotation param, and opaque fields. The
 //! parity test builds the same problem from C++ and from Rust and
-//! compares the solves exactly.
+//! compares the solves exactly. Every type derives serde, so the
+//! interfaces save and load the model as JSON.
 
 use arael::angle::AngleParam;
 use arael::model::{
@@ -22,7 +23,7 @@ use arael::vect::{vect2d, vect3d, vectd};
 #[arael(constraint(root.hb, {
     [obs.y - (fit.m * obs.x + fit.c)]
 }))]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Obs {
     pub x: f64,
     pub y: f64,
@@ -35,10 +36,12 @@ pub struct Obs {
 #[arael(constraint(hb, {
     [(n.v - n.t) * n.w]
 }))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct N {
     pub v: Param<f64>,
     pub t: f64,
     pub w: f64,
+    #[serde(skip)]
     pub hb: SelfBlock<N>,
 }
 
@@ -61,7 +64,7 @@ impl Default for N {
      hd.x * 1.5,
      hd.y * 1.5]
 }))]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Pose {
     pub ea: SimpleEulerAngleParam<f64>,
     pub heading: AngleParam<f64>,
@@ -69,12 +72,13 @@ pub struct Pose {
     pub target: vect3d,
     pub target_dir: vect2d,
     pub info: Info,
+    #[serde(skip)]
     pub hb: SelfBlock<Pose>,
 }
 
 /// Nested sub-model: an Option entity plus opaque data.
 #[arael::model]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Info {
     pub gps: Option<GpsObs>,
     pub note: String,
@@ -82,7 +86,7 @@ pub struct Info {
 
 /// Data-only optional observation.
 #[arael::model]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct GpsObs {
     pub pos: vect3d,
     pub isigma: f32,
@@ -98,13 +102,14 @@ pub struct GpsObs {
     [d[0] * vn.wp, d[1] * vn.wp, d[2] * vn.wp, d[3] * vn.wp,
      p[0] * vn.w, p[1] * vn.w]
 }))]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Vn {
     pub v: Param<vectd<4>>,
     pub t: vectd<4>,
     pub h: matrixd<2, 4>,
     pub wp: f64,
     pub w: f64,
+    #[serde(skip)]
     pub hb: SelfBlock<Vn>,
 }
 
@@ -115,7 +120,7 @@ pub struct Vn {
      (b.pos.y - a.pos.y - tie.d.y) * tie.w,
      (b.pos.z - a.pos.z - tie.d.z) * tie.w]
 }))]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Tie {
     #[arael(ref = root.poses)]
     pub a: Ref<Pose>,
@@ -123,6 +128,7 @@ pub struct Tie {
     pub b: Ref<Pose>,
     pub d: vect3d,
     pub w: f64,
+    #[serde(skip)]
     pub hb: CrossBlock<Pose, Pose>,
 }
 
@@ -131,7 +137,7 @@ pub struct Tie {
 /// constraints; `g` is the user-facing value (set before, read after).
 #[arael::model]
 #[arael(component)]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Gain {
     pub ref_g: f64,
     pub d: Param<f64>,
@@ -168,7 +174,7 @@ impl Component for Gain {
      dq0.x, dq0.y, dq0.z, dq2.x, dq2.y, dq2.z,
      (rig.gain.g - rig.target_g) * 2.0]
 }))]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Rig {
     pub ea_u: EulerAngleParam<f64>,
     pub q: QuaternionParam<f64>,
@@ -178,6 +184,7 @@ pub struct Rig {
     pub target_q0: vect3d,
     pub target_q2: vect3d,
     pub target_g: f64,
+    #[serde(skip)]
     pub hb: SelfBlock<Rig>,
 }
 
@@ -187,7 +194,7 @@ pub struct Rig {
 /// Python transform views wrap. Unconstrained; the parity suite builds
 /// and reads it back without solving.
 #[arael::model]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Frame {
     pub pose: TransformParam<f64>,
     pub st: ScaledTransformParam<f64>,
@@ -195,21 +202,23 @@ pub struct Frame {
     pub anchor: vect3d,
     pub tag: i32,
     pub scale: f32,
+    #[serde(skip)]
     pub hb: SelfBlock<Frame>,
 }
 
 /// An entity with no scalar surface of its own -- a user component
 /// and its block only -- so a keyword-less push has nothing to name.
 #[arael::model]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Wrap {
     pub gain: Gain,
+    #[serde(skip)]
     pub hb: SelfBlock<Wrap>,
 }
 
 #[arael::model]
 #[arael(root, jacobian)]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Fit {
     pub m: Param<f64>,
     pub c: Param<f64>,
@@ -224,5 +233,6 @@ pub struct Fit {
     pub vns: refs::Vec<Vn>,
     pub wraps: std::vec::Vec<Wrap>,
     pub frames: refs::Vec<Frame>,
+    #[serde(skip)]
     pub hb: SelfBlock<Fit>,
 }

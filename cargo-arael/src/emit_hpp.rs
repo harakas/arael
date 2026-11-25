@@ -782,6 +782,26 @@ private:
     } else {
         ""
     };
+    // Saving and loading the model as JSON, for a root deriving serde.
+    let save_load_method = if model.serde {
+        "    /// Write the model to `path` as JSON: every entity, its data,
+    /// and its parameters' values and optimize flags. False on
+    /// failure, the reason in last_error().
+    bool save_json(const char* path) { return ffi::ROOT_SN_save_json(h_, path); }
+    /// Replace the model with the one save_json() wrote to `path`.
+    /// Entity handles and references into the old model are invalid
+    /// after a load. False on failure, the model unchanged, the reason
+    /// in last_error().
+    bool load_json(const char* path) { return ffi::ROOT_SN_load_json(h_, path); }
+".replace("ROOT_SN", &root_sn)
+    } else {
+        String::new()
+    };
+    if model.serde {
+        cpp.ffi.push_str(&format!(
+            "bool {root_sn}_save_json({root}*, const char*);\n\
+             bool {root_sn}_load_json({root}*, const char*);\n"));
+    }
     let cost_table_method = if model.jacobian {
         format!(
 "    /// Per-constraint cost breakdown at the current parameters:
@@ -1185,7 +1205,7 @@ public:
     /// this model.
     const char* validate() {{ return ffi::{root_sn}_validate(h_); }}
     const char* last_error() const {{ return ffi::{root_sn}_last_error(h_); }}
-
+{save_load_method}
 private:
     friend class LmSession;
 

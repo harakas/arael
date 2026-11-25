@@ -27,6 +27,7 @@ dependencies = [
  "rand",
  "rand_distr",
  "serde",
+ "serde_json",
  "web-time",
 ]
 

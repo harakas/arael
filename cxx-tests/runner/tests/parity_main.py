@@ -582,6 +582,11 @@ f3.marks[m2].w = 2.0
 f3.marks.remove(m1)
 
 pi("s3_clean", 1 if len(f3.validate()) == 0 else 0)
+# Saved before the solve, loaded into a fresh model after it (as the C++
+# program does).
+json_path = os.environ["ARAEL_PARITY_JSON"]
+f3.save_json(json_path)
+pi("s3_saved", 1)
 r3 = f3.solve_dense(cfg)
 pi("s3_status", int(r3.status))
 p("s3_end", r3.end_cost)
@@ -598,6 +603,18 @@ pi("s3_has_gps0", 1 if ps[0].info.gps is not None else 0)
 pi("s3_has_gps1", 1 if ps[1].info.gps is not None else 0)
 p("s3_gps0_y", ps[0].info.gps.pos.y)
 p("s3_gps0_isigma", ps[0].info.gps.isigma)
+f3l = fit.Fit()
+f3l.load_json(json_path)
+pi("s3_loaded", 1)
+r3l = f3l.solve_dense(cfg)
+p("s3_loaded_end", r3l.end_cost)
+p("s3_loaded_p2_x", f3l.poses[2].pos.x)
+try:
+    f3l.load_json("/nonexistent/fit.json")
+    pi("load_missing", 1)
+except RuntimeError as e:
+    pi("load_missing", 0)
+    pi("load_missing_says", 1 if str(e) else 0)
 pi("s3_marks_len", len(f3.marks))
 # Iteration over every container kind (the arena skips the removed
 # slot).

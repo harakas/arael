@@ -4181,6 +4181,20 @@ class Fit:
     def last_error(self):
         return _err(self._p)
 
+    def save_json(self, path):
+        """Write the model to `path` as JSON: every entity, its data,
+        and its parameters' values and optimize flags. Raises
+        RuntimeError on failure."""
+        if not _f.fit_save_json(self._p, os.fsencode(path)):
+            raise RuntimeError(_err(self._p))
+
+    def load_json(self, path):
+        """Replace the model with the one save_json() wrote to `path`.
+        Entity handles into the old model are invalid after a load.
+        Raises RuntimeError on failure, the model unchanged."""
+        if not _f.fit_load_json(self._p, os.fsencode(path)):
+            raise RuntimeError(_err(self._p))
+
     @property
     def m(self):
         return _f.fit_m(self._p)

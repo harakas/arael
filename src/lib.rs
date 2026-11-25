@@ -2478,6 +2478,11 @@ pub use arael_macros::export_models;
 #[doc(hidden)]
 pub use arael_macros::__register_model;
 
+/// serde_json for the interfaces cargo-arael generates: they save and load
+/// a root that derives serde as JSON.
+#[doc(hidden)]
+pub use serde_json as __serde_json;
+
 /// The device side of a model's generated code (feature `gpu`): arael-gpu
 /// and the device assembly the generated code implements.
 #[cfg(feature = "gpu")]

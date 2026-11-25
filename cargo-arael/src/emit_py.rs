@@ -1065,6 +1065,12 @@ class Covariance:
         "ctypes.c_bool");
     sig(&mut py, &format!("{root_sn}_validate"), &["ctypes.c_void_p"],
         "ctypes.c_char_p");
+    if model.serde {
+        for f in ["save_json", "load_json"] {
+            sig(&mut py, &format!("{root_sn}_{f}"), &["ctypes.c_void_p", "ctypes.c_char_p"],
+                "ctypes.c_bool");
+        }
+    }
     sig(&mut py, &format!("{root_sn}_set_log_level"), &["ctypes.c_uint32"],
         "None");
     sig(&mut py, &format!("{root_sn}_pool_shutdown"), &[], "None");
@@ -1195,6 +1201,26 @@ class Covariance:
 
 "));
     }
+    // Saving and loading the model as JSON, for a root deriving serde.
+    let save_load_method = if model.serde {
+        "
+    def save_json(self, path):
+        \"\"\"Write the model to `path` as JSON: every entity, its data,
+        and its parameters' values and optimize flags. Raises
+        RuntimeError on failure.\"\"\"
+        if not _f.ROOT_SN_save_json(self._p, os.fsencode(path)):
+            raise RuntimeError(_err(self._p))
+
+    def load_json(self, path):
+        \"\"\"Replace the model with the one save_json() wrote to `path`.
+        Entity handles into the old model are invalid after a load.
+        Raises RuntimeError on failure, the model unchanged.\"\"\"
+        if not _f.ROOT_SN_load_json(self._p, os.fsencode(path)):
+            raise RuntimeError(_err(self._p))
+".replace("ROOT_SN", &root_sn)
+    } else {
+        String::new()
+    };
     let ct_method = if model.jacobian {
         format!(
 "    def cost_table(self):
@@ -1335,7 +1361,7 @@ class Covariance:
 
     def last_error(self):
         return _err(self._p)
-
+{save_load_method}
 ");
     for f in &root_ty.fields {
         field_py(&mut py, model, root, &root_sn, &mut root_cls, f)?;

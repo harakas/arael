@@ -4808,6 +4808,7 @@ pub fn generate_root_methods(
     marginalize_candidates_fn: &Option<TokenStream2>,
     uses_coo: bool,
     par: bool,
+    serde: bool,
 ) -> syn::Result<TokenStream2> {
     let stashed = crate::registry_constraints();
     // The device head (docs/dev/GPU.md, E9 stage 3): the constraints with a
@@ -5256,7 +5257,7 @@ pub fn generate_root_methods(
     if let Ok(dir) = std::env::var("ARAEL_SIDECAR_DIR") {
         let mut sorted: Vec<String> = reachable.iter().cloned().collect();
         sorted.sort();
-        crate::sidecar::emit(&dir, &root_name.to_string(), precision, jacobian, &sorted)
+        crate::sidecar::emit(&dir, &root_name.to_string(), precision, jacobian, serde, &sorted)
             .map_err(|e| syn::Error::new(root_name.span(),
                 format!("arael sidecar: {}", e)))?;
     }

@@ -90,6 +90,29 @@ where
     }
 }
 
+// Written as its angle: the cached sine and cosine are derived, and are
+// recomputed from the angle's value on load.
+impl<T: Float + serde::Serialize> serde::Serialize for AngleParam<T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("AngleParam", 1)?;
+        st.serialize_field("angle", &self.angle)?;
+        st.end()
+    }
+}
+
+impl<'de, T: Float + serde::Deserialize<'de>> serde::Deserialize<'de> for AngleParam<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Raw<P> {
+            angle: P,
+        }
+        let raw = Raw::<Param<T>>::deserialize(d)?;
+        let (sin, cos) = raw.angle.value.sin_cos();
+        Ok(AngleParam { angle: raw.angle, sin, cos })
+    }
+}
+
 impl<T: Float> Default for AngleParam<T>
 where
     Param<T>: Model,

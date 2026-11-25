@@ -11,9 +11,10 @@ pub(crate) fn emit(
     root: &str,
     precision: &str,
     jacobian: bool,
+    serde: bool,
     reachable_sorted: &[String],
 ) -> Result<(), String> {
-    let json = build_json(root, precision, jacobian, reachable_sorted);
+    let json = build_json(root, precision, jacobian, serde, reachable_sorted);
     let path = std::path::Path::new(dir);
     std::fs::create_dir_all(path).map_err(|e| format!("create {}: {}", dir, e))?;
     let file = path.join(format!("{}.json", root));
@@ -256,6 +257,7 @@ pub(crate) fn build_json(
     root: &str,
     precision: &str,
     jacobian: bool,
+    serde: bool,
     reachable_sorted: &[String],
 ) -> String {
     let mut out = String::new();
@@ -264,6 +266,7 @@ pub(crate) fn build_json(
     out.push_str(&format!("  \"root\": {},\n", q(root)));
     out.push_str(&format!("  \"precision\": {},\n", q(precision)));
     out.push_str(&format!("  \"jacobian\": {},\n", jacobian));
+    out.push_str(&format!("  \"serde\": {},\n", serde));
     out.push_str("  \"types\": {\n");
 
     let mut type_entries: Vec<String> = Vec::new();
@@ -368,7 +371,7 @@ mod tests {
         assert_eq!(concretize("matrix3<T>", "T", "f32"), "matrix3f");
         assert_eq!(concretize("Param<TT>", "T", "f32"), "Param<TT>");
 
-        let json = build_json("ScgWorld", "f32", false,
+        let json = build_json("ScgWorld", "f32", false, false,
             &["ScgPt".to_string(), "ScgWorld".to_string()]);
         assert!(json.contains("\"of\": \"vect2f\""), "{json}");
         assert!(json.contains("\"kind\": \"self_block\", \"scalar\": \"f32\""), "{json}");
@@ -406,13 +409,14 @@ mod tests {
             ..Default::default()
         });
 
-        let json = build_json("ScjWorld", "f32", false,
+        let json = build_json("ScjWorld", "f32", false, false,
             &["ScjPose".to_string(), "ScjWorld".to_string()]);
 
         assert!(json.contains("\"schema\": 1"), "{json}");
         assert!(json.contains("\"root\": \"ScjWorld\""), "{json}");
         assert!(json.contains("\"precision\": \"f32\""), "{json}");
         assert!(json.contains("\"jacobian\": false"), "{json}");
+        assert!(json.contains("\"serde\": false"), "{json}");
         assert!(json.contains(
             "{\"name\": \"pos\", \"kind\": \"param\", \"of\": \"vect3f\", \"params\": 3}"),
             "{json}");
@@ -487,10 +491,11 @@ mod tests {
             ..Default::default()
         });
 
-        let json = build_json("ScjNode", "f64", true,
+        let json = build_json("ScjNode", "f64", true, true,
             &["ScjGps".into(), "ScjNode".into(), "ScjOff".into(), "ScjTie".into()]);
 
         assert!(json.contains("\"jacobian\": true"), "{json}");
+        assert!(json.contains("\"serde\": true"), "{json}");
 
         assert!(json.contains(
             "{\"name\": \"ea\", \"kind\": \"euler_param\", \"variant\": \"simple\", \

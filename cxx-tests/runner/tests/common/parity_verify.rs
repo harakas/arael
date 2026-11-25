@@ -703,6 +703,13 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     assert!(r3.status.is_success(), "{:?}", r3.status);
     assert_eq!(g("s3_status"), code(&r3.status));
     assert_eq!(g("s3_end"), r3.end_cost);
+    // the model saved before the solve and loaded after it solves the same
+    assert_eq!(g("s3_saved"), 1.0);
+    assert_eq!(g("s3_loaded"), 1.0);
+    assert_eq!(g("s3_loaded_end"), r3.end_cost);
+    assert_eq!(g("s3_loaded_p2_x"), f3.poses[2].pos.value.x);
+    assert_eq!(g("load_missing"), 0.0);
+    assert_eq!(g("load_missing_says"), 1.0);
     assert_eq!(g("s3_cal_x"), f3.cal.x);
     assert_eq!(g("s3_cal_y"), f3.cal.y);
     for i in 0..3 {

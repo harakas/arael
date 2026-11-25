@@ -980,6 +980,53 @@ pub fn emit_body(model: &Model, model_crate: &str) -> Result<String, String> {
     };
 
     let mirrors_all = format!("{}{}", MIRRORS, ndim_mirrors(model));
+    // Saving and loading the model as JSON, for a root deriving serde
+    // (the sidecar's `serde` flag).
+    let save_load = if model.serde {
+        format!(
+"
+/// Write the model to `path` as JSON: every entity, its data, and its
+/// parameters' values and optimize flags. Returns false on failure, the
+/// reason in {root_sn}_last_error.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_save_json(h: *mut {handle}, path: *const c_char) -> bool {{
+    let hh = &mut *h;
+    let saved = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {{
+        let path = std::ffi::CStr::from_ptr(path).to_str().map_err(|e| format!(\"the path: {{e}}\"))?;
+        let file = std::fs::File::create(path).map_err(|e| format!(\"{{path}}: {{e}}\"))?;
+        let mut w = std::io::BufWriter::new(file);
+        arael::__serde_json::to_writer(&mut w, &hh.model).map_err(|e| format!(\"{{path}}: {{e}}\"))?;
+        std::io::Write::flush(&mut w).map_err(|e| format!(\"{{path}}: {{e}}\"))
+    }}));
+    match saved {{
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {{ set_text(hh, &e); false }}
+        Err(p) => {{ let t = panic_text(p); set_text(hh, &t); false }}
+    }}
+}}
+
+/// Replace the model with the one {root_sn}_save_json wrote to `path`.
+/// Entity handles and references into the old model are invalid after a
+/// load. Returns false on failure, the model unchanged, the reason in
+/// {root_sn}_last_error.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_load_json(h: *mut {handle}, path: *const c_char) -> bool {{
+    let hh = &mut *h;
+    let loaded = catch_unwind(AssertUnwindSafe(|| -> Result<{root}, String> {{
+        let path = std::ffi::CStr::from_ptr(path).to_str().map_err(|e| format!(\"the path: {{e}}\"))?;
+        let file = std::fs::File::open(path).map_err(|e| format!(\"{{path}}: {{e}}\"))?;
+        arael::__serde_json::from_reader(std::io::BufReader::new(file)).map_err(|e| format!(\"{{path}}: {{e}}\"))
+    }}));
+    match loaded {{
+        Ok(Ok(m)) => {{ hh.model = m; true }}
+        Ok(Err(e)) => {{ set_text(hh, &e); false }}
+        Err(p) => {{ let t = panic_text(p); set_text(hh, &t); false }}
+    }}
+}}
+")
+    } else {
+        String::new()
+    };
     let mut out = String::new();
     out.push_str(&format!(
 "use std::ffi::CString;
@@ -2160,7 +2207,7 @@ pub unsafe extern \"C\" fn {root_sn}_free(h: *mut {handle}) {{
 pub unsafe extern \"C\" fn {root_sn}_last_error(h: *const {handle}) -> *const c_char {{
     (*h).text.as_ptr()
 }}
-
+{save_load}
 /// Text report of the result behind `d` (status, cost, iterations,
 /// damping, plus the timing breakdown and the backend's plan when it
 /// has them). `pretty` adds colour and box-drawing glyphs. The

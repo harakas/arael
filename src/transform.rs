@@ -726,6 +726,59 @@ where
     }
 }
 
+// serde: the similarity and its three flags, as TransformParam writes its
+// transform and two flags. The reference, the step and the caches are
+// rebuilt on load as `new` builds them.
+impl<T: Float> serde::Serialize for ScaledTransformParam<T>
+where
+    vect3<T>: ParamType,
+    T: serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("ScaledTransformParam", 6)?;
+        st.serialize_field("translation", &self.translation)?;
+        st.serialize_field("rotation", &self.rotation)?;
+        st.serialize_field("scale", &self.scale)?;
+        st.serialize_field("optimize_translation", &self.optimize_translation)?;
+        st.serialize_field("optimize_rotation", &self.optimize_rotation)?;
+        st.serialize_field("optimize_scale", &self.optimize_scale)?;
+        st.end()
+    }
+}
+
+impl<'de, T: Float + serde::Deserialize<'de>> serde::Deserialize<'de> for ScaledTransformParam<T>
+where
+    vect3<T>: ParamType,
+    Param<vect3<T>>: Model,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Raw<V, Q, U> {
+            translation: V,
+            rotation: Q,
+            scale: U,
+            #[serde(default = "flag_on")]
+            optimize_translation: bool,
+            #[serde(default = "flag_on")]
+            optimize_rotation: bool,
+            #[serde(default = "flag_on")]
+            optimize_scale: bool,
+        }
+        fn flag_on() -> bool { true }
+        let raw = Raw::<vect3<T>, quatern<T>, T>::deserialize(d)?;
+        let mut p = ScaledTransformParam::new(raw.translation, raw.rotation.unit(), raw.scale);
+        // set before re-centring: the flags decide which parts of the step
+        // are live, and the caches follow from that
+        p.optimize_translation = raw.optimize_translation;
+        p.optimize_rotation = raw.optimize_rotation;
+        p.optimize_scale = raw.optimize_scale;
+        Component::start(&mut p);
+        Model::update_self(&mut p);
+        Ok(p)
+    }
+}
+
 impl<T: Float> Component for ScaledTransformParam<T>
 where
     vect3<T>: ParamType,

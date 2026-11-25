@@ -200,6 +200,8 @@ SIGS = [
     ("fit_last_error", [ctypes.c_void_p], ctypes.c_char_p),
     ("fit_last_failure", [ctypes.c_void_p, ctypes.POINTER(_solver.SolveFailure)], ctypes.c_bool),
     ("fit_validate", [ctypes.c_void_p], ctypes.c_char_p),
+    ("fit_save_json", [ctypes.c_void_p, ctypes.c_char_p], ctypes.c_bool),
+    ("fit_load_json", [ctypes.c_void_p, ctypes.c_char_p], ctypes.c_bool),
     ("fit_set_log_level", [ctypes.c_uint32], None),
     ("fit_pool_shutdown", [], None),
     ("fit_arael_version", [ctypes.POINTER(_solver.AraelVersion)], None),

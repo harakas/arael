@@ -453,6 +453,19 @@ returning `False` stops the solve. On a GPU, see
 `f.cost()` is the total cost at the current values, `f.validate()` the
 diagnostic text (empty when the model is clean), `f.last_error()` the
 last message.
+
+A root that derives serde's `Serialize` and `Deserialize`, with every
+type in its model, has `f.save_json(path)` and `f.load_json(path)`: the
+model as JSON, its entities, their data, and its parameters' values and
+optimize flags. Both raise `RuntimeError` on failure. A load replaces
+the model; entity objects taken from the old one are invalid after it.
+Rust reads the same file with serde_json.
+
+```python
+f.save_json("case.json")
+g = fit.Fit()
+g.load_json("case.json")  # g solves as f would
+```
 `fit.set_log_level(fit.LogLevel.WARN)` quiets arael's diagnostics
 process-wide (INFO is the default). A model is freed on garbage
 collection; `free()` forces it.

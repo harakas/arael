@@ -1295,6 +1295,45 @@ pub unsafe extern "C" fn fit_last_error(h: *const FitHandle) -> *const c_char {
     (*h).text.as_ptr()
 }
 
+/// Write the model to `path` as JSON: every entity, its data, and its
+/// parameters' values and optimize flags. Returns false on failure, the
+/// reason in fit_last_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_save_json(h: *mut FitHandle, path: *const c_char) -> bool {
+    let hh = &mut *h;
+    let saved = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let path = std::ffi::CStr::from_ptr(path).to_str().map_err(|e| format!("the path: {e}"))?;
+        let file = std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
+        let mut w = std::io::BufWriter::new(file);
+        arael::__serde_json::to_writer(&mut w, &hh.model).map_err(|e| format!("{path}: {e}"))?;
+        std::io::Write::flush(&mut w).map_err(|e| format!("{path}: {e}"))
+    }));
+    match saved {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => { set_text(hh, &e); false }
+        Err(p) => { let t = panic_text(p); set_text(hh, &t); false }
+    }
+}
+
+/// Replace the model with the one fit_save_json wrote to `path`.
+/// Entity handles and references into the old model are invalid after a
+/// load. Returns false on failure, the model unchanged, the reason in
+/// fit_last_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_load_json(h: *mut FitHandle, path: *const c_char) -> bool {
+    let hh = &mut *h;
+    let loaded = catch_unwind(AssertUnwindSafe(|| -> Result<Fit, String> {
+        let path = std::ffi::CStr::from_ptr(path).to_str().map_err(|e| format!("the path: {e}"))?;
+        let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+        arael::__serde_json::from_reader(std::io::BufReader::new(file)).map_err(|e| format!("{path}: {e}"))
+    }));
+    match loaded {
+        Ok(Ok(m)) => { hh.model = m; true }
+        Ok(Err(e)) => { set_text(hh, &e); false }
+        Err(p) => { let t = panic_text(p); set_text(hh, &t); false }
+    }
+}
+
 /// Text report of the result behind `d` (status, cost, iterations,
 /// damping, plus the timing breakdown and the backend's plan when it
 /// has them). `pretty` adds colour and box-drawing glyphs. The

@@ -1963,6 +1963,25 @@ fn param_type_size(ty: &syn::Type, scalar_generic: Option<&str>) -> u32 {
     0
 }
 
+/// Whether the struct derives both of serde's `Serialize` and
+/// `Deserialize` (by any path, `serde::Serialize` or `Serialize`).
+fn derives_serde(attrs: &[syn::Attribute]) -> bool {
+    let (mut ser, mut de) = (false, false);
+    for attr in attrs {
+        if !attr.path().is_ident("derive") { continue; }
+        let Ok(paths) = attr.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated) else { continue; };
+        for p in paths {
+            match p.segments.last().map(|s| s.ident.to_string()).as_deref() {
+                Some("Serialize") => ser = true,
+                Some("Deserialize") => de = true,
+                _ => {}
+            }
+        }
+    }
+    ser && de
+}
+
 /// True iff any `#[arael(...)]` struct-level attribute carries the given
 /// bare identifier (e.g. `#[arael(skip_self_block)]`, `#[arael(root,
 /// extended)]`). Accepts the ident anywhere in the top-level token list.
@@ -2952,10 +2971,13 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         // opts out with `seq`. Without the feature, or with the keyword,
         // the root keeps one store and is the sequential one.
         let par = !root_seq && cfg!(feature = "threads");
+        // A root deriving serde can be saved and loaded through the
+        // generated interfaces (docs/SIDECAR.md, `serde`).
+        let serde = derives_serde(&input.attrs);
         let methods = constraint::generate_root_methods(
             name, fields, precision, root_custom, root_jacobian,
             root_fast_atan, root_cost_kahan, root_cost_f64, root_grad_kahan, root_grad_f64,
-            &root_wide, &marginalize_hint_fn, &marginalize_candidates_fn, uses_coo, par)?;
+            &root_wide, &marginalize_hint_fn, &marginalize_candidates_fn, uses_coo, par, serde)?;
         // ARAEL_DUMP_ROOT=<RootName> prints the root's generated code to
         // stderr at compile time, for reading what a body became.
         if std::env::var("ARAEL_DUMP_ROOT").is_ok_and(|n| n == name.to_string()) {
@@ -4325,4 +4347,19 @@ fn generate_fit_impl(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod derives_serde_tests {
+    fn attrs(src: &str) -> Vec<syn::Attribute> {
+        syn::parse_str::<syn::DeriveInput>(src).unwrap().attrs
+    }
+
+    #[test]
+    fn both_traits_by_any_path_derive_serde() {
+        assert!(super::derives_serde(&attrs("#[derive(Clone, serde::Serialize, serde::Deserialize)] struct A;")));
+        assert!(super::derives_serde(&attrs("#[derive(Serialize)] #[derive(Deserialize)] struct A;")));
+        assert!(!super::derives_serde(&attrs("#[derive(serde::Serialize)] struct A;")));
+        assert!(!super::derives_serde(&attrs("#[derive(Default)] struct A;")));
+    }
 }

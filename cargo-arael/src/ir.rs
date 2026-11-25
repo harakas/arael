@@ -18,6 +18,10 @@ pub struct Model {
     /// per-constraint cost-table surface.
     #[serde(default)]
     pub jacobian: bool,
+    /// The root derives serde's `Serialize` and `Deserialize`; gates
+    /// saving and loading the model as JSON.
+    #[serde(default)]
+    pub serde: bool,
     pub types: BTreeMap<String, Type>,
     #[serde(default)]
     pub constraints: Vec<Constraint>,
