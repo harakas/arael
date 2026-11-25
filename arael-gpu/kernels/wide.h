@@ -12,7 +12,10 @@
 //   ARAEL_WIDE(d, hi, lo)   a constant: d as a double literal, hi and lo its
 //                           two-float split (the host's df32::from_f64)
 //   + - * / and unary -, += -= *= /=, < > <= >= == !=
-//   sqrt, fabs, isnan, wide_max, wide_min (a NaN loses to a number),
+//   sqrt, fabs, isnan, isinf, isfinite, floor, copysign,
+//   exp, expm1, log, log1p, log2, log10, pow,
+//   sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh,
+//   wide_max, wide_min (a NaN loses to a number),
 //   wide_sin_cos, wide_fma(acc, x, y) (acc + x y, for sums of products)
 //
 // Both forms are 8 bytes, so a W array has the layout of a double array; a
@@ -20,7 +23,9 @@
 //
 // df32 is arael's host df32 (src/twofloat.rs), operation for operation:
 // every add and product rounded on its own (add_rn, mul_rn: never fused),
-// the product's error by fma, so a df32 result matches the host's bit for bit.
+// the product's error by fma, so a df32 result matches the host's bit for bit
+// (log and atan2, which start from the f32 library's value, to df32's
+// precision).
 
 #ifdef ARAEL_WIDE_DF32
 
@@ -182,6 +187,25 @@ DEVICE df32 shfl_xor(df32 v, u32 mask) { return df32(shfl_xor(v.hi, mask), shfl_
 DEVICE df32 wide_max(df32 a, df32 b) { return isnan(a) ? b : isnan(b) ? a : a >= b ? a : b; }
 DEVICE df32 wide_min(df32 a, df32 b) { return isnan(a) ? b : isnan(b) ? a : a <= b ? a : b; }
 
+// The host df32's constants (df32::from_f64 of the f64 ones).
+#define DF32_PI df32(3.141592741e+00f, -8.742277657e-08f)
+#define DF32_FRAC_PI_2 df32(1.570796371e+00f, -4.371138829e-08f)
+#define DF32_LN_2 df32(6.931471825e-01f, -1.904654212e-09f)
+#define DF32_LN_10 df32(2.302585125e+00f, -3.197543563e-08f)
+#define DF32_NAN df32(__int_as_float(0x7fc00000))
+#define DF32_INFINITY df32(__int_as_float(0x7f800000))
+#define DF32_NEG_INFINITY df32(-__int_as_float(0x7f800000))
+
+// a - k c for an integer-valued k and a constant c given as a df32 and a
+// third f32 part: both products exact, so the remainder keeps c to about
+// 72 bits times k. The argument reduction of exp and sin_cos.
+DEVICE df32 df32_reduce(df32 a, float k, df32 c, float c3) {
+    float p1, e1, p2, e2;
+    two_prod(c.hi, k, p1, e1);
+    two_prod(c.lo, k, p2, e2);
+    return ((((a - df32(p1)) - df32(e1)) - df32(p2)) - df32(e2)) - df32(mul_rn(c3, k));
+}
+
 // sin and cos: x = k pi/2 + r with |r| <= pi/4, the constant in three f32
 // parts so the remainder keeps its digits, then the Taylor series of r.
 DEVICE df32 df32_sin_taylor(df32 r) {
@@ -220,11 +244,7 @@ DEVICE WidePair wide_sin_cos(df32 x) {
         return WidePair{df32(nan), df32(nan)};
     }
     float k = round(mul_rn(x.hi, 6.366197467e-01f));
-    // x - k pi/2, both products exact
-    float p1, e1, p2, e2;
-    two_prod(1.570796371e+00f, k, p1, e1);
-    two_prod(-4.371138829e-08f, k, p2, e2);
-    df32 r = ((((x - df32(p1)) - df32(e1)) - df32(p2)) - df32(e2)) - df32(mul_rn(-1.776356839e-15f, k));
+    df32 r = df32_reduce(x, k, DF32_FRAC_PI_2, -1.776356839e-15f);
     df32 s = df32_sin_taylor(r);
     df32 c = df32_cos_taylor(r);
     // the quadrant, k mod 4: exact for the integer k at any magnitude (an
@@ -235,6 +255,225 @@ DEVICE WidePair wide_sin_cos(df32 x) {
     if (q == 1) return WidePair{c, -s};
     if (q == 2) return WidePair{-s, -c};
     return WidePair{-c, s};
+}
+
+// The rest of the host df32's functions, as src/twofloat.rs computes them,
+// for a `with_wide` scope computed in df32. log and atan2 start from the
+// f32 library's value, which may differ from the host's in its last bit;
+// their Newton steps take both to df32's precision.
+
+DEVICE bool isinf(df32 a) { return isinf(a.hi); }
+
+// a with b's sign.
+DEVICE df32 copysign(df32 a, df32 b) {
+    return (copysign(1.0f, a.hi) < 0.0f) == (copysign(1.0f, b.hi) < 0.0f) ? a : -a;
+}
+
+DEVICE df32 floor(df32 a) {
+    float hi = floor(a.hi);
+    if (hi != a.hi) return df32(hi);
+    float h, l;
+    quick_two_sum(hi, floor(a.lo), h, l);
+    return df32_pack(h, l);
+}
+
+// 2^k, exactly, for k in [-126, 127].
+DEVICE float df32_pow2(int k) { return __int_as_float((k + 127) << 23); }
+
+// a 2^k, exact while the result stays normal, for |k| up to 252.
+DEVICE df32 df32_scale_pow2(df32 a, int k) {
+    int k1 = k / 2;
+    float f1 = df32_pow2(k1), f2 = df32_pow2(k - k1);
+    return df32_pack(mul_rn(mul_rn(a.hi, f1), f2), mul_rn(mul_rn(a.lo, f1), f2));
+}
+
+// a as m 2^e with m in [0.5, 1); zero gives (0, 0).
+DEVICE df32 df32_frexp(df32 a, THREAD int& e) {
+    e = 0;
+    if (a.hi == 0.0f) return a;
+    int shift = 0;
+    if (fabs(a.hi) < 1.175494351e-38f) {
+        a = df32_scale_pow2(a, 48);
+        shift = -48;
+    }
+    int x = ((__float_as_int(fabs(a.hi)) >> 23) & 0xff) - 126;
+    e = x + shift;
+    return df32_scale_pow2(a, -x);
+}
+
+// exp(r) for |r| <= 0.18 by its Taylor series to degree 11.
+DEVICE df32 df32_exp_taylor(df32 r) {
+    df32 p = df32(2.505210794e-08f, 4.417623045e-16f);
+    p = p * r + df32(2.755731998e-07f, -7.575112209e-15f);
+    p = p * r + df32(2.755731884e-06f, 3.793571224e-14f);
+    p = p * r + df32(2.480158764e-05f, -3.406996094e-13f);
+    p = p * r + df32(1.984127011e-04f, -2.725596875e-12f);
+    p = p * r + df32(1.388888923e-03f, -3.363109444e-11f);
+    p = p * r + df32(8.333333768e-03f, -4.346172033e-10f);
+    p = p * r + df32(4.166666791e-02f, -1.241763470e-09f);
+    p = p * r + df32(1.666666716e-01f, -4.967053879e-09f);
+    p = p * r + df32(0.5f);
+    p = p * r + df32(1.0f);
+    return p * r + df32(1.0f);
+}
+
+DEVICE df32 exp(df32 a) {
+    if (isnan(a.hi)) return DF32_NAN;
+    if (a.hi > 88.8f) return DF32_INFINITY;
+    if (a.hi < -104.0f) return df32(0.0f);
+    // a = k ln2 + r, |r| <= 0.35: the series on r / 2, squared once
+    float k = round(a.hi / 6.931471825e-01f);
+    df32 r = df32_scale_pow2(df32_reduce(a, k, DF32_LN_2, -1.110223025e-16f), -1);
+    return df32_scale_pow2(df32_sqr(df32_exp_taylor(r)), (int)k);
+}
+
+DEVICE df32 log(df32 a) {
+    if (isnan(a.hi) || a.hi < 0.0f) return DF32_NAN;
+    if (a.hi == 0.0f) return DF32_NEG_INFINITY;
+    if (isinf(a.hi)) return DF32_INFINITY;
+    // log(m 2^e) = log m + e log 2, m in [0.5, 1): two Newton steps on exp
+    // from the f32 logarithm
+    int e;
+    df32 m = df32_frexp(a, e);
+    df32 y = df32(log(m.hi));
+    y = (y + m * exp(-y)) - df32(1.0f);
+    y = (y + m * exp(-y)) - df32(1.0f);
+    return y + df32_mul_f32(DF32_LN_2, (float)e);
+}
+
+DEVICE df32 log2(df32 a) { return log(a) / DF32_LN_2; }
+DEVICE df32 log10(df32 a) { return log(a) / DF32_LN_10; }
+
+// a^n by squaring.
+DEVICE df32 df32_powi(df32 a, int n) {
+    if (n == 0) return df32(1.0f);
+    df32 r = df32(1.0f), base = a;
+    u32 e = n < 0 ? (u32)(-(i64)n) : (u32)n;
+    while (e > 0u) {
+        if (e & 1u) r = r * base;
+        e >>= 1;
+        if (e > 0u) base = df32_sqr(base);
+    }
+    return n < 0 ? df32(1.0f) / r : r;
+}
+
+DEVICE df32 pow(df32 a, df32 n) {
+    // an integer n below 2^31 by squaring, hi + lo exact
+    if (isfinite(n.hi) && floor(n.hi) == n.hi && floor(n.lo) == n.lo && fabs(n.hi) < 2147483648.0f)
+        return df32_powi(a, (int)((i64)n.hi + (i64)n.lo));
+    if (a.hi == 0.0f) return n.hi > 0.0f ? df32(0.0f) : DF32_INFINITY;
+    if (a.hi < 0.0f) return DF32_NAN;
+    return exp(n * log(a));
+}
+
+DEVICE df32 sin(df32 a) { return wide_sin_cos(a).s; }
+DEVICE df32 cos(df32 a) { return wide_sin_cos(a).c; }
+DEVICE df32 tan(df32 a) {
+    WidePair p = wide_sin_cos(a);
+    return p.s / p.c;
+}
+
+DEVICE df32 atan2(df32 y, df32 x) {
+    if (!(isfinite(x.hi) && isfinite(y.hi))) return df32(atan2(y.hi, x.hi));
+    if (x.hi == 0.0f) {
+        if (y.hi == 0.0f) return df32(atan2(y.hi, x.hi));
+        return y.hi > 0.0f ? DF32_FRAC_PI_2 : -DF32_FRAC_PI_2;
+    }
+    if (y.hi == 0.0f) {
+        if (x.hi > 0.0f) return df32(atan2(y.hi, x.hi));
+        return copysign(1.0f, y.hi) < 0.0f ? -DF32_PI : DF32_PI;
+    }
+    // Newton on sin and cos from the f32 angle, twice: the direction
+    // (xx, yy) is unit, so the step reads straight off the residual
+    df32 r = sqrt(df32_sqr(x) + df32_sqr(y));
+    df32 xx = x / r, yy = y / r;
+    df32 z = df32(atan2((float)y, (float)x));
+    for (int i = 0; i < 2; i++) {
+        WidePair p = wide_sin_cos(z);
+        if (fabs(xx.hi) > fabs(yy.hi)) z = z + (yy - p.s) / p.c;
+        else z = z - (xx - p.c) / p.s;
+    }
+    return z;
+}
+
+DEVICE df32 atan(df32 a) { return atan2(a, df32(1.0f)); }
+
+// (1 - a)(1 + a) rather than 1 - a^2: exact factors near a = +-1.
+DEVICE df32 asin(df32 a) {
+    if (fabs(a.hi) > 1.0f || isnan(a.hi)) return DF32_NAN;
+    if (fabs(a.hi) == 1.0f && a.lo == 0.0f) return a.hi > 0.0f ? DF32_FRAC_PI_2 : -DF32_FRAC_PI_2;
+    return atan2(a, sqrt((df32(1.0f) - a) * (df32(1.0f) + a)));
+}
+
+DEVICE df32 acos(df32 a) {
+    if (fabs(a.hi) > 1.0f || isnan(a.hi)) return DF32_NAN;
+    if (fabs(a.hi) == 1.0f && a.lo == 0.0f) return a.hi > 0.0f ? df32(0.0f) : DF32_PI;
+    return atan2(sqrt((df32(1.0f) - a) * (df32(1.0f) + a)), a);
+}
+
+// exp(a) - 1; below |a| = 0.5 by its series to degree 15.
+DEVICE df32 expm1(df32 a) {
+    if (fabs(a.hi) >= 0.5f || !isfinite(a.hi)) return exp(a) - df32(1.0f);
+    df32 p = df32(7.647163610e-13f, 1.220071047e-20f);
+    p = p * a + df32(1.147074536e-11f, 2.372207689e-19f);
+    p = p * a + df32(1.605904437e-10f, -5.352526512e-18f);
+    p = p * a + df32(2.087675588e-09f, 1.108283981e-16f);
+    p = p * a + df32(2.505210794e-08f, 4.417623045e-16f);
+    p = p * a + df32(2.755731998e-07f, -7.575112209e-15f);
+    p = p * a + df32(2.755731884e-06f, 3.793571224e-14f);
+    p = p * a + df32(2.480158764e-05f, -3.406996094e-13f);
+    p = p * a + df32(1.984127011e-04f, -2.725596875e-12f);
+    p = p * a + df32(1.388888923e-03f, -3.363109444e-11f);
+    p = p * a + df32(8.333333768e-03f, -4.346172033e-10f);
+    p = p * a + df32(4.166666791e-02f, -1.241763470e-09f);
+    p = p * a + df32(1.666666716e-01f, -4.967053879e-09f);
+    p = p * a + df32(0.5f);
+    p = p * a + df32(1.0f);
+    return p * a;
+}
+
+// log(1 + a); below |a| = 0.1 as 2 atanh(u), u = a / (2 + a), odd powers
+// of u to u^13.
+DEVICE df32 log1p(df32 a) {
+    if (fabs(a.hi) >= 0.1f || !isfinite(a.hi)) return log(df32(1.0f) + a);
+    df32 u = a / (df32(2.0f) + a);
+    df32 u2 = df32_sqr(u);
+    df32 s = df32(7.692307979e-02f, -2.865607973e-09f);
+    s = s * u2 + df32(9.090909362e-02f, -2.709302116e-09f);
+    s = s * u2 + df32(1.111111119e-01f, -8.278422947e-10f);
+    s = s * u2 + df32(1.428571492e-01f, -6.386212004e-09f);
+    s = s * u2 + df32(2.000000030e-01f, -2.980232283e-09f);
+    s = s * u2 + df32(3.333333433e-01f, -9.934107759e-09f);
+    s = s * u2 + df32(1.0f);
+    return (s * u) * df32(2.0f);
+}
+
+DEVICE df32 sinh(df32 a) {
+    if (!isfinite(a.hi)) return a;
+    if (fabs(a.hi) < 0.05f) {
+        df32 x2 = df32_sqr(a);
+        df32 s = df32(2.755731884e-06f, 3.793571224e-14f);
+        s = s * x2 + df32(1.984127011e-04f, -2.725596875e-12f);
+        s = s * x2 + df32(8.333333768e-03f, -4.346172033e-10f);
+        s = s * x2 + df32(1.666666716e-01f, -4.967053879e-09f);
+        s = s * x2 + df32(1.0f);
+        return s * a;
+    }
+    df32 e = exp(a);
+    return (e - df32(1.0f) / e) * df32(0.5f);
+}
+
+DEVICE df32 cosh(df32 a) {
+    if (!isfinite(a.hi)) return fabs(a);
+    df32 e = exp(a);
+    return (e + df32(1.0f) / e) * df32(0.5f);
+}
+
+DEVICE df32 tanh(df32 a) {
+    if (isnan(a.hi)) return a;
+    if (fabs(a.hi) > 20.0f) return df32(a.hi > 0.0f ? 1.0f : -1.0f);
+    df32 e = expm1(a * df32(2.0f));
+    return e / (e + df32(2.0f));
 }
 
 // acc + x y for a sum of products: the product split by fma, added by the

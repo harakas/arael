@@ -35,7 +35,7 @@ typedef SCALAR F;
 #define TILE_STORE 0x80000000u
 
 // The helpers of arael's external functions (arael-sym's EXTERN_CPP), as
-// arael::utils computes them, for float and double.
+// arael::utils computes them, for float, double and df32.
 
 // An angle in [-pi, pi]: one turn per 2 pi taken off outside it.
 template <typename T>
@@ -45,11 +45,22 @@ DEVICE T arael_rad2rad(T v) {
     if (v < -pi || v > pi) return v - two_pi * floor(v / two_pi + (T)0.5);
     return v;
 }
+#ifdef ARAEL_WIDE_DF32
+DEVICE df32 arael_rad2rad(df32 v) {
+    const df32 pi = DF32_PI;
+    const df32 two_pi = df32(2.0f) * pi;
+    if (v < -pi || v > pi) return v - two_pi * floor(v / two_pi + df32(0.5f));
+    return v;
+}
+#endif
 
 // The difference of two angles in [-pi, pi].
 DEVICE float arael_rad_diff(float a, float b) { return arael_rad2rad(a - b); }
 #if HAS_F64
 DEVICE double arael_rad_diff(double a, double b) { return arael_rad2rad(a - b); }
+#endif
+#ifdef ARAEL_WIDE_DF32
+DEVICE df32 arael_rad_diff(df32 a, df32 b) { return arael_rad2rad(a - b); }
 #endif
 
 // The sum of two angles in [-pi, pi].
@@ -57,11 +68,17 @@ DEVICE float arael_rad_sum(float a, float b) { return arael_rad2rad(a + b); }
 #if HAS_F64
 DEVICE double arael_rad_sum(double a, double b) { return arael_rad2rad(a + b); }
 #endif
+#ifdef ARAEL_WIDE_DF32
+DEVICE df32 arael_rad_sum(df32 a, df32 b) { return arael_rad2rad(a + b); }
+#endif
 
 // sqrt(v), 0 for v at or below 0.
 DEVICE float arael_safe_sqrt(float v) { return v <= 0.0f ? 0.0f : sqrt(v); }
 #if HAS_F64
 DEVICE double arael_safe_sqrt(double v) { return v <= 0.0 ? 0.0 : sqrt(v); }
+#endif
+#ifdef ARAEL_WIDE_DF32
+DEVICE df32 arael_safe_sqrt(df32 v) { return v <= df32(0.0f) ? df32(0.0f) : sqrt(v); }
 #endif
 
 // The machine epsilon of the argument's type, its value ignored.
@@ -69,25 +86,38 @@ DEVICE float arael_epsilon_for(float) { return 1.1920928955078125e-7f; }
 #if HAS_F64
 DEVICE double arael_epsilon_for(double) { return 2.220446049250313e-16; }
 #endif
+#ifdef ARAEL_WIDE_DF32
+// df32's relative precision of one operation, 2^-46.
+DEVICE df32 arael_epsilon_for(df32) { return df32(1.421085472e-14f); }
+#endif
 
 // arael::utils' fast atan (max error < 1e-6 radians), with its folds, its
 // constants and its operations in its order: the argument's magnitude
 // folded below 1, then below tan(pi / 12) by the pi / 6 shift, a rational
-// polynomial there.
+// polynomial there. The constants in T, as the host converts them: each
+// as ARAEL_FAST_ATAN_K(d, hi, lo), d the f64 value, hi and lo its df32
+// split.
+#define ARAEL_FAST_ATAN_CONSTANTS(K)                                                   \
+    K(1.5707963267948966, 1.570796371e+00f, -4.371138829e-08f),        /* pi / 2 */    \
+        K(5.235987755982988e-1, 5.235987902e-01f, -1.457046306e-08f),  /* pi / 6 */    \
+        K(5.773502691896257e-1, 5.773502588e-01f, 1.036241670e-08f),   /* tan pi/6 */  \
+        K(2.679491924311227e-1, 2.679491937e-01f, -1.284926499e-09f),  /* tan pi/12 */ \
+        K(1.6867629106, 1.686762929e+00f, -1.836270691e-08f),                          \
+        K(0.4378497304, 4.378497303e-01f, 1.467804212e-10f),                           \
+        K(1.6867633134, 1.686763287e+00f, 2.680942401e-08f)
+#define ARAEL_K_F32(d, hi, lo) ((float)(d))
+#define ARAEL_K_F64(d, hi, lo) (d)
+#define ARAEL_K_DF32(d, hi, lo) df32(hi, lo)
 template <typename T>
-DEVICE T arael_fast_atan_t(T v) {
-    const T half_pi = (T)1.5707963267948966;
-    const T sixth_pi = (T)5.235987755982988e-1;
-    const T tan_sixth_pi = (T)5.773502691896257e-1;
-    const T tan_twelfth_pi = (T)2.679491924311227e-1;
-    const T c1 = (T)1.6867629106, c2 = (T)0.4378497304, c3 = (T)1.6867633134;
-    const bool negative = v < (T)0;
+DEVICE T arael_fast_atan_t(T v, T half_pi, T sixth_pi, T tan_sixth_pi, T tan_twelfth_pi, T c1, T c2, T c3) {
+    const T one = (T)1.0f;
+    const bool negative = v < (T)0.0f;
     T x = negative ? -v : v;
-    const bool inverted = x > (T)1;
-    if (inverted) x = (T)1 / x;
+    const bool inverted = x > one;
+    if (inverted) x = one / x;
     T y;
     if (x > tan_twelfth_pi) {
-        x = (x - tan_sixth_pi) / ((T)1 + tan_sixth_pi * x);
+        x = (x - tan_sixth_pi) / (one + tan_sixth_pi * x);
         const T x2 = x * x;
         y = x * (c1 + x2 * c2) / (c3 + x2);
         y += sixth_pi;
@@ -98,27 +128,37 @@ DEVICE T arael_fast_atan_t(T v) {
     if (inverted) y = half_pi - y;
     return negative ? -y : y;
 }
-DEVICE float arael_fast_atan(float v) { return arael_fast_atan_t(v); }
+DEVICE float arael_fast_atan(float v) { return arael_fast_atan_t(v, ARAEL_FAST_ATAN_CONSTANTS(ARAEL_K_F32)); }
 #if HAS_F64
-DEVICE double arael_fast_atan(double v) { return arael_fast_atan_t(v); }
+DEVICE double arael_fast_atan(double v) { return arael_fast_atan_t(v, ARAEL_FAST_ATAN_CONSTANTS(ARAEL_K_F64)); }
 #endif
+#ifdef ARAEL_WIDE_DF32
+DEVICE df32 arael_fast_atan(df32 v) { return arael_fast_atan_t(v, ARAEL_FAST_ATAN_CONSTANTS(ARAEL_K_DF32)); }
+#endif
+#undef ARAEL_FAST_ATAN_CONSTANTS
+#undef ARAEL_K_F32
+#undef ARAEL_K_F64
+#undef ARAEL_K_DF32
 
 // arael::utils' fast atan2 over its fast atan: 0 at the origin, +-pi / 2
 // on the y axis, the quadrant by x's and y's signs.
 template <typename T>
-DEVICE T arael_fast_atan2_t(T y, T x) {
-    const T pi = (T)3.14159265358979323846;
-    if (x > (T)0) return arael_fast_atan_t(y / x);
-    if (x == (T)0) {
-        if (y == (T)0) return (T)0;
-        return copysign((T)0.5 * pi, y);
+DEVICE T arael_fast_atan2_t(T y, T x, T pi) {
+    const T zero = (T)0.0f;
+    if (x > zero) return arael_fast_atan(y / x);
+    if (x == zero) {
+        if (y == zero) return zero;
+        return copysign((T)0.5f * pi, y);
     }
-    if (y >= (T)0) return arael_fast_atan_t(y / x) + pi;
-    return arael_fast_atan_t(y / x) - pi;
+    if (y >= zero) return arael_fast_atan(y / x) + pi;
+    return arael_fast_atan(y / x) - pi;
 }
-DEVICE float arael_fast_atan2(float y, float x) { return arael_fast_atan2_t(y, x); }
+DEVICE float arael_fast_atan2(float y, float x) { return arael_fast_atan2_t(y, x, (float)3.14159265358979323846); }
 #if HAS_F64
-DEVICE double arael_fast_atan2(double y, double x) { return arael_fast_atan2_t(y, x); }
+DEVICE double arael_fast_atan2(double y, double x) { return arael_fast_atan2_t(y, x, 3.14159265358979323846); }
+#endif
+#ifdef ARAEL_WIDE_DF32
+DEVICE df32 arael_fast_atan2(df32 y, df32 x) { return arael_fast_atan2_t(y, x, DF32_PI); }
 #endif
 
 // The arm of n a select's index x picks (arael::utils::SelectIndex): the
@@ -130,6 +170,14 @@ DEVICE int arael_select_index(T x, u32 n) {
     if (x < (T)0 || x >= (T)n) return -1;
     return (int)x;
 }
+#ifdef ARAEL_WIDE_DF32
+// An integral df32 has integral parts, and hi + lo is exact.
+DEVICE int arael_select_index(df32 x, u32 n) {
+    if (!isfinite(x.hi) || floor(x.hi) != x.hi || floor(x.lo) != x.lo) return -2;
+    if (x < df32(0.0f) || x >= wide_u32(n)) return -1;
+    return (int)((i64)x.hi + (i64)x.lo);
+}
+#endif
 
 // A quiet NaN of the argument's type, its value ignored: a select's value
 // where the host's select panics.

@@ -524,9 +524,13 @@ fn write_select_index(buf: &mut String, index: &E, n: usize, ctx: &Ctx) -> Res {
     Ok(())
 }
 
-/// A quiet NaN of the C++ type `ft`.
+/// A quiet NaN of the C++ type `ft`, chosen by a zero literal of it (a
+/// cast of an integer is ambiguous for a type built from `float` and
+/// `double`, as arael's df32).
 fn write_nan(buf: &mut String, ft: &str) {
-    buf.push_str(&format!("arael_nan_of(({ft})0)"));
+    buf.push_str("arael_nan_of(");
+    literal(buf, 0.0, ft);
+    buf.push(')');
 }
 
 /// Every name of a select set to NaN: where the CPU's select panics (an
@@ -700,6 +704,12 @@ mod tests {
             assert!(code.contains("((float)"), "{code}");
             assert!(!code.contains("double"), "{code}");
         }
+        // a select's NaN in the wide type, by a literal of it
+        let (k,) = (symbol("k"),);
+        let sel = [with_wide(crate::select(k, vec![x.clone(), x.clone() * y.clone()], None))];
+        let (inters, _) = cse_scoped_wide(&sel, "f64");
+        let code: String = inters.iter().map(|i| i.to_cpp_in("f32", "W", &verbatim).unwrap()).collect();
+        assert!(code.contains("arael_nan_of(ARAEL_WIDE(0.0, 0.0f, 0.0f))"), "{code}");
         // an f64 kernel's leaves are cast too: W is not double there
         let (inters, _) = cse_scoped_wide(&outs, "f64");
         let code: String = inters.iter().map(|i| i.to_cpp_in("f64", "W", &verbatim).unwrap()).collect();
@@ -746,10 +756,10 @@ mod tests {
         assert_eq!(
             e.to_cpp("f64").unwrap(),
             "(arael_select_index(k, 2u) == 0 ? x : arael_select_index(k, 2u) == 1 ? (2.0 * x) : \
-             arael_select_index(k, 2u) == -1 ? (3.0 * x) : arael_nan_of((double)0))"
+             arael_select_index(k, 2u) == -1 ? (3.0 * x) : arael_nan_of(0.0))"
         );
         let e = crate::select(k, vec![x.clone()], None);
-        assert_eq!(e.to_cpp("f32").unwrap(), "(arael_select_index(k, 1u) == 0 ? x : arael_nan_of((float)0))");
+        assert_eq!(e.to_cpp("f32").unwrap(), "(arael_select_index(k, 1u) == 0 ? x : arael_nan_of(0.0f))");
     }
 
     /// After CSE a select is a `switch` assigning its names in the taken
@@ -762,8 +772,8 @@ mod tests {
         assert_eq!(
             body.stmts,
             "float __m0 = 0.0f;\nswitch (arael_select_index(k, 2u)) {\ncase 0: {\n__m0 = sin(x);\n} break;\n\
-             case 1: {\n__m0 = (2.0f * x);\n} break;\ncase -1: {\n__m0 = arael_nan_of((float)0);\n} break;\n\
-             default: {\n__m0 = arael_nan_of((float)0);\n} break;\n}\n"
+             case 1: {\n__m0 = (2.0f * x);\n} break;\ncase -1: {\n__m0 = arael_nan_of(0.0f);\n} break;\n\
+             default: {\n__m0 = arael_nan_of(0.0f);\n} break;\n}\n"
         );
         assert_eq!(body.outputs, ["__m0"]);
     }

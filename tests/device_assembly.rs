@@ -6511,3 +6511,62 @@ fn a_childs_constraint_reads_its_parents_rotation_on_the_device() {
         assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
     }
 }
+
+/// A point whose residuals call, in `with_wide`, each function a wide
+/// scope can call, and select: the device computes them in its wide
+/// scalar, df32 too.
+#[arael::model]
+#[arael(constraint(hb, {
+    let u = fnpoint.p.x;
+    let v = fnpoint.p.y;
+    [with_wide(exp(0.5 * u) + exp_m1(0.1 * v) + ln(2.0 + u * u) + ln_1p(0.2 * v * v) - fnpoint.ta),
+     with_wide(sin(u) * cos(v) + tan(0.3 * u) + sinh(0.5 * v) + cosh(0.2 * u) + tanh(v) - fnpoint.tb),
+     with_wide(asin(0.5 * sin(u)) + acos(0.5 * cos(v)) + atan(u) + atan2(v, 1.5 + u * u) - fnpoint.tc),
+     with_wide(log2(3.0 + v * v) + log10(4.0 + u * u) + pow(2.0 + u * u, 0.7) + safe_sqrt(1.0 + v * v) - fnpoint.td),
+     with_wide(rad_diff(u, v) + rad_sum(u, 2.0 * v) + fast_atan(u) + fast_atan2(v, 2.0 + u) + epsilon_for(u) - fnpoint.te),
+     with_wide(select(fnpoint.k, exp(u), u * v, cos(v)) - fnpoint.tf)]
+}))]
+#[derive(Clone)]
+pub struct FnPoint<T: Float> {
+    pub p: Param<vect2<T>>,
+    pub ta: T,
+    pub tb: T,
+    pub tc: T,
+    pub td: T,
+    pub te: T,
+    pub tf: T,
+    /// The arm of the select.
+    pub k: T,
+    pub hb: SelfBlock<FnPoint<T>, T>,
+}
+
+#[arael::model]
+#[arael(root, f32)]
+#[derive(Clone)]
+pub struct FnPoints {
+    pub points: refs::Vec<FnPoint<f32>>,
+}
+
+/// An f32 model's `with_wide` scopes calling the elementary functions,
+/// arael's helpers among them, and a select, assemble on the device as on
+/// the CPU in both wide scalars.
+#[test]
+fn wide_scopes_compute_the_functions_on_the_device() {
+    let mut points = refs::Vec::new();
+    for k in 0..24 {
+        let a = k as f32 / 24.0;
+        points.push(FnPoint {
+            p: Param::new(vect2::new(1.6 * a - 0.8, 0.7 - 1.4 * (a * 7.0).fract())),
+            ta: 2.0 + 0.1 * a,
+            tb: 1.0 - 0.2 * a,
+            tc: 2.0 + 0.3 * a,
+            td: 5.0 - 0.1 * a,
+            te: 0.4 * a - 0.2,
+            tf: 0.5,
+            k: (k % 3) as f32,
+            hb: SelfBlock::new(),
+        });
+    }
+    let mut s = FnPoints { points };
+    checks_f32(&mut s, 1e-5, 1e-4, "the wide functions");
+}

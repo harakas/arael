@@ -155,6 +155,182 @@ fn device_df32_matches_the_host_bit_for_bit() {
     }
 }
 
+const MATH: &str = r#"
+#define NMATH 19
+KERNEL void k_math(GLOBAL const df32* a, GLOBAL const df32* b, GLOBAL df32* out, u32 n) {
+    u32 i = global_x();
+    if (i >= n) return;
+    df32 x = a[i], y = b[i];
+    GLOBAL df32* o = out + NMATH * i;
+    o[0] = exp(x);
+    o[1] = expm1(x);
+    o[2] = sin(x);
+    o[3] = cos(x);
+    o[4] = tan(x);
+    o[5] = sinh(x);
+    o[6] = cosh(x);
+    o[7] = tanh(x);
+    o[8] = floor(x);
+    o[9] = copysign(x, y);
+    o[10] = log(fabs(x));
+    o[11] = log1p(x);
+    o[12] = log2(fabs(x));
+    o[13] = log10(fabs(x));
+    o[14] = pow(fabs(x), y);
+    o[15] = atan(x);
+    o[16] = atan2(x, y);
+    o[17] = asin(x);
+    o[18] = acos(x);
+}
+"#;
+
+/// The host's results of `k_math`, in its order, and the first that
+/// starts from the f32 library's log or atan2.
+fn host_math(x: df32, y: df32) -> ([df32; 19], usize) {
+    use num::Float;
+    let a = x.abs();
+    ([x.exp(), x.exp_m1(), x.sin(), x.cos(), x.tan(), x.sinh(), x.cosh(), x.tanh(), x.floor(), x.copysign(y),
+      a.ln(), x.ln_1p(), a.log2(), a.log10(), a.powf(y), x.atan(), x.atan2(y), x.asin(), x.acos()], 10)
+}
+
+/// The device's df32 functions are the host's: bit for bit where they
+/// compute what the host does (exp and the series), and to df32's
+/// precision where they start from the f32 library's log or atan2, whose
+/// last bit may differ from the host's: 1e-12 of the result or of 1,
+/// whichever is larger, and 1e-10 of the result for pow, whose relative
+/// error is its exponent times its log's.
+#[test]
+fn device_df32_functions_match_the_host() {
+    let dev = Dev::new(0).unwrap();
+    let flushes = dev.arch().flushes_subnormals;
+    let source = format!("{WIDE}\n{MATH}");
+    let math = dev.compile(&source, Wide::Df32.defines(), "k_math").unwrap();
+    let mut seeded_bits = 0;
+    for (seed, max_exp) in [(1, 0.3), (2, 2.0), (3, 8.0)] {
+        let a = inputs(4000, seed, max_exp);
+        let b = inputs(4000, seed + 100, max_exp);
+        let n = a.len();
+        let (da, db) = (up(&dev, &a), up(&dev, &b));
+        let out = dev.alloc(8 * 19 * n).unwrap();
+        dev.launch(&math, Launch::linear(n as u32, 256), &[Arg::Block(&da, 0), Arg::Block(&db, 0), Arg::Block(&out, 0), Arg::U32(n as u32)]).unwrap();
+        let mut got = vec![0f32; 2 * 19 * n];
+        dev.read(&out, 0, bytemuck::cast_slice_mut(&mut got)).unwrap();
+        let mut bad = 0;
+        for i in 0..n {
+            let (x, y) = (a[i], b[i]);
+            let (want, seeded) = host_math(x, y);
+            for (k, w) in want.iter().enumerate() {
+                let g = df32 { hi: got[38 * i + 2 * k], lo: got[38 * i + 2 * k + 1] };
+                if same(g, *w) {
+                    continue;
+                }
+                let ok = if k >= seeded && w.hi.is_finite() && g.hi.is_finite() {
+                    seeded_bits += 1;
+                    let scale = if k == 14 { 1e-10 * w.to_f64().abs() } else { 1e-12 * w.to_f64().abs().max(1.0) };
+                    (g.to_f64() - w.to_f64()).abs() <= scale
+                } else {
+                    flushes && flushed(g, *w, x, y)
+                };
+                if !ok {
+                    bad += 1;
+                    if bad < 10 {
+                        eprintln!("function {k} of ({:?}, {:?}) and ({:?}, {:?}): device ({:?}, {:?}), host ({:?}, {:?})", x.hi, x.lo, y.hi, y.lo, g.hi, g.lo, w.hi, w.lo);
+                    }
+                }
+            }
+        }
+        assert_eq!(bad, 0, "seed {seed}: {bad} results differ from the host");
+    }
+    eprintln!("{}: {seeded_bits} log and atan2 results differ from the host's in their last bits", dev.arch().name);
+}
+
+const HELPERS: &str = r#"
+KERNEL void k_helpers(GLOBAL const df32* a, GLOBAL const df32* b, GLOBAL df32* out, GLOBAL int* idx, u32 n) {
+    u32 i = global_x();
+    if (i >= n) return;
+    df32 x = a[i], y = b[i];
+    GLOBAL df32* o = out + 7 * i;
+    o[0] = arael_rad_diff(x, y);
+    o[1] = arael_rad_sum(x, y);
+    o[2] = arael_safe_sqrt(fabs(x));
+    o[3] = arael_safe_sqrt(-fabs(x));
+    o[4] = arael_epsilon_for(x);
+    o[5] = arael_fast_atan(x);
+    o[6] = arael_fast_atan2(x, y);
+    idx[2 * i] = arael_select_index(x, 5u);
+    idx[2 * i + 1] = arael_select_index(floor(x), 5u);
+}
+"#;
+
+/// The host's select index of `x` among `n` arms, as the device's: -2
+/// where the host panics.
+fn select_index(x: df32, n: i64) -> i32 {
+    let v = x.to_f64();
+    if !v.is_finite() || v.fract() != 0.0 {
+        -2
+    } else if v < 0.0 || v >= n as f64 {
+        -1
+    } else {
+        v as i32
+    }
+}
+
+/// arael's device helpers (`kernels/assembly.cpp`) in df32 compute what
+/// `arael::utils` computes in the host's df32, bit for bit.
+#[test]
+fn device_df32_helpers_match_the_host() {
+    use arael::__gpu::ASSEMBLY;
+    use arael::utils::{epsilon_for, fast_atan, fast_atan2, rad_diff, rad_sum, safe_sqrt};
+    let dev = Dev::new(0).unwrap();
+    let flushes = dev.arch().flushes_subnormals;
+    let source = format!("{WIDE}\n{ASSEMBLY}\n{HELPERS}");
+    let defines = format!("{}#define SCALAR float\n", Wide::Df32.defines());
+    let helpers = dev.compile(&source, &defines, "k_helpers").unwrap();
+    for (seed, max_exp) in [(1, 0.3), (2, 2.0), (3, 8.0)] {
+        // with whole numbers in and out of the select's arms
+        let mut a = inputs(4000, seed, max_exp);
+        let mut b = inputs(4000, seed + 100, max_exp);
+        a.extend([2.0, 4.0, 5.0, -1.0, 1e9].map(df32::from_f64));
+        b.extend([1.0, -2.0, 0.5, 3.0, 2.0].map(df32::from_f64));
+        let n = a.len();
+        let (da, db) = (up(&dev, &a), up(&dev, &b));
+        let out = dev.alloc(8 * 7 * n).unwrap();
+        let idx = dev.alloc(8 * n).unwrap();
+        let args = [Arg::Block(&da, 0), Arg::Block(&db, 0), Arg::Block(&out, 0), Arg::Block(&idx, 0), Arg::U32(n as u32)];
+        dev.launch(&helpers, Launch::linear(n as u32, 256), &args).unwrap();
+        let mut got = vec![0f32; 2 * 7 * n];
+        dev.read(&out, 0, bytemuck::cast_slice_mut(&mut got)).unwrap();
+        let mut got_idx = vec![0i32; 2 * n];
+        dev.read(&idx, 0, bytemuck::cast_slice_mut(&mut got_idx)).unwrap();
+        let mut bad = 0;
+        for i in 0..n {
+            let (x, y) = (a[i], b[i]);
+            let ax = x.abs();
+            // safe_sqrt of a value at or below 0 is 0, of NaN NaN (the
+            // host's asserts on a value well below 0)
+            let below = if ax.hi.is_nan() { df32::NAN } else { df32::ZERO };
+            let want = [rad_diff(x, y), rad_sum(x, y), safe_sqrt(ax), below, epsilon_for(x), fast_atan(x), fast_atan2(x, y)];
+            for (k, w) in want.iter().enumerate() {
+                let g = df32 { hi: got[14 * i + 2 * k], lo: got[14 * i + 2 * k + 1] };
+                if !same(g, *w) && !(flushes && flushed(g, *w, x, y)) {
+                    bad += 1;
+                    if bad < 10 {
+                        eprintln!("helper {k} of ({:?}, {:?}) and ({:?}, {:?}): device ({:?}, {:?}), host ({:?}, {:?})", x.hi, x.lo, y.hi, y.lo, g.hi, g.lo, w.hi, w.lo);
+                    }
+                }
+            }
+            let want_idx = [select_index(x, 5), select_index(x.floor(), 5)];
+            if got_idx[2 * i..2 * i + 2] != want_idx {
+                bad += 1;
+                if bad < 10 {
+                    eprintln!("select index of ({:?}, {:?}): device {:?}, host {:?}", x.hi, x.lo, &got_idx[2 * i..2 * i + 2], want_idx);
+                }
+            }
+        }
+        assert_eq!(bad, 0, "seed {seed}: {bad} results differ from the host");
+    }
+}
+
 /// `Wide::Df32` splits and joins as the host's df32 does.
 #[test]
 fn the_host_encoding_is_the_df32_split() {

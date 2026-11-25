@@ -273,6 +273,7 @@ ARAEL_UNFUSED(float, mul_rn, *)
 #undef ARAEL_UNFUSED
 
 DEVICE float __int_as_float(int v) { return as_type<float>(v); }
+DEVICE int __float_as_int(float v) { return as_type<int>(v); }
 
 // What CUDA's library has and Metal's lacks: log(1 + x) and exp(x) - 1
 // without the cancellation of 1 + x and exp(x) - 1 near 0 (Kahan's forms:
@@ -393,6 +394,11 @@ DEVICE float __int_as_float(int v) {
     float f;
     memcpy(&f, &v, sizeof f);
     return f;
+}
+DEVICE int __float_as_int(float v) {
+    int i;
+    memcpy(&i, &v, sizeof i);
+    return i;
 }
 DEVICE double __longlong_as_double(long long v) {
     double d;
