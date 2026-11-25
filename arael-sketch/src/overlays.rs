@@ -15,13 +15,13 @@ use crate::EditorApp;
 /// Delegates to the shared glyph so live hints look the same as
 /// committed markers.
 pub(crate) fn draw_collinear_marker(painter: &egui::Painter, pos: egui::Pos2, color: egui::Color32) {
-    crate::drawing::collinear_glyph(painter, pos, 7.0, egui::Stroke::new(2.0, color));
+    crate::drawing::collinear_glyph(painter, pos, 7.0, egui::Stroke::new(2.0_f32, color));
 }
 
 /// Draw an H or V constraint symbol at hint size. Delegates to the
 /// shared glyph so live hints look the same as committed markers.
 pub(crate) fn draw_hv_marker(painter: &egui::Painter, pos: egui::Pos2, horizontal: bool, color: egui::Color32) {
-    crate::drawing::hv_glyph(painter, pos, horizontal, 7.0, egui::Stroke::new(2.0, color));
+    crate::drawing::hv_glyph(painter, pos, horizontal, 7.0, egui::Stroke::new(2.0_f32, color));
 }
 
 /// Draw the Tangent glyph at hint size, next to `contact` on the side
@@ -31,7 +31,7 @@ pub(crate) fn draw_tangent_marker(painter: &egui::Painter, contact: egui::Pos2, 
     let dy = toward.y - contact.y;
     let len = (dx * dx + dy * dy).sqrt().max(1.0);
     let pos = egui::Pos2::new(contact.x - dx / len * 14.0, contact.y - dy / len * 14.0);
-    crate::drawing::tangent_glyph(painter, pos, 7.0, egui::Stroke::new(2.0, color));
+    crate::drawing::tangent_glyph(painter, pos, 7.0, egui::Stroke::new(2.0_f32, color));
 }
 
 // Small right-angle corner marker placed at the corner where the drawn
@@ -83,7 +83,7 @@ pub(crate) fn draw_perp_corner_marker(
     let a = egui::Pos2::new(corner_screen.x + hx * s, corner_screen.y + hy * s);
     let b = egui::Pos2::new(corner_screen.x + dx * s, corner_screen.y + dy * s);
     let c = egui::Pos2::new(corner_screen.x + (hx + dx) * s, corner_screen.y + (hy + dy) * s);
-    let stroke = egui::Stroke::new(1.5, color);
+    let stroke = egui::Stroke::new(1.5_f32, color);
     painter.line_segment([a, c], stroke);
     painter.line_segment([b, c], stroke);
 }
@@ -116,11 +116,11 @@ impl EditorApp {
             && let Some(c) = self.scale_center
         {
             let p = self.to_screen(c);
-            let stroke = egui::Stroke::new(2.0, self.colors.constraint_marker_selected);
+            let stroke = egui::Stroke::new(2.0_f32, self.colors.constraint_marker_selected);
             let s = 9.0;
             painter.line_segment([egui::Pos2::new(p.x - s, p.y), egui::Pos2::new(p.x + s, p.y)], stroke);
             painter.line_segment([egui::Pos2::new(p.x, p.y - s), egui::Pos2::new(p.x, p.y + s)], stroke);
-            painter.circle_stroke(p, s * 0.6, egui::Stroke::new(1.0, self.colors.constraint_marker_selected));
+            painter.circle_stroke(p, s * 0.6, egui::Stroke::new(1.0_f32, self.colors.constraint_marker_selected));
         }
         // Dimension preview while placing (not when editing an existing dimension)
         if (self.dim_placing || (self.dim_editing && self.dim_edit_did.is_none())) && self.dim_kind.is_some() {
@@ -146,7 +146,7 @@ impl EditorApp {
             let p = pt + offset;
             painter.circle_filled(pt, 4.0, self.colors.endpoint);
             let color = self.colors.constraint_marker_selected;
-            let stroke = egui::Stroke::new(2.0, color);
+            let stroke = egui::Stroke::new(2.0_f32, color);
             let s = 7.0_f32;
             let h = s * 1.56;
             let half_w = s * 1.04;
@@ -169,7 +169,7 @@ impl EditorApp {
         // line/arc midpoint). Body snaps skip the box.
         const SNAP_S: f32 = 9.75;
         let draw_snap_x = |pt: egui::Pos2| {
-            let stroke = egui::Stroke::new(1.0, self.colors.constraint_marker_selected);
+            let stroke = egui::Stroke::new(1.0_f32, self.colors.constraint_marker_selected);
             painter.line_segment(
                 [egui::Pos2::new(pt.x - SNAP_S, pt.y - SNAP_S),
                  egui::Pos2::new(pt.x + SNAP_S, pt.y + SNAP_S)], stroke);
@@ -182,7 +182,7 @@ impl EditorApp {
         // placement point visible. Replaced by the snap-specific
         // marker (X / box / triangle / corner) whenever a snap fires.
         let draw_cursor_cross = |pt: egui::Pos2| {
-            let stroke = egui::Stroke::new(1.0, self.colors.constraint_marker_selected);
+            let stroke = egui::Stroke::new(1.0_f32, self.colors.constraint_marker_selected);
             painter.line_segment(
                 [egui::Pos2::new(pt.x - SNAP_S, pt.y),
                  egui::Pos2::new(pt.x + SNAP_S, pt.y)], stroke);
@@ -191,7 +191,7 @@ impl EditorApp {
                  egui::Pos2::new(pt.x, pt.y + SNAP_S)], stroke);
         };
         let draw_snap_box = |pt: egui::Pos2| {
-            let stroke = egui::Stroke::new(1.0, self.colors.constraint_marker_selected);
+            let stroke = egui::Stroke::new(1.0_f32, self.colors.constraint_marker_selected);
             let tl = egui::Pos2::new(pt.x - SNAP_S, pt.y - SNAP_S);
             let tr = egui::Pos2::new(pt.x + SNAP_S, pt.y - SNAP_S);
             let bl = egui::Pos2::new(pt.x - SNAP_S, pt.y + SNAP_S);
@@ -391,7 +391,7 @@ impl EditorApp {
                 _ => mouse_screen,
             };
             painter.line_segment([p1, end_pt],
-                egui::Stroke::new(1.5, self.colors.preview_line));
+                egui::Stroke::new(1.5_f32, self.colors.preview_line));
             painter.circle_filled(p1, 4.0, self.colors.endpoint);
             if tangent_preview.is_some() {
                 draw_tangent_marker(&painter, p1, end_pt, self.colors.constraint_marker_selected);
@@ -526,7 +526,7 @@ impl EditorApp {
             let c = state.center.pos;
             let center = self.to_screen(c);
             painter.circle_stroke(center, state.r as f32 * self.scale,
-                egui::Stroke::new(1.5, self.colors.preview_line));
+                egui::Stroke::new(1.5_f32, self.colors.preview_line));
             painter.circle_filled(center, 4.0, self.colors.endpoint);
             if let Some(ref t) = state.center.snap { draw_snap_hint(center, t); }
             let edge_pt = self.to_screen(arael::vect::vect2d::new(
@@ -555,7 +555,7 @@ impl EditorApp {
             if rx > 1e-9 {
                 let end = arael::vect::vect2d::new(c.x + dir.x * rx, c.y + dir.y * rx);
                 let end_pt = self.to_screen(end);
-                let stroke = egui::Stroke::new(1.5, self.colors.preview_line);
+                let stroke = egui::Stroke::new(1.5_f32, self.colors.preview_line);
                 painter.line_segment([center_pt, end_pt], stroke);
                 if state.axis_fixed {
                     // Minor segment on the mouse's side of the axis.
@@ -625,7 +625,7 @@ impl EditorApp {
             let c3 = self.to_screen(opposite);
             let c2 = egui::Pos2::new(c3.x, c1.y);
             let c4 = egui::Pos2::new(c1.x, c3.y);
-            let stroke = egui::Stroke::new(1.5, self.colors.preview_line);
+            let stroke = egui::Stroke::new(1.5_f32, self.colors.preview_line);
             painter.line_segment([c1, c2], stroke);
             painter.line_segment([c2, c3], stroke);
             painter.line_segment([c3, c4], stroke);
@@ -659,7 +659,7 @@ impl EditorApp {
                     }).collect();
                     for w in points.windows(2) {
                         painter.line_segment([w[0], w[1]],
-                            egui::Stroke::new(1.5, self.colors.preview_line));
+                            egui::Stroke::new(1.5_f32, self.colors.preview_line));
                     }
                 }
                 match &state.live_snap {
@@ -681,7 +681,7 @@ impl EditorApp {
                 let end_sketch = end_snap.map_or(mouse_sketch, |(p, _)| p);
                 let end_pt = self.to_screen(end_sketch);
                 painter.line_segment([start_screen, end_pt],
-                    egui::Stroke::new(1.0, self.colors.preview_line));
+                    egui::Stroke::new(1.0_f32, self.colors.preview_line));
                 if let Some((_, t)) = &end_snap { draw_snap_hint(end_pt, t); }
                 if end_snap.is_none() { draw_cursor_cross(end_pt); }
             }
@@ -695,7 +695,7 @@ impl EditorApp {
             let min = egui::Pos2::new(start.x.min(end.x), start.y.min(end.y));
             let max = egui::Pos2::new(start.x.max(end.x), start.y.max(end.y));
             let col = self.colors.constraint_marker_selected;
-            let stroke = egui::Stroke::new(1.0, col);
+            let stroke = egui::Stroke::new(1.0_f32, col);
             painter.line_segment([min, egui::Pos2::new(max.x, min.y)], stroke);
             painter.line_segment([egui::Pos2::new(max.x, min.y), max], stroke);
             painter.line_segment([max, egui::Pos2::new(min.x, max.y)], stroke);
@@ -722,7 +722,7 @@ impl EditorApp {
         // Command cursor crosshair (full canvas lines)
         if let Some(pos) = self.command_cursor {
             let sp = self.to_screen(pos);
-            let stroke = egui::Stroke::new(0.5, self.colors.command_cursor);
+            let stroke = egui::Stroke::new(0.5_f32, self.colors.command_cursor);
             painter.line_segment(
                 [egui::Pos2::new(sp.x, rect.top()), egui::Pos2::new(sp.x, rect.bottom())], stroke);
             painter.line_segment(
@@ -869,7 +869,7 @@ impl EditorApp {
             return;
         }
         let color = if trim { self.colors.trim_preview } else { self.colors.split_preview };
-        let stroke = egui::Stroke::new(3.5, color);
+        let stroke = egui::Stroke::new(3.5_f32, color);
         match target {
             SplitTarget::Line(r) => {
                 let l = &self.sketch.lines[r];

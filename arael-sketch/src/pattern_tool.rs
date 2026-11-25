@@ -626,7 +626,7 @@ impl EditorApp {
             return;
         }
         let Some(plan) = state.plan.as_ref() else { return };
-        let stroke = egui::Stroke::new(1.5, self.colors.offset_preview);
+        let stroke = egui::Stroke::new(1.5_f32, self.colors.offset_preview);
         for poly in pattern::preview_polylines(plan, 48) {
             let pts: Vec<egui::Pos2> = poly.into_iter().map(|p| self.to_screen(p)).collect();
             if pts.len() == 1 {

@@ -247,7 +247,7 @@ impl EditorApp {
     pub fn draw_mirror_preview(&self, painter: &egui::Painter) {
         let Some(state) = self.mirror_tool.as_ref() else { return };
         let Some(plan) = state.plan.as_ref() else { return };
-        let stroke = egui::Stroke::new(1.5, self.colors.offset_preview);
+        let stroke = egui::Stroke::new(1.5_f32, self.colors.offset_preview);
         for poly in mirror::preview_polylines(&self.sketch, plan, 48) {
             let pts: Vec<egui::Pos2> = poly.into_iter().map(|p| self.to_screen(p)).collect();
             if pts.len() == 1 {

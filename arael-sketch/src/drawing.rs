@@ -191,7 +191,7 @@ impl EditorApp {
                 );
                 let se = self.to_screen(edge);
                 let si = self.to_screen(inner);
-                let stroke = egui::Stroke::new(1.0, color);
+                let stroke = egui::Stroke::new(1.0_f32, color);
                 painter.line_segment([se, si], stroke);
                 // Arrowhead at edge
                 let adx = si.x - se.x;
@@ -272,7 +272,7 @@ impl EditorApp {
         let sp1 = self.to_screen(p1_sketch);
         let sp2 = self.to_screen(p2_sketch);
 
-        let stroke = egui::Stroke::new(1.0, color);
+        let stroke = egui::Stroke::new(1.0_f32, color);
 
         // Extension lines
         // For point-line distance, the line-side extension goes from the nearest
@@ -283,8 +283,8 @@ impl EditorApp {
             let d1 = ((l.p1.value.x - p2_sketch.x).powi(2) + (l.p1.value.y - p2_sketch.y).powi(2)).sqrt();
             let d2 = ((l.p2.value.x - p2_sketch.x).powi(2) + (l.p2.value.y - p2_sketch.y).powi(2)).sqrt();
             let nearest = if d1 < d2 { self.to_screen(l.p1.value) } else { self.to_screen(l.p2.value) };
-            painter.line_segment([sp1, sq1], egui::Stroke::new(0.5, color));
-            painter.line_segment([nearest, sq2], egui::Stroke::new(0.5, color));
+            painter.line_segment([sp1, sq1], egui::Stroke::new(0.5_f32, color));
+            painter.line_segment([nearest, sq2], egui::Stroke::new(0.5_f32, color));
         } else if let DimensionKind::LineLineDistance(a_ref, b_ref) = kind {
             // Both extensions go from the nearest endpoint of each line
             // to the arrow tip on that line's side.
@@ -297,11 +297,11 @@ impl EditorApp {
             };
             let na = self.to_screen(nearest_on(la, p1_sketch));
             let nb = self.to_screen(nearest_on(lb, p2_sketch));
-            painter.line_segment([na, sq1], egui::Stroke::new(0.5, color));
-            painter.line_segment([nb, sq2], egui::Stroke::new(0.5, color));
+            painter.line_segment([na, sq1], egui::Stroke::new(0.5_f32, color));
+            painter.line_segment([nb, sq2], egui::Stroke::new(0.5_f32, color));
         } else {
-            painter.line_segment([sp1, sq1], egui::Stroke::new(0.5, color));
-            painter.line_segment([sp2, sq2], egui::Stroke::new(0.5, color));
+            painter.line_segment([sp1, sq1], egui::Stroke::new(0.5_f32, color));
+            painter.line_segment([sp2, sq2], egui::Stroke::new(0.5_f32, color));
         }
 
         // Arrowheads and dimension line
@@ -491,8 +491,8 @@ impl EditorApp {
                             color: egui::Color32, is_expr: bool, is_derived: bool, is_range: bool) -> (egui::Pos2, egui::Pos2) {
         let (ix, start_angle, sweep) = self.angle_dim_sector(a_ref, b_ref, supplement, offset);
         let radius = offset.y.max(0.3);
-        let stroke = egui::Stroke::new(1.0, color);
-        let ext_stroke = egui::Stroke::new(0.5, color);
+        let stroke = egui::Stroke::new(1.0_f32, color);
+        let ext_stroke = egui::Stroke::new(0.5_f32, color);
         let six = self.to_screen(ix);
 
         // Draw thin extension lines from intersection to arc endpoints
@@ -583,8 +583,8 @@ impl EditorApp {
         let ellipse_pt = |t: f64, rx: f64, ry: f64| -> vect2d {
             ellipse_point(vect2d::new(cx, cy), rx, ry, rot, t)
         };
-        let stroke = egui::Stroke::new(1.0, color);
-        let ext_stroke = egui::Stroke::new(0.5, color);
+        let stroke = egui::Stroke::new(1.0_f32, color);
+        let ext_stroke = egui::Stroke::new(0.5_f32, color);
         let center = vect2d::new(cx, cy);
         let sc = self.to_screen(center);
 
@@ -693,7 +693,7 @@ impl EditorApp {
         let s_inner = self.to_screen(inner_pt);
         let s_outer = self.to_screen(outer_pt);
 
-        let stroke = egui::Stroke::new(1.0, color);
+        let stroke = egui::Stroke::new(1.0_f32, color);
         painter.line_segment([s_inner, s_outer], stroke);
 
         // Arc-shaped extension lines when the leader direction falls
@@ -701,7 +701,7 @@ impl EditorApp {
         // the arc's circumference from its nearest end (start or end
         // angle) around to the leader's angle.
         let leader_angle = dir_y.atan2(dir_x);
-        let ext_arc_stroke = egui::Stroke::new(0.5, color);
+        let ext_arc_stroke = egui::Stroke::new(0.5_f32, color);
         for arc_obj in [a, b] {
             if arc_obj.closed { continue; }   // full circle covers all angles
             let (sa, sweep) = arc_span(arc_obj);
@@ -795,7 +795,7 @@ impl EditorApp {
         // center), mirror it from the inner arrow tip in the opposite
         // direction. Use the UNFLIPPED leader direction so the extension
         // points outward regardless of which sector the text is in.
-        let ext_stroke = egui::Stroke::new(0.5, color);
+        let ext_stroke = egui::Stroke::new(0.5_f32, color);
         let ext_pad = total_width / 2.0 + 4.0;
         if off_len > r_outer {
             let ext_end = egui::Pos2::new(s_text.x + lx * ext_pad,
@@ -825,15 +825,15 @@ impl EditorApp {
         let line_angle = dy.atan2(dx);
         let line_len = (dx * dx + dy * dy).sqrt().max(1e-6);
 
-        let stroke = egui::Stroke::new(1.0, color);
-        let ext_stroke = egui::Stroke::new(0.5, color);
+        let stroke = egui::Stroke::new(1.0_f32, color);
+        let ext_stroke = egui::Stroke::new(0.5_f32, color);
         let sp1 = self.to_screen(p1);
 
         // Draw thin helper x-axis line from p1
         let helper_len = line_len * 1.2;
         let x_end = vect2d::new(p1.x + helper_len, p1.y);
         let x_neg = vect2d::new(p1.x - helper_len * 0.2, p1.y);
-        let dash_stroke = egui::Stroke::new(0.5, color);
+        let dash_stroke = egui::Stroke::new(0.5_f32, color);
         // Simple dashed line
         let sx_end = self.to_screen(x_end);
         let sx_neg = self.to_screen(x_neg);
@@ -920,9 +920,9 @@ impl EditorApp {
         let center = a.center.value;
         let rotation = a.rotation.value;
 
-        let stroke = egui::Stroke::new(1.0, color);
-        let ext_stroke = egui::Stroke::new(0.5, color);
-        let dash_stroke = egui::Stroke::new(0.5, color);
+        let stroke = egui::Stroke::new(1.0_f32, color);
+        let ext_stroke = egui::Stroke::new(0.5_f32, color);
+        let dash_stroke = egui::Stroke::new(0.5_f32, color);
         let sc = self.to_screen(center);
 
         // Base length for helper lines: a bit longer than the major axis
@@ -1007,8 +1007,8 @@ impl EditorApp {
                                      p1: vect2d, p2: vect2d, horizontal: bool,
                                      value: f64, offset: vect2d, text_along: f64,
                                      color: egui::Color32, is_expr: bool, is_derived: bool, is_range: bool) -> (egui::Pos2, egui::Pos2) {
-        let stroke = egui::Stroke::new(1.0, color);
-        let ext_stroke = egui::Stroke::new(0.5, color);
+        let stroke = egui::Stroke::new(1.0_f32, color);
+        let ext_stroke = egui::Stroke::new(0.5_f32, color);
 
         // For hdistance: dimension line is horizontal at y = midY + offset.y
         // For vdistance: dimension line is vertical at x = midX + offset.y
@@ -2100,7 +2100,7 @@ impl EditorApp {
                 else { base_color };
             let width = if selected { if l.style == LineStyle::Solid { 2.0 } else { 1.0 } }
                 else if line_hovered { if l.style == LineStyle::Solid { 2.0 } else { 1.0 } }
-                else { if l.style == LineStyle::Solid { 1.5 } else { 1.0 } };
+                else { if l.style == LineStyle::Solid { 1.5 } else { 1.0_f32 } };
             draw_styled_polyline(painter, &[p1, p2], egui::Stroke::new(width, color), l.style);
 
             // Endpoints -- highlight individually if selected
@@ -2176,7 +2176,7 @@ impl EditorApp {
                 else { base_arc_color };
             let arc_width = if arc_selected { if a.style == LineStyle::Solid { 2.0 } else { 1.0 } }
                 else if arc_hovered { if a.style == LineStyle::Solid { 2.0 } else { 1.0 } }
-                else { if a.style == LineStyle::Solid { 1.5 } else { 1.0 } };
+                else { if a.style == LineStyle::Solid { 1.5 } else { 1.0_f32 } };
             let stroke = egui::Stroke::new(arc_width, arc_color);
 
             // Tessellate arc/circle
@@ -2253,10 +2253,10 @@ impl EditorApp {
         let sz = 10.0;
         painter.line_segment(
             [egui::Pos2::new(origin.x - sz, origin.y), egui::Pos2::new(origin.x + sz, origin.y)],
-            egui::Stroke::new(1.0, c.origin));
+            egui::Stroke::new(1.0_f32, c.origin));
         painter.line_segment(
             [egui::Pos2::new(origin.x, origin.y - sz), egui::Pos2::new(origin.x, origin.y + sz)],
-            egui::Stroke::new(1.0, c.origin));
+            egui::Stroke::new(1.0_f32, c.origin));
 
         // Constraint markers (drawn with painter lines)
         for marker in &self.constraint_markers {
@@ -2274,7 +2274,7 @@ impl EditorApp {
                 c.constraint_marker
             };
             let emphasized = selected || marker_hovered || flash;
-            let w = if emphasized { 2.0 } else { 1.5 };
+            let w = if emphasized { 2.0 } else { 1.5_f32 };
             let s = if emphasized { 7.0 } else { 5.0 }; // half-size
             let p = marker.pos;
             let stroke = egui::Stroke::new(w, color);
@@ -2379,7 +2379,7 @@ impl EditorApp {
             let hovered = self.hovered == Some(Selection::Meta(marker.mid));
             let color = if selected { c.constraint_marker_selected } else { c.constraint_marker };
             let emphasized = selected || hovered;
-            let w = if emphasized { 2.0 } else { 1.5 };
+            let w = if emphasized { 2.0 } else { 1.5_f32 };
             let s = if emphasized { 7.0 } else { 5.0 };
             let kind = self.sketch.meta_index(marker.mid).map(|i| self.sketch.metas[i].kind_name());
             match kind {
@@ -2507,7 +2507,7 @@ impl EditorApp {
             let sx = self.to_screen(vect2d::new(x as f64, 0.0)).x;
             painter.line_segment(
                 [egui::Pos2::new(sx, rect.top()), egui::Pos2::new(sx, rect.bottom())],
-                egui::Stroke::new(0.5, grid_color));
+                egui::Stroke::new(0.5_f32, grid_color));
             x += spacing;
         }
         let mut y = y_start;
@@ -2515,7 +2515,7 @@ impl EditorApp {
             let sy = self.to_screen(vect2d::new(0.0, y as f64)).y;
             painter.line_segment(
                 [egui::Pos2::new(rect.left(), sy), egui::Pos2::new(rect.right(), sy)],
-                egui::Stroke::new(0.5, grid_color));
+                egui::Stroke::new(0.5_f32, grid_color));
             y += spacing;
         }
     }

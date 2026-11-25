@@ -532,6 +532,7 @@ pub const TABLE_BYTES: usize = 4096;
 /// `bytes` copied into 8-byte aligned words, the last one zero-padded: an
 /// [`Arg::Bytes`] as a launch keeps it, so that a kernel's struct of
 /// `u64`s reads it in place.
+#[cfg(any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple")))]
 pub(crate) fn table_words(bytes: &[u8]) -> Vec<u64> {
     assert!(bytes.len() <= TABLE_BYTES, "a table argument of {} bytes, at most {TABLE_BYTES}", bytes.len());
     let mut w = vec![0u64; bytes.len().div_ceil(8)];
@@ -750,9 +751,11 @@ pub enum Lane {
 
 /// The side stream's forks open on a device ([`Device::fork`]), for the
 /// checks every runtime makes on them.
+#[cfg(any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple")))]
 #[derive(Debug, Default)]
 pub(crate) struct Forks(core::sync::atomic::AtomicUsize);
 
+#[cfg(any(feature = "cuda", feature = "hip", feature = "cpu", all(feature = "metal", target_vendor = "apple")))]
 impl Forks {
     /// Forks open.
     pub(crate) fn open(&self) -> usize {
