@@ -6443,3 +6443,71 @@ fn the_cost_check_allows_for_the_cpus_chain_of_adds() {
         assert!(chk.grad_err <= tol && chk.hess_err <= tol, "{wide:?}: {chk:?}");
     }
 }
+
+/// A frame with a position prior held as an optional child, whose
+/// constraint writes the frame's block and reads its rotation:
+/// `prior + R^T t`, as COLMAP's pose-prior bundle adjustment.
+#[arael::model]
+#[arael(constraint(parent.hb, {
+    let t = vect3sym::from_components(priorframe.tx, priorframe.ty, priorframe.tz);
+    let r = centreprior.prior + priorframe.rot.rotation_matrix().transpose() * t;
+    [r.x, r.y, r.z]
+}))]
+#[derive(Clone)]
+pub struct CentrePrior {
+    pub prior: vect3<f64>,
+}
+
+#[arael::model]
+#[derive(Clone)]
+pub struct PriorFrame {
+    pub rot: QuaternionParam<f64>,
+    pub tx: Param<f64>,
+    pub ty: Param<f64>,
+    pub tz: Param<f64>,
+    pub prior: Option<CentrePrior>,
+    pub hb: SelfBlock<PriorFrame>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct PriorFrames {
+    pub frames: refs::Vec<PriorFrame>,
+}
+
+/// A constraint writing its parent's block reads the parent's rotation
+/// through the parent's caches, as the parent's own constraints do: the
+/// root has a device form, the device assembles it as the CPU does, and
+/// the CPU's gradient matches finite differences.
+#[test]
+fn a_childs_constraint_reads_its_parents_rotation_on_the_device() {
+    use arael::__gpu::Wide;
+    let mut frames = refs::Vec::new();
+    for k in 0..5 {
+        let a = 0.3 * k as f64;
+        frames.push(PriorFrame {
+            rot: QuaternionParam::new(arael::quatern::quatern::from_euler_angles(vect3::new(0.1 * a, -0.2, a))),
+            tx: Param::new(1.0 + a),
+            ty: Param::new(-0.5 * a),
+            tz: Param::new(2.0),
+            prior: (k != 2).then(|| CentrePrior { prior: vect3::new(0.2 * a, 1.0, -a) }),
+            hb: SelfBlock::new(),
+        });
+    }
+    let mut s = PriorFrames { frames };
+    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x1 = perturbed(&x);
+    assert!(s.check_gradients(&x1).is_clean(), "the CPU's derivatives");
+    if !checks_f64("the frames with position priors") {
+        return;
+    }
+    for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!(chk.values > 0);
+        assert!((chk.device_cost - chk.host_cost).abs() <= tol * chk.host_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+    }
+}

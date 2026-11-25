@@ -6556,6 +6556,15 @@ pub fn generate_root_methods(
         } else {
             sub_targets.push((self_var_name.clone(), a_type.clone()));
         }
+        // A constraint writing its parent's block (`parent.hb`, a parent
+        // triplet) reads the parent's parameters under the parent's
+        // binding: its rotations read the parent's caches too, as the
+        // parent's own constraints do.
+        if let ParentBinding::Entity { var, type_name } = &parent_binding
+            && !sub_targets.iter().any(|(p, _)| p == var)
+        {
+            sub_targets.push((var.clone(), type_name.clone()));
+        }
         for (prefix, tname) in &sub_targets {
             if let Some(layout) = registry_lookup(tname) {
                 for ea in &layout.euler_angle_fields {
