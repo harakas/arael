@@ -41,3 +41,4 @@
  * When encountering missing API/functionality that would simplify implementation, add the API instead of doing hacky workarounds.
  * arael-sketch: when modifying or adding features to gui, if possible create tests for them using the gui test harness.
  * When adding timing debug API make sure time is not queried when debug is disabled.
+ * Threaded solves: no requirement for bit-exact result compared to single threaded. Also threaded solves are allowed to come to different results across tries (within floating point rounding). Same applies to GPU solves.
