@@ -651,7 +651,7 @@ pub fn schur_symbolic_threaded<I: Index>(
     eliminated: &[usize],
     threads: usize,
 ) -> Result<SchurSymbolic<I>, SchurError> {
-    symbolic(h, eliminated, threads, PATTERN_MIN_WORK)
+    symbolic(h, eliminated, threads, PATTERN_MIN_WORK, ELIM_MIN_OBSERVERS)
 }
 
 /// S's tiles over a range of kept columns: per column the range's tiles
@@ -671,13 +671,135 @@ impl<I> Default for PatternPart<I> {
     }
 }
 
+/// Observers a thread takes at least before the per-observer lists are
+/// split over more.
+const ELIM_MIN_OBSERVERS: usize = 1 << 15;
+
+/// What every range of the per-observer lists reads.
+struct ElimShared<'a, I> {
+    h: &'a SymbolicSparseBlockColMat<I>,
+    eliminated: &'a [usize],
+    diag: &'a [Option<I>],
+    obs: &'a [(I, bool, I)],
+    obs_ptr: &'a [usize],
+    kept_of: &'a [I],
+    kept_part: &'a [usize],
+}
+
+/// One range of eliminated blocks of the per-observer lists: its slices
+/// of the per-eliminated and the per-observation arrays, and its sums.
+struct ElimPart<'a, I> {
+    slots: core::ops::Range<usize>,
+    obs_base: usize,
+    diag: &'a mut [I],
+    w: &'a mut [I],
+    ncols: &'a mut [I],
+    uw: &'a mut [I],
+    utrans: &'a mut [bool],
+    trans: &'a mut [bool],
+    ca_off: &'a mut [I],
+    ow: &'a mut [I],
+    panel_col: &'a mut [I],
+    kept_off: &'a mut [I],
+    orig_off: &'a mut [I],
+    kept: &'a mut [I],
+    max_panel: usize,
+    max_ew: usize,
+    total_pairs: usize,
+    reduce_flops: f64,
+    shapes: Vec<((usize, usize, usize), usize)>,
+    /// The first eliminated block of the range without a diagonal block.
+    missing: Option<usize>,
+}
+
+impl<I: Index> ElimPart<'_, I> {
+    fn fill(&mut self, sh: &ElimShared<'_, I>) {
+        let h = sh.h;
+        // per eliminated block: its observers' widths so far, with their counts
+        let mut seen_widths: Vec<(usize, usize)> = Vec::new();
+        for slot in self.slots.clone() {
+            let ls = slot - self.slots.start;
+            let e = sh.eliminated[slot];
+            let Some(d) = sh.diag[slot] else {
+                self.missing = Some(e);
+                return;
+            };
+            self.diag[ls] = d;
+            let list = &sh.obs[sh.obs_ptr[slot]..sh.obs_ptr[slot + 1]];
+            let ew = h.col_span(e).len();
+            // Which GEMM shapes this problem actually needs, and how many
+            // contributions each carries. The widths are in hand here, so the
+            // census is free; a caller uses it to see whether the reduction is
+            // running on unrolled kernels or on the nano-gemm fallback. Every
+            // stage counts: the pair GEMMs, the reduction's one-column rhs
+            // update, and back-substitution's one-column update with the widths
+            // the other way round.
+            let shapes = &mut self.shapes;
+            let mut count_shape = |wa: usize, we: usize, wb: usize, n: usize| {
+                match shapes.iter_mut().find(|(k, _)| *k == (wa, we, wb)) {
+                    Some((_, c)) => *c += n,
+                    None => shapes.push(((wa, we, wb), n)),
+                }
+            };
+            // one pass over the observers, each width read once: the observer
+            // arrays, whether all observers share a width and orientation, the
+            // census, and the sums of the flops' closed form
+            let mut panel_cols = 0usize;
+            let mut uniform = list.first().map(|&(_, tr, ob)| (h.col_span(ob.zx()).len(), tr));
+            let (mut sum_w, mut sum_w2) = (0.0f64, 0.0f64);
+            seen_widths.clear();
+            for (i, &(hb, tr, oblk)) in list.iter().enumerate() {
+                let o = sh.obs_ptr[slot] + i - self.obs_base;
+                let span = h.col_span(oblk.zx());
+                let (w, k) = (span.len(), sh.kept_of[oblk.zx()]);
+                self.trans[o] = tr;
+                self.ca_off[o] = I::truncate(h.val_range(hb.zx()).start);
+                self.ow[o] = I::truncate(w);
+                self.panel_col[o] = I::truncate(panel_cols);
+                self.orig_off[o] = I::truncate(span.start);
+                self.kept_off[o] = I::truncate(sh.kept_part[k.zx()]);
+                self.kept[o] = k;
+                panel_cols += w;
+                if uniform.is_some_and(|(uw, ut)| uw != w || ut != tr) {
+                    uniform = None;
+                }
+                // the pairs (a, b), a <= b, counted at b against the widths of
+                // the observers up to it (b's own included): a few widths, not
+                // every a
+                match seen_widths.iter_mut().find(|(sw, _)| *sw == w) {
+                    Some((_, c)) => *c += 1,
+                    None => seen_widths.push((w, 1)),
+                }
+                for &(wa, c) in &seen_widths {
+                    count_shape(wa, ew, w, c);
+                }
+                count_shape(w, ew, 1, 1);
+                count_shape(ew, w, 1, 1);
+                sum_w += w as f64;
+                sum_w2 += (w * w) as f64;
+            }
+            self.ncols[ls] = I::truncate(panel_cols);
+            panel_cols += 1; // + the rhs column
+            self.uw[ls] = I::truncate(uniform.map_or(0, |(w, _)| w));
+            self.utrans[ls] = uniform.is_some_and(|(_, tr)| tr);
+            self.total_pairs += list.len() * (list.len() + 1) / 2;
+            // sum over pairs a <= b of 2 * w_a * ew * w_b, in closed form
+            self.reduce_flops += ew as f64 * (sum_w * sum_w + sum_w2);
+            self.max_ew = self.max_ew.max(ew);
+            self.max_panel = self.max_panel.max(ew * panel_cols);
+            self.w[ls] = I::truncate(ew);
+        }
+    }
+}
+
 /// [`schur_symbolic_threaded`], a thread taking at least `min_work` of
-/// S's pattern.
+/// S's pattern and `min_obs` observers of the per-observer lists.
 fn symbolic<I: Index>(
     h: &SymbolicSparseBlockColMat<I>,
     eliminated: &[usize],
     threads: usize,
     min_work: usize,
+    min_obs: usize,
 ) -> Result<SchurSymbolic<I>, SchurError> {
     let nblk = h.nblk_cols();
     assert_eq!(h.nblk_rows(), nblk, "square block partition required");
@@ -755,100 +877,101 @@ fn symbolic<I: Index>(
         }
     }
 
-    // per-eliminated flat lists (observer order = ascending block id)
-    let mut elim_diag = Vec::with_capacity(ne);
-    let mut elim_w = Vec::with_capacity(ne);
-    let mut elim_obs_ptr = Vec::with_capacity(ne + 1);
-    let mut elim_ncols = Vec::with_capacity(ne);
-    let mut elim_uw = Vec::with_capacity(ne);
-    let mut elim_utrans = Vec::with_capacity(ne);
-    // one entry per observation, and the count is already known: reserving
-    // keeps eight arrays from growing by doubling through it
+    // per-eliminated flat lists (observer order = ascending block id), by
+    // ranges of eliminated blocks on up to `threads` threads: a range's
+    // observers are a range of the per-observation arrays, so each thread
+    // fills slices of its own, and the sums are merged in range order
     let n_obs = obs.len();
-    let mut obs_trans = Vec::with_capacity(n_obs);
-    let mut obs_block = Vec::with_capacity(n_obs);
-    let mut obs_ca_off = Vec::with_capacity(n_obs);
-    let mut obs_w = Vec::with_capacity(n_obs);
-    let mut obs_panel_col = Vec::with_capacity(n_obs);
-    let mut obs_kept_off = Vec::with_capacity(n_obs);
-    let mut obs_orig_off = Vec::with_capacity(n_obs);
-    let mut obs_kept = Vec::with_capacity(n_obs);
+    let zero = I::truncate(0);
+    let mut elim_diag = vec![zero; ne];
+    let mut elim_w = vec![zero; ne];
+    let elim_obs_ptr: Vec<I> = obs_ptr.iter().map(|&o| I::truncate(o)).collect();
+    let mut elim_ncols = vec![zero; ne];
+    let mut elim_uw = vec![zero; ne];
+    let mut elim_utrans = vec![false; ne];
+    let mut obs_trans = vec![false; n_obs];
+    let mut obs_ca_off = vec![zero; n_obs];
+    let mut obs_w = vec![zero; n_obs];
+    let mut obs_panel_col = vec![zero; n_obs];
+    let mut obs_kept_off = vec![zero; n_obs];
+    let mut obs_orig_off = vec![zero; n_obs];
+    let mut obs_kept = vec![zero; n_obs];
+    let parts = threads.min(n_obs / min_obs.max(1)).clamp(1, ne.max(1));
+    let mut slot_cuts = vec![0usize];
+    for t in 1..parts {
+        let at = obs_ptr.partition_point(|&o| o < n_obs * t / parts).min(ne);
+        slot_cuts.push(at.max(slot_cuts[t - 1]));
+    }
+    slot_cuts.push(ne);
+    let obs_cuts: Vec<usize> = slot_cuts.iter().map(|&sl| obs_ptr[sl]).collect();
+    let mut tasks: Vec<ElimPart<'_, I>> = {
+        let mut e_diag = crate::cut_slices(&mut elim_diag, &slot_cuts).into_iter();
+        let mut e_w = crate::cut_slices(&mut elim_w, &slot_cuts).into_iter();
+        let mut e_ncols = crate::cut_slices(&mut elim_ncols, &slot_cuts).into_iter();
+        let mut e_uw = crate::cut_slices(&mut elim_uw, &slot_cuts).into_iter();
+        let mut e_utrans = crate::cut_slices(&mut elim_utrans, &slot_cuts).into_iter();
+        let mut o_trans = crate::cut_slices(&mut obs_trans, &obs_cuts).into_iter();
+        let mut o_ca_off = crate::cut_slices(&mut obs_ca_off, &obs_cuts).into_iter();
+        let mut o_w = crate::cut_slices(&mut obs_w, &obs_cuts).into_iter();
+        let mut o_panel_col = crate::cut_slices(&mut obs_panel_col, &obs_cuts).into_iter();
+        let mut o_kept_off = crate::cut_slices(&mut obs_kept_off, &obs_cuts).into_iter();
+        let mut o_orig_off = crate::cut_slices(&mut obs_orig_off, &obs_cuts).into_iter();
+        let mut o_kept = crate::cut_slices(&mut obs_kept, &obs_cuts).into_iter();
+        (0..parts)
+            .map(|t| ElimPart {
+                slots: slot_cuts[t]..slot_cuts[t + 1],
+                obs_base: obs_cuts[t],
+                diag: e_diag.next().unwrap(),
+                w: e_w.next().unwrap(),
+                ncols: e_ncols.next().unwrap(),
+                uw: e_uw.next().unwrap(),
+                utrans: e_utrans.next().unwrap(),
+                trans: o_trans.next().unwrap(),
+                ca_off: o_ca_off.next().unwrap(),
+                ow: o_w.next().unwrap(),
+                panel_col: o_panel_col.next().unwrap(),
+                kept_off: o_kept_off.next().unwrap(),
+                orig_off: o_orig_off.next().unwrap(),
+                kept: o_kept.next().unwrap(),
+                max_panel: 0,
+                max_ew: 0,
+                total_pairs: 0,
+                reduce_flops: 0.0,
+                shapes: Vec::new(),
+                missing: None,
+            })
+            .collect()
+    };
+    let shared = ElimShared { h, eliminated, diag: &diag, obs: &obs, obs_ptr: &obs_ptr, kept_of: &kept_of, kept_part: &kept_part };
+    if let [one] = &mut tasks[..] {
+        one.fill(&shared);
+    } else {
+        crate::pool::run_over(&mut tasks, |_, t| t.fill(&shared));
+    }
     let mut max_panel = 0usize;
     let mut max_ew = 0usize;
     let mut total_pairs = 0usize;
+    // each term an integer below 2^53: the sum is exact in any order
     let mut reduce_flops = 0.0f64;
     let mut shapes: Vec<((usize, usize, usize), usize)> = Vec::new();
-    // per eliminated block: its observers' widths so far, with their counts
-    let mut seen_widths: Vec<(usize, usize)> = Vec::new();
-    elim_obs_ptr.push(I::truncate(0));
-    for slot in 0..ne {
-        let e = eliminated[slot];
-        let d = diag[slot].ok_or(SchurError::MissingDiagonal { block: e })?;
-        elim_diag.push(d);
-        let list = &obs[obs_ptr[slot]..obs_ptr[slot + 1]];
-        let ew = h.col_span(e).len();
-        // Which GEMM shapes this problem actually needs, and how many
-        // contributions each carries. The widths are in hand here, so the
-        // census is free; a caller uses it to see whether the reduction is
-        // running on unrolled kernels or on the nano-gemm fallback. Every
-        // stage counts: the pair GEMMs, the reduction's one-column rhs
-        // update, and back-substitution's one-column update with the widths
-        // the other way round.
-        let mut count_shape = |wa: usize, we: usize, wb: usize, n: usize| {
-            match shapes.iter_mut().find(|(k, _)| *k == (wa, we, wb)) {
-                Some((_, c)) => *c += n,
-                None => shapes.push(((wa, we, wb), n)),
-            }
-        };
-        // one pass over the observers, each width read once: the observer
-        // arrays, whether all observers share a width and orientation, the
-        // census, and the sums of the flops' closed form
-        let mut panel_cols = 0usize;
-        let mut uniform = list.first().map(|&(_, tr, ob)| (h.col_span(ob.zx()).len(), tr));
-        let (mut sum_w, mut sum_w2) = (0.0f64, 0.0f64);
-        seen_widths.clear();
-        for &(hb, tr, oblk) in list {
-            let span = h.col_span(oblk.zx());
-            let (w, k) = (span.len(), kept_of[oblk.zx()]);
-            obs_trans.push(tr);
-            obs_block.push(oblk);
-            obs_ca_off.push(I::truncate(h.val_range(hb.zx()).start));
-            obs_w.push(I::truncate(w));
-            obs_panel_col.push(I::truncate(panel_cols));
-            obs_orig_off.push(I::truncate(span.start));
-            obs_kept_off.push(I::truncate(kept_part[k.zx()]));
-            obs_kept.push(k);
-            panel_cols += w;
-            if uniform.is_some_and(|(uw, ut)| uw != w || ut != tr) {
-                uniform = None;
-            }
-            // the pairs (a, b), a <= b, counted at b against the widths of
-            // the observers up to it (b's own included): a few widths, not
-            // every a
-            match seen_widths.iter_mut().find(|(sw, _)| *sw == w) {
-                Some((_, c)) => *c += 1,
-                None => seen_widths.push((w, 1)),
-            }
-            for &(wa, c) in &seen_widths {
-                count_shape(wa, ew, w, c);
-            }
-            count_shape(w, ew, 1, 1);
-            count_shape(ew, w, 1, 1);
-            sum_w += w as f64;
-            sum_w2 += (w * w) as f64;
+    for t in &tasks {
+        if let Some(block) = t.missing {
+            return Err(SchurError::MissingDiagonal { block });
         }
-        elim_ncols.push(I::truncate(panel_cols));
-        panel_cols += 1; // + the rhs column
-        elim_uw.push(I::truncate(uniform.map_or(0, |(w, _)| w)));
-        elim_utrans.push(uniform.is_some_and(|(_, tr)| tr));
-        total_pairs += list.len() * (list.len() + 1) / 2;
-        // sum over pairs a <= b of 2 * w_a * ew * w_b, in closed form
-        reduce_flops += ew as f64 * (sum_w * sum_w + sum_w2);
-        max_ew = max_ew.max(ew);
-        max_panel = max_panel.max(ew * panel_cols);
-        elim_w.push(I::truncate(ew));
-        elim_obs_ptr.push(I::truncate(obs_trans.len()));
+        max_panel = max_panel.max(t.max_panel);
+        max_ew = max_ew.max(t.max_ew);
+        total_pairs += t.total_pairs;
+        reduce_flops += t.reduce_flops;
+        // in the order the shapes are first met, as one range would list them
+        for &(k, n) in &t.shapes {
+            match shapes.iter_mut().find(|(sk, _)| *sk == k) {
+                Some((_, c)) => *c += n,
+                None => shapes.push((k, n)),
+            }
+        }
     }
+    drop(tasks);
+    drop(shared);
 
     // S structure and every target position in one column-major pass,
     // no sorting: a stamp array unions each kept column's rows -- its
@@ -860,39 +983,73 @@ fn symbolic<I: Index>(
     // per contribution; nothing is searched.
     let nk = kept.len();
     // inverted clique index: per kept column, the (slot, bi) of every
-    // observer b in that column (CSR layout)
-    let mut land_ptr = vec![0usize; nk + 1];
-    for b in &obs_block {
-        land_ptr[kept_of[b.zx()].zx() + 1] += 1;
-    }
-    for k in 0..nk {
-        land_ptr[k + 1] += land_ptr[k];
-    }
-    let mut land_ent = vec![(0u32, 0u32); *land_ptr.last().unwrap()];
-    {
-        let mut cursor = land_ptr.clone();
-        for slot in 0..ne {
-            let start = elim_obs_ptr[slot].zx();
-            for (bi, o) in (start..elim_obs_ptr[slot + 1].zx()).enumerate() {
-                let kc = kept_of[obs_block[o].zx()].zx();
-                land_ent[cursor[kc]] = (slot as u32, bi as u32);
-                cursor[kc] += 1;
+    // observer b in that column (CSR layout), in slot order. By the
+    // observer lists' ranges: each counts its observers and their pairs
+    // per kept column, then places its observers after the earlier
+    // ranges' of the same column.
+    let mut land_parts: Vec<(Vec<usize>, Vec<usize>)> = vec![(Vec::new(), Vec::new()); parts];
+    let count = |t: usize, (at, pairs): &mut (Vec<usize>, Vec<usize>)| {
+        at.resize(nk, 0);
+        pairs.resize(nk, 0);
+        for slot in slot_cuts[t]..slot_cuts[t + 1] {
+            for (bi, o) in (obs_ptr[slot]..obs_ptr[slot + 1]).enumerate() {
+                let kc = obs_kept[o].zx();
+                at[kc] += 1;
+                pairs[kc] += bi + 1;
             }
         }
+    };
+    if let [one] = &mut land_parts[..] {
+        count(0, one);
+    } else {
+        crate::pool::run_over(&mut land_parts, count);
     }
+    // per kept column where its observers and its pairs start; per range
+    // and column where the range's first observer of the column goes
+    let mut land_ptr = vec![0usize; nk + 1];
+    let mut col_pairs = vec![0usize; nk + 1];
+    for kc in 0..nk {
+        let (mut n, mut pairs) = (0usize, 0usize);
+        for (at, p) in land_parts.iter_mut() {
+            let k = at[kc];
+            at[kc] = land_ptr[kc] + n;
+            n += k;
+            pairs += p[kc];
+        }
+        land_ptr[kc + 1] = land_ptr[kc] + n;
+        col_pairs[kc + 1] = col_pairs[kc] + pairs;
+    }
+    let mut land_ent = vec![(0u32, 0u32); land_ptr[nk]];
+    {
+        let out = crate::pool::SharedMut(land_ent.as_mut_ptr());
+        let place = |t: usize, (at, _): &mut (Vec<usize>, Vec<usize>)| {
+            for slot in slot_cuts[t]..slot_cuts[t + 1] {
+                for (bi, o) in (obs_ptr[slot]..obs_ptr[slot + 1]).enumerate() {
+                    let kc = obs_kept[o].zx();
+                    // A (range, column) pair owns the entries from its
+                    // offset above to the next range's: no two writes
+                    // meet, and every write is below land_ptr[nk].
+                    unsafe { *out.ptr().add(at[kc]) = (slot as u32, bi as u32) };
+                    at[kc] += 1;
+                }
+            }
+        };
+        if let [one] = &mut land_parts[..] {
+            place(0, one);
+        } else {
+            crate::pool::run_over(&mut land_parts, place);
+        }
+    }
+    drop(land_parts);
 
-    // per kept column, where its Hkk copies (in column order) and its pairs
-    // start
+    // per kept column, where its Hkk copies (in column order) start
     debug_assert!(copy_kk.windows(2).all(|c| c[0].2 <= c[1].2), "the copies in column order");
     let mut copy_at = vec![0usize; nk + 1];
     for &(_, _, kc) in &copy_kk {
         copy_at[kc + 1] += 1;
     }
-    let mut col_pairs = vec![0usize; nk + 1];
     for kc in 0..nk {
         copy_at[kc + 1] += copy_at[kc];
-        let pairs: usize = land_ent[land_ptr[kc]..land_ptr[kc + 1]].iter().map(|&(_, bi)| bi as usize + 1).sum();
-        col_pairs[kc + 1] = col_pairs[kc] + pairs;
     }
     debug_assert_eq!(col_pairs[nk], total_pairs);
 
@@ -3035,12 +3192,33 @@ mod tests {
         let anchors: Vec<(usize, usize)> = cells.iter().map(|&(r, c)| (part[r], part[c])).collect();
         let (h, _) = SymbolicSparseBlockColMat::<usize>::from_scalar_coords(part.clone(), part, anchors.len(), |k| anchors[k]);
         let elim: Vec<usize> = (nk..nk + ne).collect();
-        let one = symbolic(&h, &elim, 1, PATTERN_MIN_WORK);
+        let one = symbolic(&h, &elim, 1, PATTERN_MIN_WORK, ELIM_MIN_OBSERVERS);
         assert!(one.as_ref().unwrap().pair_count() > 1000, "pairs: {}", one.as_ref().unwrap().pair_count());
         let want = format!("{one:?}");
-        for (threads, min_work) in [(2, 1), (3, 500), (8, 1), (64, 1)] {
-            let got = symbolic(&h, &elim, threads, min_work);
-            assert!(format!("{got:?}") == want, "{threads} threads, {min_work} at least");
+        for (threads, min_work, min_obs) in [(2, 1, ELIM_MIN_OBSERVERS), (3, 500, 1), (8, 1, 1), (8, 1, 100), (64, 1, 1)] {
+            let got = symbolic(&h, &elim, threads, min_work, min_obs);
+            assert!(format!("{got:?}") == want, "{threads} threads, {min_work} pattern work and {min_obs} observers at least");
+        }
+    }
+
+    /// The per-observer lists split over threads report the first
+    /// eliminated block without a diagonal block, as one thread does.
+    #[test]
+    fn a_missing_diagonal_on_threads_is_the_first_one() {
+        let (nk, ne) = (4usize, 64usize);
+        let part: Vec<usize> = (0..=nk + ne).map(|b| 2 * b).collect();
+        // every kept block on its diagonal, the eliminated ones from 40 on not
+        let mut cells: Vec<(usize, usize)> = (0..nk).map(|b| (b, b)).collect();
+        cells.extend((nk..40).map(|e| (e, e)));
+        cells.extend((nk..nk + ne).map(|e| (e % nk, e)));
+        let anchors: Vec<(usize, usize)> = cells.iter().map(|&(r, c)| (part[r], part[c])).collect();
+        let (h, _) = SymbolicSparseBlockColMat::<usize>::from_scalar_coords(part.clone(), part, anchors.len(), |k| anchors[k]);
+        let elim: Vec<usize> = (nk..nk + ne).collect();
+        for threads in [1, 2, 8] {
+            match symbolic(&h, &elim, threads, 1, 1) {
+                Err(SchurError::MissingDiagonal { block }) => assert_eq!(block, 40, "{threads} threads"),
+                other => panic!("{threads} threads: {:?}", other.map(|_| ())),
+            }
         }
     }
 

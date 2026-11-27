@@ -273,6 +273,34 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         Self::covering_with_cells(row_part, col_part, n_coords, &coord).0
     }
 
+    /// [`covering`](Self::covering) on up to `threads` threads of the
+    /// worker pool ([`crate::pool`]), each taking at least [`COVER_MIN`]
+    /// coordinates: the cells' keys are formed by ranges of coordinates and
+    /// sorted by [`sort_keys_threaded`](crate::sort_keys_threaded). The
+    /// structure is the one `covering` builds.
+    pub fn covering_threaded(
+        row_part: Vec<I>,
+        col_part: Vec<I>,
+        n_coords: usize,
+        coord: impl Fn(usize) -> (usize, usize) + Sync,
+        threads: usize,
+    ) -> Self {
+        let parts = threads.min(n_coords / COVER_MIN).max(1);
+        if parts == 1 {
+            return Self::covering(row_part, col_part, n_coords, coord);
+        }
+        let (blk_row_of, blk_col_of) = block_tables(&row_part, &col_part);
+        // per range of coordinates its run-compressed keys, in range order
+        let step = n_coords.div_ceil(parts);
+        let mut keys: Vec<Vec<u64>> = vec![Vec::new(); parts];
+        crate::pool::run_over(&mut keys, |p, out| {
+            *out = cell_keys(p * step..((p + 1) * step).min(n_coords), &coord, &blk_row_of, &blk_col_of);
+        });
+        let cells = keys.concat();
+        drop(keys);
+        Self::from_cell_keys(row_part, col_part, cells, threads)
+    }
+
     /// The structure, the sorted keys of its cells (block column over
     /// block row) and the two scalar-to-block tables.
     fn covering_with_cells(
@@ -281,46 +309,22 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         n_coords: usize,
         coord: &impl Fn(usize) -> (usize, usize),
     ) -> (Self, Vec<u64>, Vec<u32>, Vec<u32>) {
-        // the partitions are the caller's; the rest is built to hold
-        // new_checked's rules
-        monotone_from_zero(&row_part);
-        monotone_from_zero(&col_part);
-        // scalar index -> block index lookup tables, O(n) once
-        let of = |part: &[I]| {
-            let nblk = part.len() - 1;
-            let mut of = vec![0u32; part[nblk].zx()];
-            for b in 0..nblk {
-                for i in part[b].zx()..part[b + 1].zx() {
-                    of[i] = b as u32;
-                }
-            }
-            of
-        };
-        let blk_row_of = of(&row_part);
-        let blk_col_of = of(&col_part);
+        let (blk_row_of, blk_col_of) = block_tables(&row_part, &col_part);
+        let cells = cell_keys(0..n_coords, coord, &blk_row_of, &blk_col_of);
+        let (this, cells) = Self::from_cell_keys_kept(row_part, col_part, cells, 1);
+        (this, cells, blk_row_of, blk_col_of)
+    }
 
-        // structure pass: the set of touched cells, as (block_col,
-        // block_row) packed for one sort. After sort + dedup the vector
-        // IS the block enumeration in storage order (columns ascending,
-        // rows ascending within a column). Contributions arrive
-        // block-object by block-object, so consecutive coordinates
-        // usually share a cell: run-compressing before the sort shrinks
-        // it from one key per scalar to roughly one per contributing
-        // block object.
-        let key = |i: usize, j: usize| {
-            ((blk_col_of[j] as u64) << 32) | blk_row_of[i] as u64
-        };
-        let mut cells: Vec<u64> = Vec::with_capacity(1024);
-        let mut last = u64::MAX;
-        for k in 0..n_coords {
-            let (i, j) = coord(k);
-            let c = key(i, j);
-            if c != last {
-                cells.push(c);
-                last = c;
-            }
-        }
-        crate::sort_keys(&mut cells, 0..64);
+    /// The structure of the cells `cells` (keys of [`cell_keys`], in any
+    /// order, with repeats), sorted on up to `threads` threads.
+    fn from_cell_keys(row_part: Vec<I>, col_part: Vec<I>, cells: Vec<u64>, threads: usize) -> Self {
+        Self::from_cell_keys_kept(row_part, col_part, cells, threads).0
+    }
+
+    /// [`from_cell_keys`](Self::from_cell_keys), and the cells' keys
+    /// sorted and unique: the blocks in storage order.
+    fn from_cell_keys_kept(row_part: Vec<I>, col_part: Vec<I>, mut cells: Vec<u64>, threads: usize) -> (Self, Vec<u64>) {
+        crate::sort_keys_threaded(&mut cells, 0..64, threads);
         cells.dedup();
 
         let nblk_cols = col_part.len() - 1;
@@ -361,7 +365,7 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         let this = Self::new_built(
             row_part, col_part, blk_col_ptr, blk_row_idx, val_ptr,
         );
-        (this, cells, blk_row_of, blk_col_of)
+        (this, cells)
     }
 
     /// row partition: block-row `r` spans scalar rows
@@ -1061,6 +1065,50 @@ impl<'a, I: Index> PositionResolver<'a, I> {
     }
 }
 
+/// Coordinates a thread of [`SymbolicSparseBlockColMat::covering_threaded`]
+/// takes at least.
+pub const COVER_MIN: usize = 64 * 1024;
+
+/// The scalar-to-block lookup tables of the two partitions: per scalar row
+/// its block row, per scalar column its block column.
+fn block_tables<I: Index>(row_part: &[I], col_part: &[I]) -> (Vec<u32>, Vec<u32>) {
+    // the partitions are the caller's; the rest is built to hold
+    // new_checked's rules
+    monotone_from_zero(row_part);
+    monotone_from_zero(col_part);
+    let of = |part: &[I]| {
+        let nblk = part.len() - 1;
+        let mut of = vec![0u32; part[nblk].zx()];
+        for b in 0..nblk {
+            for i in part[b].zx()..part[b + 1].zx() {
+                of[i] = b as u32;
+            }
+        }
+        of
+    };
+    (of(row_part), of(col_part))
+}
+
+/// The cells the coordinates `range` touch, as (block column, block row)
+/// keys packed for one sort: sorted and unique they are the blocks in
+/// storage order (columns ascending, rows ascending within a column).
+/// Contributions arrive block object by block object, so consecutive
+/// coordinates usually share a cell: run-compressing here shrinks the keys
+/// from one per scalar to about one per contributing block object.
+fn cell_keys(range: core::ops::Range<usize>, coord: &impl Fn(usize) -> (usize, usize), blk_row_of: &[u32], blk_col_of: &[u32]) -> Vec<u64> {
+    let mut cells: Vec<u64> = Vec::with_capacity(1024);
+    let mut last = u64::MAX;
+    for k in range {
+        let (i, j) = coord(k);
+        let c = ((blk_col_of[j] as u64) << 32) | blk_row_of[i] as u64;
+        if c != last {
+            cells.push(c);
+            last = c;
+        }
+    }
+    cells
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1081,6 +1129,31 @@ mod tests {
         assert!(s.nblocks() > 500, "blocks: {}", s.nblocks());
         let checked = SymbolicSparseBlockColMat::new_checked(s.row_part.clone(), s.col_part.clone(), s.blk_col_ptr.clone(), s.blk_row_idx.clone(), s.val_ptr.clone());
         assert_eq!(checked.nblocks(), s.nblocks());
+    }
+
+    /// On threads `covering` builds the structure it builds on one: the
+    /// coordinates in runs of one cell, in no order, with repeats, cut
+    /// into ranges whose runs straddle the cuts.
+    #[test]
+    fn covering_on_threads_is_covering_on_one() {
+        let part: Vec<usize> = (0..=3000).map(|b| 2 * b + b / 4).collect();
+        let n = part[3000];
+        let mut x = 7u64;
+        let mut next = || {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 33) as usize % n
+        };
+        // runs of three coordinates in one scalar cell
+        let coords: Vec<(usize, usize)> = (0..(5 * COVER_MIN / 3)).flat_map(|_| {
+            let c = (next(), next());
+            [c, c, c]
+        }).collect();
+        let one = SymbolicSparseBlockColMat::covering(part.clone(), part.clone(), coords.len(), |k| coords[k]);
+        for threads in [2, 3, 8] {
+            let many = SymbolicSparseBlockColMat::covering_threaded(part.clone(), part.clone(), coords.len(), |k| coords[k], threads);
+            let parts = |s: &SymbolicSparseBlockColMat<usize>| (s.row_part.clone(), s.col_part.clone(), s.blk_col_ptr.clone(), s.blk_row_idx.clone(), s.val_ptr.clone());
+            assert_eq!(parts(&many), parts(&one), "{threads} threads");
+        }
     }
 
     /// `covering` refuses a partition that decreases.

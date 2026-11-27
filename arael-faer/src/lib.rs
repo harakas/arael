@@ -326,6 +326,120 @@ pub fn sort_keys(keys: &mut Vec<u64>, bits: core::ops::Range<u32>) {
     }
 }
 
+/// `v` cut at the ascending positions `cuts` (relative to `cuts[0]`, the
+/// first being `v`'s start) into `cuts.len() - 1` slices, for the tasks of
+/// one [`pool::run_over`] to fill each its own. Inner API, shared with
+/// arael-gpu.
+///
+/// ```
+/// let mut v = [1, 2, 3, 4, 5];
+/// let parts = arael_faer::cut_slices(&mut v, &[0, 2, 5]);
+/// assert_eq!(parts.len(), 2);
+/// assert_eq!(parts[1], [3, 4, 5]);
+/// ```
+pub fn cut_slices<'a, T>(mut v: &'a mut [T], cuts: &[usize]) -> Vec<&'a mut [T]> {
+    let mut out = Vec::with_capacity(cuts.len().saturating_sub(1));
+    let mut at = cuts[0];
+    for &c in &cuts[1..] {
+        let (a, b) = core::mem::take(&mut v).split_at_mut(c - at);
+        out.push(a);
+        v = b;
+        at = c;
+    }
+    out
+}
+
+/// Keys a thread of [`sort_keys_threaded`] takes at least.
+pub const SORT_MIN: usize = 64 * 1024;
+
+/// [`sort_keys`] on up to `threads` threads of the worker pool
+/// ([`pool`]), each taking a range of at least [`SORT_MIN`] keys. Per pass
+/// every thread counts its range's digits, then places its range's keys
+/// after the earlier ranges' keys of the same digit, so the result is
+/// [`sort_keys`]'s, the order of keys equal in `bits` included. Inner API,
+/// shared with arael.
+///
+/// # Panics
+///
+/// As [`sort_keys`].
+pub fn sort_keys_threaded(keys: &mut Vec<u64>, bits: core::ops::Range<u32>, threads: usize) {
+    let n = keys.len();
+    let parts = threads.min(n / SORT_MIN).max(1);
+    if parts == 1 {
+        return sort_keys(keys, bits);
+    }
+    assert!(bits.end <= 64 && n <= u32::MAX as usize);
+    if bits.start >= bits.end {
+        return;
+    }
+    let step = n.div_ceil(parts);
+    let range = |p: usize| p * step..((p + 1) * step).min(n);
+    let below = (1u64 << bits.start) - 1;
+    let within = if bits.end == 64 { u64::MAX } else { (1u64 << bits.end) - 1 };
+    // the bits any key sets, by range
+    let mut set = vec![0u64; parts];
+    pool::run_over(&mut set, |p, s| *s = keys[range(p)].iter().fold(0u64, |acc, &k| acc | k));
+    let set = set.iter().fold(0u64, |acc, &s| acc | s) & within & !below;
+    if set == 0 {
+        return;
+    }
+    let end = 64 - set.leading_zeros();
+    let width_max = (u32::BITS - (n as u32).leading_zeros()).clamp(8, 16);
+    // per range, per digit: its count, then where its next key goes
+    let mut counts: Vec<Vec<u32>> = vec![vec![0u32; 1usize << width_max]; parts];
+    let mut tmp: Vec<u64> = vec![0u64; n];
+    let mut next = bits.start;
+    while next < end {
+        let shift = next;
+        let width = (end - shift).min(width_max);
+        next += width;
+        let mask = (1u64 << width) - 1;
+        let digits = 1usize << width;
+        let digit = |k: u64| ((k >> shift) & mask) as usize;
+        {
+            let keys = &keys[..];
+            pool::run_over(&mut counts, |p, c| {
+                c[..digits].fill(0);
+                for &k in &keys[range(p)] {
+                    c[digit(k)] += 1;
+                }
+            });
+        }
+        // digit by digit, range by range: where each range's first key of
+        // the digit goes
+        let mut at = 0u32;
+        let mut shared = false;
+        for d in 0..digits {
+            let start = at;
+            for c in counts.iter_mut() {
+                let k = c[d];
+                c[d] = at;
+                at += k;
+            }
+            shared |= at - start == n as u32;
+        }
+        if shared {
+            continue;
+        }
+        let out = pool::SharedMut(tmp.as_mut_ptr());
+        {
+            let keys = &keys[..];
+            pool::run_over(&mut counts, |p, c| {
+                for &k in &keys[range(p)] {
+                    let d = digit(k);
+                    // The ranges of distinct (range, digit) pairs are
+                    // disjoint by the offsets above, and each counter
+                    // stays inside its own: no two writes meet, and every
+                    // write is below n.
+                    unsafe { *out.ptr().add(c[d] as usize) = k };
+                    c[d] += 1;
+                }
+            });
+        }
+        core::mem::swap(keys, &mut tmp);
+    }
+}
+
 pub mod envelope;
 pub mod bsc;
 pub mod cg;
@@ -400,6 +514,40 @@ mod sort_keys_tests {
         sort_keys(&mut radix, 16..36);
         plain.sort_by_key(|k| (k >> 16) & 0xf_ffff);
         assert_eq!(radix, plain);
+    }
+
+    /// On threads the result is the one-thread sort's: over every bit,
+    /// over part of the bits with the order of equal keys kept, a digit
+    /// every key shares, and below the size a second thread takes.
+    #[test]
+    fn on_threads_it_is_the_one_thread_sort() {
+        let n = 5 * SORT_MIN as u64 + 17;
+        for threads in [2, 3, 8] {
+            for bits in [64, 40, 20, 3] {
+                let mut many = keys(n, bits);
+                let mut one = many.clone();
+                sort_keys_threaded(&mut many, 0..64, threads);
+                sort_keys(&mut one, 0..64);
+                assert_eq!(many, one, "{threads} threads, {bits} bits");
+            }
+            // equal in the sorted bits: the high word from a small range,
+            // the low word the key's place
+            let mut many: Vec<u64> = keys(n, 6).iter().enumerate().map(|(k, v)| (v << 32) | k as u64).collect();
+            let mut one = many.clone();
+            sort_keys_threaded(&mut many, 32..64, threads);
+            sort_keys(&mut one, 32..64);
+            assert_eq!(many, one, "{threads} threads, the high word");
+            // every key shares the sorted digit's value
+            let mut same: Vec<u64> = (0..n).map(|k| (5u64 << 40) | (n - k)).collect();
+            let unsorted = same.clone();
+            sort_keys_threaded(&mut same, 40..64, threads);
+            assert_eq!(same, unsorted, "{threads} threads, one digit value");
+        }
+        let mut small = keys(SORT_MIN as u64, 64);
+        let mut one = small.clone();
+        sort_keys_threaded(&mut small, 0..64, 8);
+        sort_keys(&mut one, 0..64);
+        assert_eq!(small, one);
     }
 }
 
