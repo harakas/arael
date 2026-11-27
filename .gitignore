@@ -1,6 +1,9 @@
 # Every workspace's build dir, not just the root one: benchmarks/, cxx-tests/,
 # cxx-examples/ and export-tests/ are workspaces of their own.
 target/
+# The build dirs of other runtimes and toolchains, beside a workspace's
+# target/ (CARGO_TARGET_DIR=target-hip and the like).
+target-*/
 *.swp
 *.swo
 *.log
@@ -13,3 +16,9 @@ benchmarks/registration/
 # Local scratch: plotting scripts, dumped data, throwaway patches.
 # Never committed.
 /scratch/
+# Local GPU prototypes, their dumps and builds.
+/benchmarks/gpu/
+# Local notes and data.
+/docs/colmap/
+/docs/dev2/
+/docs/dd.tar.xz
