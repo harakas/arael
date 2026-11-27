@@ -3,7 +3,7 @@
 //! arael's own GPU runtime compiles kernels written in a C++ subset that
 //! CUDA, HIP and Metal share (NVRTC, hipRTC and Metal's compiler at run
 //! time). [`E::to_cpp`] prints an expression as C++ for such a kernel, as
-//! [`E::to_rust`] prints it for Rust; [`Intermediate::to_cpp`] prints one
+//! [`E::to_rust`](crate::Expr::to_rust) prints it for Rust; [`Intermediate::to_cpp`] prints one
 //! statement of a CSE result, and [`cpp_body`] runs the CSE and prints in
 //! one call. arael's device assembly generates its kernels' bodies this way.
 //!
@@ -135,7 +135,7 @@ fn verbatim(s: &str) -> Option<String> {
 impl E {
     /// The expression as C++ for a kernel of arael's GPU runtime, in
     /// `scalar` (`"f32"` or `"f64"`), every symbol by its own name; see the
-    /// [module](crate::cpp) for how it differs from [`to_rust`](Self::to_rust).
+    /// [module](crate::cpp) for how it differs from [`to_rust`](crate::Expr::to_rust).
     ///
     /// ```
     /// use arael_sym::{pow, symbols};

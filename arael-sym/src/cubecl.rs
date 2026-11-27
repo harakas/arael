@@ -4,7 +4,7 @@
 //! kernels: a function marked `#[cube]` is compiled, at its first launch,
 //! for CUDA, HIP or another of CubeCL's runtimes. Its body may use only the
 //! part of Rust that CubeCL understands. [`E::to_cubecl`] prints an
-//! expression as Rust that such a body accepts, as [`E::to_rust`] prints it
+//! expression as Rust that such a body accepts, as [`E::to_rust`](crate::Expr::to_rust) prints it
 //! for ordinary Rust; [`Intermediate::to_cubecl`] prints one statement of a
 //! CSE result, and [`cubecl_body`] runs the CSE and prints in one call.
 //!
@@ -15,7 +15,7 @@
 //! assert_eq!(e.to_cubecl("f64").unwrap(), "((y * f64::sin(x)) + 2.0f64)");
 //! ```
 //!
-//! How the printed code differs from [`E::to_rust`]'s:
+//! How the printed code differs from [`E::to_rust`](crate::Expr::to_rust)'s:
 //!
 //! | | `to_rust` | `to_cubecl` |
 //! |---|---|---|
@@ -133,7 +133,7 @@ impl E {
     /// The expression as Rust for the body of a CubeCL `#[cube]` function,
     /// in `scalar` (`"f32"` or `"f64"`), every symbol by its own name; see
     /// the [module](crate::cubecl) for how it differs from
-    /// [`to_rust`](Self::to_rust).
+    /// [`to_rust`](crate::Expr::to_rust).
     ///
     /// ```
     /// use arael_sym::{pow, symbols};

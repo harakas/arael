@@ -525,8 +525,8 @@ pub struct DeviceCheck {
     /// the host's cost sum ([`check_cost_tolerance`]).
     pub chain: usize,
     /// H's blocks from the block stores' cells, and from the device
-    /// structure's ([`cells_of`]); the device's are among the stores'
-    /// (checked), fewer by the blocks the device never writes.
+    /// structure's; the device's are among the stores' (checked), fewer by
+    /// the blocks the device never writes.
     pub store_blocks: usize,
     pub device_blocks: usize,
 }
