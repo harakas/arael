@@ -5940,6 +5940,32 @@ fn a_covariance_after_a_device_solve_reuses_its_analysis() {
     }
 }
 
+/// A covariance after a device solve of a model with blocks the device
+/// never writes (the guarded graph's edges turned off): the solve's
+/// pattern, from the device structure, lacks the blocks the host's
+/// assembly binds, so the covariance runs its own analysis, and matches
+/// the covariance after the CPU's solve.
+#[test]
+fn a_covariance_after_a_device_solve_covers_the_blocks_the_device_leaves_out() {
+    use arael::covariance::CovMode;
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut g = guarded_graph(40, 3, true);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, covariance: Some(CovMode::PerQuery), ..Default::default() };
+        let r = g.solve_with(&mut solver, &cfg).unwrap();
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
+        let cov = r.covariance.as_ref().expect("the covariance");
+        cov.marginal_cov(&g.poses[7]).unwrap()
+    };
+    let cpu = run(None);
+    for d in devices() {
+        let dev = run(Some(&d));
+        let scale = cpu.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let diff = dev.iter().zip(cpu.iter()).fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+        assert!(diff <= 1e-7 * scale, "{}: the marginal covariance differs by {diff} of {scale}", label(&d));
+    }
+}
+
 /// The f32 twin: on every device the covariance after an f32 device solve
 /// factors under the solve's analysis and matches the f64 CPU solve's to
 /// f32 precision. Pose 7's marginal rests on H's smallest eigenvalue (one
