@@ -6,17 +6,17 @@ members = ["arael-faer", "arael-gpu", "arael-macros", "arael-sym", "arael-sym-ma
 # `"0.9"` requirement, so nothing built from here is mistaken for a
 # release. Cutting one sets the number here and in the table below.
 [workspace.package]
-version = "0.9.3"
+version = "0.10.0-dev"
 
 [workspace.dependencies]
-arael = { version = "0.9.3", path = "." }
-arael-macros = { version = "0.9.3", path = "arael-macros" }
-arael-sym = { version = "0.9.3", path = "arael-sym" }
-arael-sym-macros = { version = "0.9.3", path = "arael-sym-macros" }
-arael-faer = { version = "0.9.3", path = "arael-faer" }
-arael-gpu = { version = "0.9.3", path = "arael-gpu" }
-arael-sketch-solver = { version = "0.9.3", path = "arael-sketch-solver" }
-arael-sketch-backend = { version = "0.9.3", path = "arael-sketch-backend" }
+arael = { version = "0.10.0-dev", path = "." }
+arael-macros = { version = "0.10.0-dev", path = "arael-macros" }
+arael-sym = { version = "0.10.0-dev", path = "arael-sym" }
+arael-sym-macros = { version = "0.10.0-dev", path = "arael-sym-macros" }
+arael-faer = { version = "0.10.0-dev", path = "arael-faer" }
+arael-gpu = { version = "0.10.0-dev", path = "arael-gpu" }
+arael-sketch-solver = { version = "0.10.0-dev", path = "arael-sketch-solver" }
+arael-sketch-backend = { version = "0.10.0-dev", path = "arael-sketch-backend" }
 
 [package]
 name = "arael"

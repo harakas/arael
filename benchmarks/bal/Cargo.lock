@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "arael"
-version = "0.9.3"
+version = "0.10.0-dev"
 dependencies = [
  "arael-faer",
  "arael-gpu",
@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "arael-faer"
-version = "0.9.3"
+version = "0.10.0-dev"
 dependencies = [
  "faer",
  "nano-gemm",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "arael-gpu"
-version = "0.9.3"
+version = "0.10.0-dev"
 dependencies = [
  "arael-faer",
  "bytemuck",
@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "arael-macros"
-version = "0.9.3"
+version = "0.10.0-dev"
 dependencies = [
  "arael-sym",
  "arael-sym-macros",
@@ -78,14 +78,14 @@ dependencies = [
 
 [[package]]
 name = "arael-sym"
-version = "0.9.3"
+version = "0.10.0-dev"
 dependencies = [
  "arael-sym-macros",
 ]
 
 [[package]]
 name = "arael-sym-macros"
-version = "0.9.3"
+version = "0.10.0-dev"
 dependencies = [
  "proc-macro2",
  "quote",
