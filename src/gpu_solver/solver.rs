@@ -254,12 +254,12 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         (self.timed && self.times.assembly_count + self.times.attempt_count > 0).then_some(self.times)
     }
 
-    fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), GpuError> {
+    fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, threads: usize) -> Result<(), GpuError> {
         // the old blocks go first, so the device holds one structure's at a time
         self.drop_reduction();
         let dev = &self.dev;
         let _scope = (Scope::new(&**dev, "setup"), Scope::new(&**dev, "reduction"));
-        let params = arael_gpu::GpuSchurParams { f32_reduction: self.f32_reduction, ..Default::default() };
+        let params = arael_gpu::GpuSchurParams { f32_reduction: self.f32_reduction, threads, ..Default::default() };
         let values = self.values();
         let mut gs = match schur {
             Some(s) => GpuSchur::with_params(dev, s, hsym, values, &params)?,

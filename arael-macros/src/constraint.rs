@@ -9792,6 +9792,22 @@ pub fn generate_root_methods(
             ctx.cut_mut().clear();
         }
     };
+    // The stores filled from their rows of the cut: on the sweep workers,
+    // a store each, when the root threads its sweeps; the cross arrays
+    // are opened in store order after.
+    let fill_stores = if par {
+        quote! {
+            arael::store::run_indexed(&*self, __stores.len() > 1, __stores, |__model, __s, __store| {
+                __model.__fill_blocks_at(__store, __cut.store(__s));
+            });
+        }
+    } else {
+        quote! {
+            for (__s, __store) in __stores.iter_mut().enumerate() {
+                self.__fill_blocks_at(__store, __cut.store(__s));
+            }
+        }
+    };
 
     let cross_idx: Vec<syn::Index> =
         (0..store_cross_names.len()).map(syn::Index::from).collect();
@@ -10167,21 +10183,40 @@ pub fn generate_root_methods(
                 #(#slot_walks)*
             }
 
-            /// Fill one store from the units `__ranges` gives it: every
-            /// block's parameter indices, pushed in the container order
-            /// `__assign_block_slots` numbers by, so a block's slot is where
-            /// its entry landed. Read-only in the model -- a reference can
-            /// point into the very collection being walked.
-            ///
-            /// `__base` carries the global slot each cross array has
-            /// reached, so a store built after another opens where that one
-            /// ended -- the runs are contiguous in walk order, so this is
-            /// the marker's slot for the first block a store holds. Build
-            /// the stores in order and it is right by construction.
+            /// [`__fill_blocks_at`](Self::__fill_blocks_at), then the
+            /// store's cross arrays opened at `__base`
+            /// ([`__open_cross_at`](Self::__open_cross_at)).
             #[doc(hidden)]
             #[allow(unused_variables, dead_code)]
             pub fn __build_blocks_at(&self, __store: &mut #store_ty,
                                      __ranges: &[(u32, u32)], __base: &mut [u32]) {
+                self.__fill_blocks_at(__store, __ranges);
+                Self::__open_cross_at(__store, __base);
+            }
+
+            /// Open the store's cross arrays at the global slot each has
+            /// reached in `__base`, and advance it past them: the runs
+            /// are contiguous in walk order, so this is the marker's slot
+            /// for the first block a store holds. Open the stores in
+            /// order and it is right by construction.
+            #[doc(hidden)]
+            #[allow(unused_variables, dead_code)]
+            pub fn __open_cross_at(__store: &mut #store_ty, __base: &mut [u32]) {
+                #(
+                    __store.#store_cross_names.set_base(__base[#cross_idx]);
+                    __base[#cross_idx] += __store.#store_cross_names.len() as u32;
+                )*
+            }
+
+            /// Fill one store from the units `__ranges` gives it: every
+            /// block's parameter indices, pushed in the container order
+            /// `__assign_block_slots` numbers by, so a block's slot is where
+            /// its entry landed. Read-only in the model -- a reference can
+            /// point into the very collection being walked -- and in the
+            /// other stores, so the stores fill on threads.
+            #[doc(hidden)]
+            #[allow(unused_variables, dead_code)]
+            pub fn __fill_blocks_at(&self, __store: &mut #store_ty, __ranges: &[(u32, u32)]) {
                 use arael::store::Leaves as _;
                 // A range table means the solve divided its walks, so the
                 // stores are addressed as slices rather than as the whole.
@@ -10200,10 +10235,6 @@ pub fn generate_root_methods(
                 #(#self_claim_walks)*
                 #(#build_walks)*
                 #(__store.#store_names.finish();)*
-                #(
-                    __store.#store_cross_names.set_base(__base[#cross_idx]);
-                    __base[#cross_idx] += __store.#store_cross_names.len() as u32;
-                )*
             }
 
             /// The whole model into one store.
@@ -10582,10 +10613,11 @@ pub fn generate_root_methods(
             fn begin_with_context(&mut self, ctx: &mut arael::threads::Context) {
                 #begin_cut
                 let (__stores, __cut) = ctx.stores_mut::<#store_ty>(__n);
+                #fill_stores
                 let mut __base = [0u32; #n_cross];
                 // In store order: a run opens where the previous one ended.
-                for (__s, __store) in __stores.iter_mut().enumerate() {
-                    self.__build_blocks_at(__store, __cut.store(__s), &mut __base);
+                for __store in __stores.iter_mut() {
+                    Self::__open_cross_at(__store, &mut __base);
                 }
                 #whole_pre
                 ctx.set_shape(&self.__shape());

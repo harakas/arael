@@ -1009,6 +1009,37 @@ fn the_dense_route_threads_its_assembly() {
     assert!(s.assembly.threaded, "and so do the assembly sweeps: {}", rep);
 }
 
+/// The stores `begin_with_context` fills on the sweep workers are the
+/// stores built one after another from the same cut: the same cells,
+/// store by store, in the same order.
+#[test]
+fn the_stores_filled_on_threads_are_the_stores_built_in_turn() {
+    use arael::store::BlockStore as _;
+    let mut w = build(60);
+    let mut x = Vec::new();
+    w.serialize(&mut x);
+    for threads in [2, 3, 8] {
+        let mut ctx = context(threads);
+        w.begin_with_context(&mut ctx);
+        let filled = ctx.blocks_list::<WebBlocks>().expect("the stores are built");
+        assert_eq!(filled.len(), threads);
+        let mut turn = Context::new();
+        w.__build_cut(turn.cut_mut(), threads);
+        let (stores, cut) = turn.stores_mut::<WebBlocks>(threads);
+        let mut base = vec![0u32; 16];
+        for (s, store) in stores.iter_mut().enumerate() {
+            w.__build_blocks_at(store, cut.store(s), &mut base);
+        }
+        for (s, (a, b)) in filled.iter().zip(stores.iter()).enumerate() {
+            let (mut ca, mut cb) = (Vec::new(), Vec::new());
+            a.collect_hessian_cells(&mut ca);
+            b.collect_hessian_cells(&mut cb);
+            assert!(!ca.is_empty(), "{threads} stores: store {s} holds blocks");
+            assert_eq!(ca, cb, "{threads} stores: store {s}");
+        }
+    }
+}
+
 /// A thread count set on the context takes hold in `begin_with_context`:
 /// an assembly called directly on a context nobody began builds one
 /// store, whatever the count says.

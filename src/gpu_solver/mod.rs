@@ -78,7 +78,7 @@ pub(crate) trait GpuSolver<T>: Send {
     /// solver's device; a factor is the reduced system's, and conjugate
     /// gradients are built over the reduction. Replaces any earlier
     /// reduction and route.
-    fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), GpuError>;
+    fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, threads: usize) -> Result<(), GpuError>;
     /// Release the reduction and the route.
     fn drop_reduction(&mut self);
     /// Whether a reduction is built.

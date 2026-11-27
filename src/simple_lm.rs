@@ -6784,14 +6784,15 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> GpuSide<T> {
         &mut self,
         schur: &arael_faer::schur::SchurSymbolic<SparseIndex>,
         hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+        threads: usize,
     ) -> Result<(), SolveFailureKind> {
         #[cfg(feature = "gpu")]
         if let Some(g) = self.solver.as_mut() {
-            let built = g.prepare_reduction(Some(schur), hsym);
+            let built = g.prepare_reduction(Some(schur), hsym, threads);
             report_kernel_cache();
             return built.map_err(|e| gpu_setup_failed("setup of the reduction", e));
         }
-        let _ = (schur, hsym);
+        let _ = (schur, hsym, threads);
         Ok(())
     }
 
@@ -6800,7 +6801,7 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> GpuSide<T> {
     fn prepare_whole(&mut self, hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), SolveFailureKind> {
         #[cfg(feature = "gpu")]
         if let Some(g) = self.solver.as_mut() {
-            let built = g.prepare_reduction(None, hsym);
+            let built = g.prepare_reduction(None, hsym, 1);
             report_kernel_cache();
             return built.map_err(|e| gpu_setup_failed("setup of the reduction", e));
         }
@@ -7450,11 +7451,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let nd = matches!(self.ordering, SolveOrdering::NestedDissection)
             .then(|| {
                 structure.map(|(partition, cells)| {
-                    let hsym = arael_faer::bsc::SymbolicSparseBlockColMat::covering(
+                    let hsym = arael_faer::bsc::SymbolicSparseBlockColMat::covering_threaded(
                         partition_idx(partition),
                         partition_idx(partition),
                         cells.len(),
                         |k| (cells[k].0 as usize, cells[k].1 as usize),
+                        self.ctx.threads(),
                     );
                     arael_faer::nd::NestedDissection::of_blocks(
                         &hsym,
@@ -8482,11 +8484,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // for that -- both factor H in block form instead of flattening
             // it for faer's general sparse Cholesky.
             if self.narrow_band_enabled || self.sn_take() {
-                let hsym = arael_faer::bsc::SymbolicSparseBlockColMat::covering(
+                let hsym = arael_faer::bsc::SymbolicSparseBlockColMat::covering_threaded(
                     partition_idx(&partition),
                     partition_idx(&partition),
                     cells.len(),
                     |k| (cells[k].0 as usize, cells[k].1 as usize),
+                    self.ctx.threads(),
                 );
                 if self.narrow_band_enabled {
                     let band = block_half_bandwidth(&hsym);
@@ -8527,11 +8530,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // The block Hessian, and the scalar diagonal positions inside its
         // diagonal tiles (damping and extract_diagonal read and write
         // through those). Only the reducing route needs either.
-        let hsym = arael_faer::bsc::SymbolicSparseBlockColMat::covering(
+        let hsym = arael_faer::bsc::SymbolicSparseBlockColMat::covering_threaded(
             partition_idx(&partition),
             partition_idx(&partition),
             cells.len(),
             |k| (cells[k].0 as usize, cells[k].1 as usize),
+            self.ctx.threads(),
         );
         self.bdiag_pos.clear();
         self.bdiag_pos.resize(n, ValueIndex::MAX);
@@ -9336,7 +9340,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.x_kept.resize(nk, T::zero());
         // The reduction on the device, beside the device factor when the
         // supernodal route built one.
-        self.gpu.prepare_schur(&schur, &hsym)?;
+        self.gpu.prepare_schur(&schur, &hsym, self.ctx.threads())?;
         // The device route forms S on the device and never reads a host copy.
         self.s = if self.gpu.reduces() { None } else { s };
         self.schur = Some(schur);
