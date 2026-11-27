@@ -306,14 +306,14 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         Ok(solved)
     }
 
-    fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex], threads: usize) -> Result<(), GpuError> {
+    fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex], threads: usize, structure: Option<crate::device::DeviceStructure>) -> Result<(), GpuError> {
         self.route = None;
         if self.schur.is_none() {
             return Ok(());
         }
         let dev = &self.dev;
         let _scope = (Scope::new(&**dev, "setup"), Scope::new(&**dev, "route"));
-        let asm = DeviceAssembly::new(dev, root, hsym, threads, self.wide, self.staging)?;
+        let asm = DeviceAssembly::new(dev, root, hsym, threads, self.wide, self.staging, structure)?;
         self.route = Some(Route {
             attempt_graph: None,
             tail_graph: None,

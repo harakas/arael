@@ -241,6 +241,21 @@ impl Context {
     /// [`set_runtime_coo`](Self::set_runtime_coo)).
     pub fn runtime_coo(&self) -> bool { self.runtime_coo }
 
+    /// Whether the context holds block stores, built by
+    /// `begin_with_context` or by the first walk that needed them.
+    pub fn has_blocks(&self) -> bool { self.blocks.is_some() }
+
+    /// Drop the block stores, their cut and what they were built for: the
+    /// next walk that needs them builds them again. A solve that assembles
+    /// on a GPU starts so, and builds none.
+    pub fn clear_blocks(&mut self) {
+        self.blocks = None;
+        self.blocks_len = 0;
+        self.shape.clear();
+        self.cut.clear();
+        self.whole = StoreFootprint::default();
+    }
+
     /// Where this solve's sweeps spent their time, as the sweeps record
     /// it; [`sweeps`](Self::sweeps) is the read for a user.
     pub fn sweep_timing(&self) -> &ParTiming { &self.sweeps }

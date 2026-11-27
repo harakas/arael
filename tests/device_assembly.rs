@@ -6570,3 +6570,109 @@ fn wide_scopes_compute_the_functions_on_the_device() {
     let mut s = FnPoints { points };
     checks_f32(&mut s, 1e-5, 1e-4, "the wide functions");
 }
+
+/// H's cells from the device structure are the block stores' but those of
+/// the blocks the device never writes: the guarded graph turns every tenth
+/// edge off, and a pair of poses only such an edge joins has its block in
+/// the stores alone; the consistent scene drops nothing, and the two lists
+/// match.
+#[test]
+fn the_device_structure_lists_the_stores_blocks_but_those_it_never_writes() {
+    if !checks_f64("the device structure's cells") {
+        return;
+    }
+    let mut g = guarded_graph(40, 3, true);
+    let mut x = Vec::new();
+    g.serialize(&mut x);
+    let chk = arael::__gpu::device_check(&mut g, &x, &x, &device(), arael::__gpu::Wide::F64);
+    assert!(chk.device_blocks < chk.store_blocks, "{chk:?}");
+    let (cameras, points, observations) = consistent_scene::<f64>();
+    let mut s = Scene { cameras, points, observations };
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let chk = arael::__gpu::device_check(&mut s, &x, &x, &device(), arael::__gpu::Wide::F64);
+    assert_eq!(chk.device_blocks, chk.store_blocks, "{chk:?}");
+}
+
+/// A solve that assembles on its GPU builds no host block stores: H's
+/// cells come from the device structure, which the device assembly then
+/// takes as walked. Through a context a host solve left its stores in,
+/// they are dropped. The host solve and the device solves reach the same
+/// optimum.
+#[test]
+fn a_solve_that_assembles_on_its_gpu_builds_no_host_block_stores() {
+    let run = |gpu: Option<&GpuDevice>, ctx: &mut arael::threads::Context| {
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&options(gpu, true));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve_with_context(&x, &mut solver, &mut s, &cfg, ctx).unwrap();
+        assert_eq!(looped(solver.gpu_report()), gpu.is_some());
+        r.end_cost
+    };
+    let mut host = arael::threads::Context::new();
+    let cpu = run(None, &mut host);
+    assert!(host.has_blocks(), "a host solve builds its stores");
+    for d in devices() {
+        let mut ctx = arael::threads::Context::new();
+        let device = run(Some(&d), &mut ctx);
+        assert!(!ctx.has_blocks(), "{}: a device solve builds no stores", label(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+        // the host solve's context, its stores dropped
+        let again = run(Some(&d), &mut host);
+        assert!(!host.has_blocks(), "{}: the stores a host solve left are dropped", label(&d));
+        assert!((again - cpu).abs() <= 1e-9 * cpu, "{}: {again} against the CPU's {cpu}", label(&d));
+        run(None, &mut host);
+    }
+}
+
+/// A solve given a GPU whose route assembles on the host takes H's cells
+/// from the device structure first, then builds the stores. On the
+/// consistent scene, the reduced system solved by conjugate gradients
+/// without being formed, their cells match and the setup goes on; on the
+/// guarded graph, the whole system factored by the scalar sparse Cholesky,
+/// the stores hold the blocks of edges turned off, which the device
+/// structure leaves out, and the setup runs again from them. Both reach
+/// the host solve's optimum.
+#[test]
+fn a_gpu_solve_on_a_host_route_sets_up_from_the_stores() {
+    use arael::simple_lm::{BlockSupernodalMode, LmConfig, SchurPolicy, SparseFaer, SparseFaerOptions};
+    let cfg = LmConfig::<f64> { max_iters: 50, ..Default::default() };
+    let scene = |gpu: Option<&GpuDevice>| {
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = SparseFaer::<f64>::from_options(&options(gpu, true).with_implicit_schur(Default::default()));
+        let mut ctx = arael::threads::Context::new();
+        let r = arael::simple_lm::lm_solve_with_context(&x, &mut solver, &mut s, &cfg, &mut ctx).unwrap();
+        assert!(!solves_on_device(solver.gpu_report()));
+        (r.end_cost, ctx.has_blocks())
+    };
+    let graph = |gpu: Option<&GpuDevice>| {
+        let mut g = guarded_graph(40, 3, true);
+        let mut x = Vec::new();
+        g.serialize(&mut x);
+        let opts = SparseFaerOptions::default()
+            .with_policy(SchurPolicy::Never)
+            .with_block_supernodal(BlockSupernodalMode::Never)
+            .with_gpu(gpu.cloned())
+            .with_gpu_assembly(true);
+        let mut solver = SparseFaer::<f64>::from_options(&opts);
+        let mut ctx = arael::threads::Context::new();
+        let r = arael::simple_lm::lm_solve_with_context(&x, &mut solver, &mut g, &cfg, &mut ctx).unwrap();
+        assert!(!solves_on_device(solver.gpu_report()));
+        (r.end_cost, ctx.has_blocks())
+    };
+    let runs: [(&str, &dyn Fn(Option<&GpuDevice>) -> (f64, bool)); 2] = [("the consistent scene", &scene), ("the guarded graph", &graph)];
+    for (what, run) in runs {
+        let (cpu, _) = run(None);
+        for d in devices() {
+            let (gpu, blocks) = run(Some(&d));
+            assert!(blocks, "{what}, {}: the host route built its stores", label(&d));
+            assert!((gpu - cpu).abs() <= 1e-9 * cpu, "{what}, {}: {gpu} against the CPU's {cpu}", label(&d));
+        }
+    }
+}

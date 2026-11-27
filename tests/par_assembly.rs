@@ -1014,7 +1014,6 @@ fn the_dense_route_threads_its_assembly() {
 /// store by store, in the same order.
 #[test]
 fn the_stores_filled_on_threads_are_the_stores_built_in_turn() {
-    use arael::store::BlockStore as _;
     let mut w = build(60);
     let mut x = Vec::new();
     w.serialize(&mut x);

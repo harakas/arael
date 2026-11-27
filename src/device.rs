@@ -235,6 +235,98 @@ impl DeviceStructure {
     }
 }
 
+/// The structure of `root` ([`DeviceRoot::device_structure`]). The model's
+/// working copies must be current: the walk reads the guards.
+pub(crate) fn structure_of<T>(root: &dyn DeviceRoot<T>) -> DeviceStructure {
+    let shape = root.device_shape();
+    let mut st = DeviceStructure::new(&shape);
+    root.device_structure(&mut st);
+    st
+}
+
+/// H's cells of the structure `st` of `root`, as the root's block stores
+/// list them, one scalar coordinate per block, the upper one: per entity
+/// table, per slot with a live parameter, its first live index twice;
+/// per constraint, per kept instance and pair of sides, the two sides'
+/// first live indices, the lower one first. A pair with a side fixed
+/// throughout lists its live side's diagonal again (or the first entity's,
+/// with neither live), a cell already in the list, so that every pair of
+/// every instance takes one place and the list is written on up to
+/// `threads` threads of the worker pool, by ranges of at least `min`
+/// instances. The blocks of an instance a guard drops, and a cross block
+/// no constraint writes, are not among the cells: the device writes none
+/// of them.
+pub(crate) fn cells_of(shape: &DeviceShape, st: &DeviceStructure, out: &mut Vec<(u32, u32)>, (threads, min): (usize, usize)) {
+    use crate::store::tile_extent;
+    // per entity table, per slot: its first live index, u32::MAX without one
+    let first: Vec<Vec<u32>> = shape
+        .entities
+        .iter()
+        .zip(&st.idx)
+        .map(|(&n, idx)| if n == 0 { Vec::new() } else { idx.chunks_exact(n).map(|ix| tile_extent(ix).0).collect() })
+        .collect();
+    let base = out.len();
+    for f in &first {
+        out.extend(f.iter().filter(|&&s| s != u32::MAX).map(|&s| (s, s)));
+    }
+    let Some(&fill) = out.get(base) else {
+        // no live entity, no cell
+        return;
+    };
+    // ranges of instances of one constraint: (constraint, rows)
+    let mut runs: Vec<(usize, core::ops::Range<usize>)> = Vec::new();
+    let mut total = 0usize;
+    for (c, k) in shape.constraints.iter().enumerate() {
+        if k.pairs.is_empty() {
+            continue;
+        }
+        let n = st.rows[c].len() / k.words();
+        let parts = threads.min(n / min.max(1)).max(1);
+        let step = n.div_ceil(parts).max(1);
+        for r in 0..parts {
+            let rows = r * step..((r + 1) * step).min(n);
+            if !rows.is_empty() {
+                total += rows.len() * k.pairs.len();
+                runs.push((c, rows));
+            }
+        }
+    }
+    let at = out.len();
+    out.resize(at + total, fill);
+    let mut tasks: Vec<((usize, core::ops::Range<usize>), &mut [(u32, u32)])> = Vec::with_capacity(runs.len());
+    let mut rest = &mut out[at..];
+    for run in runs {
+        let (head, tail) = core::mem::take(&mut rest).split_at_mut(run.1.len() * shape.constraints[run.0].pairs.len());
+        tasks.push((run, head));
+        rest = tail;
+    }
+    // the range's cells pair by pair, so the instances that share a cross
+    // block (a parent's, say) list it in a run, which the pattern's run
+    // compression shrinks to one key
+    let write = |_: usize, ((c, rows), cells): &mut ((usize, core::ops::Range<usize>), &mut [(u32, u32)])| {
+        let k = &shape.constraints[*c];
+        let w = k.words();
+        let recs = &st.rows[*c][rows.start * w..rows.end * w];
+        for (pc, &(i, j, _)) in cells.chunks_mut(rows.len()).zip(&k.pairs) {
+            let (fa, fb) = (&first[k.sides[i]], &first[k.sides[j]]);
+            for (cell, rec) in pc.iter_mut().zip(recs.chunks_exact(w)) {
+                let (a, b) = (fa[rec[i] as usize], fb[rec[j] as usize]);
+                *cell = match (a != u32::MAX, b != u32::MAX) {
+                    (true, true) => (a.min(b), a.max(b)),
+                    (true, false) => (a, a),
+                    (false, true) => (b, b),
+                    (false, false) => fill,
+                };
+            }
+        }
+    };
+    if tasks.len() <= 1 || threads <= 1 {
+        tasks.iter_mut().for_each(|t| write(0, t));
+    } else {
+        arael_faer::pool::run_over(&mut tasks, write);
+    }
+}
+
 /// Word `q` of every instance of `rows`, `w` words each.
 fn word(rows: &[u32], w: usize, q: usize) -> impl Iterator<Item = u32> + Clone + '_ {
     rows.iter().skip(q).step_by(w).copied()
@@ -432,6 +524,11 @@ pub struct DeviceCheck {
     /// The most instances of one constraint: the longest chain of adds in
     /// the host's cost sum ([`check_cost_tolerance`]).
     pub chain: usize,
+    /// H's blocks from the block stores' cells, and from the device
+    /// structure's ([`cells_of`]); the device's are among the stores'
+    /// (checked), fewer by the blocks the device never writes.
+    pub store_blocks: usize,
+    pub device_blocks: usize,
 }
 
 /// Threads per block of every assembly kernel (`kernels/assembly.cpp`).
@@ -748,23 +845,61 @@ fn launch_n(n: usize) -> Launch {
 /// first slot whose tile is in the same block: the array's slots between
 /// the same two entities share their tile, the only one of the array in
 /// that block. A slot without a tile (a side fixed throughout, or no
-/// instance names it) is its own. `nblocks` is H's block count.
-fn tile_owners(blocks: &[u32], nblocks: usize) -> Vec<u32> {
+/// instance names it) is its own. `first` holds [`NO_BLOCK`] per block of
+/// H, and holds it again on return. On up to `threads` threads of the
+/// worker pool, each taking at least `min` slots: each block's first slot
+/// as an atomic minimum over ranges of slots, then each slot's owner read
+/// by ranges.
+fn tile_owners(blocks: &[u32], first: &mut [u32], (threads, min): (usize, usize)) -> Vec<u32> {
+    use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    // An AtomicU32 has the layout of a u32, and `first` is borrowed
+    // through this alone until it is reset.
+    let at: &[AtomicU32] = unsafe { &*(first as *mut [u32] as *const [AtomicU32]) };
+    let parts = threads.min(blocks.len() / min.max(1)).max(1);
+    let step = blocks.len().div_ceil(parts).max(1);
+    let over = |f: &(dyn Fn(core::ops::Range<usize>) + Sync)| {
+        if parts == 1 {
+            f(0..blocks.len());
+        } else {
+            arael_faer::pool::run(parts, &|p| f(p * step..((p + 1) * step).min(blocks.len())));
+        }
+    };
+    over(&|range| {
+        for s in range {
+            let b = blocks[s];
+            if b != NO_BLOCK {
+                at[b as usize].fetch_min(s as u32, Relaxed);
+            }
+        }
+    });
+    let mut owner = vec![0u32; blocks.len()];
+    {
+        let out = arael_faer::pool::SharedMut(owner.as_mut_ptr());
+        over(&|range| {
+            for s in range {
+                let b = blocks[s];
+                let o = if b == NO_BLOCK { s as u32 } else { at[b as usize].load(Relaxed) };
+                // each range writes its own slots only
+                unsafe { *out.ptr().add(s) = o };
+            }
+        });
+    }
+    // the blocks this array touched back to NO_BLOCK, for the next array
+    over(&|range| {
+        for s in range {
+            let b = blocks[s];
+            if b != NO_BLOCK {
+                at[b as usize].store(NO_BLOCK, Relaxed);
+            }
+        }
+    });
+    owner
+}
+
+/// [`tile_owners`] of every cross array of `t`, against H's `nblocks`.
+fn all_tile_owners(t: &Tiles, nblocks: usize, par: (usize, usize)) -> Vec<Vec<u32>> {
     let mut first = vec![NO_BLOCK; nblocks];
-    blocks
-        .iter()
-        .enumerate()
-        .map(|(s, &b)| {
-            if b == NO_BLOCK {
-                return s as u32;
-            }
-            let f = &mut first[b as usize];
-            if *f == NO_BLOCK {
-                *f = s as u32;
-            }
-            *f
-        })
-        .collect()
+    t.cross_block.iter().map(|b| tile_owners(b, &mut first, par)).collect()
 }
 
 /// [`Tiles::cross_block`] of a slot without a tile.
@@ -794,7 +929,7 @@ fn by_slot(of: impl Iterator<Item = u32> + Clone, slots: usize) -> (Vec<u32>, Ve
 type Resolver<'a> = arael_faer::bsc::PositionResolver<'a, arael_faer::SparseIndex>;
 
 /// Lookups a thread takes at least before the work is split over more.
-const PAR_MIN: usize = 8 * 1024;
+pub(crate) const PAR_MIN: usize = 8 * 1024;
 
 /// `f` over `0..n` cut into at most `threads` ranges of at least `min`,
 /// on arael's worker pool (`arael_faer::pool`, the sweeps' threads), each
@@ -1043,9 +1178,12 @@ fn stores(shape: &DeviceShape, groups: &[Groups], t: &mut Tiles, nblocks: usize)
 
 /// The block's structure columns into `image` (the structure range): the
 /// entity tables' indices and tiles, the referenced fields' step offsets,
-/// the cross tiles, the instances' slots and their [`Groups`]. Returns per
-/// referenced field, per slot, the step's first live global index (the
-/// key of its reference).
+/// the cross tiles, the instances' slots and their [`Groups`], each column
+/// (or range of at least `min` instances of an instance column) a job on
+/// up to `threads` threads of the worker pool. Returns per referenced
+/// field, per slot, the step's first live global index (the key of its
+/// reference).
+#[allow(clippy::too_many_arguments)]
 fn write_structure(
     image: &mut [u8],
     offset: &HashMap<String, usize>,
@@ -1054,21 +1192,14 @@ fn write_structure(
     slots: &[usize],
     t: &Tiles,
     groups: &[Groups],
+    (threads, min): (usize, usize),
 ) -> Vec<Vec<u32>> {
     use arael_gpu::bytemuck::cast_slice;
-    let put = |image: &mut [u8], name: &str, bytes: &[u8]| {
-        let o = offset[name];
-        image[o..o + bytes.len()].copy_from_slice(bytes);
-    };
-    for (e, (idx, tile)) in st.idx.iter().zip(&t.entity).enumerate() {
-        put(image, &format!("E{e}_IDX"), cast_slice(idx));
-        put(image, &format!("E{e}_TILE"), cast_slice(tile));
-    }
     let mut ref_index = Vec::with_capacity(shape.references.len());
-    for (r, rf) in shape.references.iter().enumerate() {
+    let mut ats: Vec<Vec<u32>> = Vec::with_capacity(shape.references.len());
+    for rf in &shape.references {
         let n = shape.entities[rf.entity];
         let at: Vec<u32> = (0..slots[rf.entity]).map(|s| (s * n + rf.step) as u32).collect();
-        put(image, &format!("R{r}_AT"), cast_slice(&at));
         // a step's key: its first live parameter (a TransformParam may hold
         // one half of its step fixed)
         let idx = &st.idx[rf.entity];
@@ -1077,26 +1208,70 @@ fn write_structure(
                 .map(|&a| idx[a as usize..a as usize + rf.kind.step_len()].iter().copied().find(|&g| g != FIXED).unwrap_or(FIXED))
                 .collect(),
         );
+        ats.push(at);
+    }
+    // every column a job writing its own bytes of the image: a copy, or a
+    // range of one word of a constraint's instances
+    enum Fill<'a> {
+        Copy(&'a [u8]),
+        Word { rows: &'a [u32], w: usize, q: usize, from: usize },
+    }
+    let mut jobs: Vec<(usize, usize, Fill<'_>)> = Vec::new();
+    for (e, (idx, tile)) in st.idx.iter().zip(&t.entity).enumerate() {
+        jobs.push((offset[&format!("E{e}_IDX")], idx.len() * 4, Fill::Copy(cast_slice(idx))));
+        jobs.push((offset[&format!("E{e}_TILE")], tile.len() * 4, Fill::Copy(cast_slice(tile))));
+    }
+    for (r, at) in ats.iter().enumerate() {
+        jobs.push((offset[&format!("R{r}_AT")], at.len() * 4, Fill::Copy(cast_slice(at))));
     }
     for (x, tile) in t.cross.iter().enumerate() {
-        put(image, &format!("X{x}_TILE"), cast_slice(tile));
+        jobs.push((offset[&format!("X{x}_TILE")], tile.len() * 4, Fill::Copy(cast_slice(tile))));
     }
     for ((c, k), g) in shape.constraints.iter().enumerate().zip(groups) {
         let (w, rows) = (k.words(), &st.rows[c]);
+        let n = rows.len() / w;
+        let parts = threads.min(n / min.max(1)).max(1);
+        let step = n.div_ceil(parts).max(1);
         for (q, name) in word_names(k).enumerate() {
             let o = offset[&format!("C{c}_{name}")];
-            for (b, v) in image[o..].as_chunks_mut::<4>().0.iter_mut().zip(word(rows, w, q)) {
-                *b = v.to_le_bytes();
+            for from in (0..n).step_by(step) {
+                let len = step.min(n - from);
+                jobs.push((o + 4 * from, 4 * len, Fill::Word { rows, w, q, from }));
             }
         }
         for (i, (ptr, list)) in g.sides.iter().enumerate() {
-            put(image, &format!("C{c}_OFF{i}"), cast_slice(ptr));
-            put(image, &format!("C{c}_INST{i}"), cast_slice(list));
+            jobs.push((offset[&format!("C{c}_OFF{i}")], ptr.len() * 4, Fill::Copy(cast_slice(ptr))));
+            jobs.push((offset[&format!("C{c}_INST{i}")], list.len() * 4, Fill::Copy(cast_slice(list))));
         }
         for (p, (ptr, list)) in g.pairs.iter().enumerate() {
-            put(image, &format!("C{c}_XOFF{p}"), cast_slice(ptr));
-            put(image, &format!("C{c}_XINST{p}"), cast_slice(list));
+            jobs.push((offset[&format!("C{c}_XOFF{p}")], ptr.len() * 4, Fill::Copy(cast_slice(ptr))));
+            jobs.push((offset[&format!("C{c}_XINST{p}")], list.len() * 4, Fill::Copy(cast_slice(list))));
         }
+    }
+    // each job its own slice of the image, cut in offset order
+    jobs.retain(|j| j.1 > 0);
+    jobs.sort_by_key(|j| j.0);
+    let mut tasks: Vec<(&mut [u8], Fill<'_>)> = Vec::with_capacity(jobs.len());
+    let (mut rest, mut at) = (&mut image[..], 0usize);
+    for (o, len, fill) in jobs {
+        let (_, tail) = core::mem::take(&mut rest).split_at_mut(o - at);
+        let (dst, tail) = tail.split_at_mut(len);
+        tasks.push((dst, fill));
+        rest = tail;
+        at = o + len;
+    }
+    let write = |_: usize, (dst, fill): &mut (&mut [u8], Fill<'_>)| match fill {
+        Fill::Copy(bytes) => dst.copy_from_slice(bytes),
+        Fill::Word { rows, w, q, from } => {
+            for (b, rec) in dst.as_chunks_mut::<4>().0.iter_mut().zip(rows[*from * *w..].chunks_exact(*w)) {
+                *b = rec[*q].to_le_bytes();
+            }
+        }
+    };
+    if threads <= 1 || tasks.len() <= 1 {
+        tasks.iter_mut().for_each(|t| write(0, t));
+    } else {
+        arael_faer::pool::run_over(&mut tasks, write);
     }
     ref_index
 }
@@ -1105,8 +1280,10 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     /// Lay `root` out on `dev` against the tiled pattern `pattern` (its
     /// tiles looked up on up to `threads` threads), its sums in `wide`,
     /// compile its kernels, and upload its structure and values from
-    /// `staging`. The model's working copies must be current (its guards,
-    /// fixed values and references are read).
+    /// `staging`. `structure` is the root's structure when the caller has
+    /// walked it already ([`structure_of`]), else it is walked here. The
+    /// model's working copies must be current (its guards, fixed values and
+    /// references are read).
     pub fn new(
         dev: &Arc<D>,
         root: &dyn DeviceRoot<T>,
@@ -1114,12 +1291,12 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         threads: usize,
         wide: Wide,
         staging: Staging,
+        structure: Option<DeviceStructure>,
     ) -> Result<Self, GpuError> {
         let ts = core::mem::size_of::<T>();
         assert!(ts == 4 || ts == 8, "the device assembly takes an f32 or an f64 model");
         let shape = root.device_shape();
-        let mut st = DeviceStructure::new(&shape);
-        root.device_structure(&mut st);
+        let st = structure.unwrap_or_else(|| structure_of(root));
         let slots: Vec<usize> = shape.entities.iter().zip(&st.idx).map(|(&n, ix)| ix.len() / n.max(1)).collect();
         let counts: Vec<usize> = shape.constraints.iter().zip(&st.rows).map(|(k, r)| r.len() / k.words()).collect();
         let mut cross_slots = vec![0usize; shape.crosses];
@@ -1131,7 +1308,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             }
         }
         let mut t = tiles(&shape, &st, &slots, &cross_slots, &Resolver::new(pattern), (threads, PAR_MIN));
-        let owners: Vec<Vec<u32>> = t.cross_block.iter().map(|b| tile_owners(b, pattern.nblocks())).collect();
+        let owners = all_tile_owners(&t, pattern.nblocks(), (threads, PAR_MIN));
         let groups = groups(&shape, &st, &slots, &cross_slots, &owners, (threads, PAR_MIN));
         let zero_h = stores(&shape, &groups, &mut t, pattern.nblocks());
         let route = Values::of(ts, wide);
@@ -1184,7 +1361,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         let offset = layout.index();
         // the structure: the structure columns, copied once
         let mut host = HostBuf::new(&**dev, staging, layout.structure_bytes)?;
-        let ref_index = write_structure(host.bytes_mut(&**dev)?, &offset, &shape, &st, &slots, &t, &groups);
+        let ref_index = write_structure(host.bytes_mut(&**dev)?, &offset, &shape, &st, &slots, &t, &groups, (threads, PAR_MIN));
         host.upload(&**dev, &mut block, 0, layout.structure_bytes)?;
         drop(host);
         let staged = HostBuf::new(&**dev, staging, layout.host_bytes - layout.structure_bytes)?;
@@ -1210,6 +1387,8 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             _t: core::marker::PhantomData,
         };
         asm.dev.describe(&asm.block, "image", &|| asm.sections());
+        // the structure's working copies, released off this thread
+        arael_faer::pool::drop_later((st.idx, st.rows, t, groups, owners));
         asm.refresh(root)?;
         Ok(asm)
     }
@@ -1567,8 +1746,21 @@ where
     problem.update_params(x0);
     let host_cost = host_cost?.to_f64().unwrap();
     let root = problem.device_root().expect("the root has a device assembly");
+    // H's cells from the device structure: every one a block store's
+    let (store_blocks, device_blocks) = {
+        let mut stored: Vec<(u32, u32)> = cells.iter().map(|&(i, j)| (i as u32, j as u32)).collect();
+        stored.sort_unstable();
+        stored.dedup();
+        let mut device = Vec::new();
+        cells_of(&root.device_shape(), &structure_of(root), &mut device, (1, usize::MAX));
+        device.sort_unstable();
+        device.dedup();
+        let foreign: Vec<&(u32, u32)> = device.iter().filter(|c| stored.binary_search(c).is_err()).collect();
+        assert!(foreign.is_empty(), "the device structure's cells {foreign:?} are no block store's");
+        (stored.len(), device.len())
+    };
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
-    let asm = DeviceAssembly::<T, D>::new(dev, root, &hsym, threads, wide, Staging::Pinned)
+    let asm = DeviceAssembly::<T, D>::new(dev, root, &hsym, threads, wide, Staging::Pinned, None)
         .expect("lay the root out on the device");
     // the cost (wide), x, the gradient and the values (the root's values)
     // in one block of the test's own
@@ -1598,7 +1790,7 @@ where
         if max > 0.0 { diff / max } else { diff }
     };
     let chain = asm.counts.iter().copied().max().unwrap_or(0);
-    Ok(DeviceCheck { host_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv, leaf_bits: asm.leaf_bits(), chain })
+    Ok(DeviceCheck { host_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv, leaf_bits: asm.leaf_bits(), chain, store_blocks, device_blocks })
 }
 
 /// The environment variable that turns on the device check: set (to
@@ -1840,15 +2032,22 @@ mod tests {
     fn a_slot_is_owned_by_the_first_slot_of_its_tile() {
         // the block per slot: 4, 2, 4, none, 2, 0, 4, none
         let blocks = [4, 2, 4, NO_BLOCK, 2, 0, 4, NO_BLOCK];
-        assert_eq!(tile_owners(&blocks, 5), [0, 1, 0, 3, 1, 5, 0, 7]);
+        let mut first = vec![NO_BLOCK; 5];
+        // on one thread, and on threads in ranges of one slot and of three;
+        // `first` back to NO_BLOCK after each
+        for par in [(1, usize::MAX), (8, 1), (3, 3)] {
+            assert_eq!(tile_owners(&blocks, &mut first, par), [0, 1, 0, 3, 1, 5, 0, 7], "{par:?}");
+            assert!(first.iter().all(|&f| f == NO_BLOCK), "{par:?}");
+        }
     }
 
-    /// The tiles looked up and the instances grouped on several threads
-    /// equal the ones on one: two entity tables (three and two parameters a
-    /// slot, some fixed throughout), a cross constraint between them, every
-    /// row a lookup, and a one-sided constraint on the second table.
+    /// The tiles looked up, the instances grouped, H's cells listed and the
+    /// structure written on several threads equal the ones on one: two
+    /// entity tables (three and two parameters a slot, some fixed
+    /// throughout), a cross constraint between them, every row a lookup,
+    /// and a one-sided constraint on the second table.
     #[test]
-    fn tiles_on_several_threads_are_the_tiles_on_one() {
+    fn the_layout_on_several_threads_is_the_layout_on_one() {
         let (s0, s1, nrows) = (50usize, 70usize, 300usize);
         let mut idx0: Vec<u32> = (0..3 * s0 as u32).collect();
         let mut idx1: Vec<u32> = (0..2 * s1 as u32).map(|i| 3 * s0 as u32 + i).collect();
@@ -1907,12 +2106,36 @@ mod tests {
                 }
             }
         }
-        let owners: Vec<Vec<u32>> = one.cross_block.iter().map(|b| tile_owners(b, pattern.nblocks())).collect();
+        let owners = all_tile_owners(&one, pattern.nblocks(), (1, usize::MAX));
         let grouped = |threads| groups(&shape, &st, &[s0, s1], &[nrows], &owners, (threads, 1));
         let want = grouped(1);
         assert_eq!(want[1].sides[0].1.len(), 40);
         assert_eq!(grouped(2), want);
         assert_eq!(grouped(8), want);
+        // H's cells from the structure, every one a block of the pattern
+        let cells_with = |par| {
+            let mut out = Vec::new();
+            cells_of(&shape, &st, &mut out, par);
+            out
+        };
+        let cells_one = cells_with((1, usize::MAX));
+        assert_eq!(cells_with((4, 7)), cells_one);
+        assert_eq!(cells_one.len(), s0 + s1 - 2 + nrows);
+        assert!(cells_one.iter().all(|&(i, j)| pattern.block_of_scalar(i as usize, j as usize).is_some()));
+        // the structure columns, a job per column and in ranges of 7 instances
+        let mut t = tiles(&shape, &st, &[s0, s1], &[nrows], &r, (1, usize::MAX));
+        stores(&shape, &want, &mut t, pattern.nblocks());
+        let layout = Layout::new(columns(&shape, &[s0, s1], &[nrows], &[nrows, 40], 8, Values::of(8, Wide::F64)));
+        let offset = layout.index();
+        let write = |par| {
+            let mut image = vec![0u8; layout.structure_bytes];
+            let refs = write_structure(&mut image, &offset, &shape, &st, &[s0, s1], &t, &want, par);
+            (image, refs)
+        };
+        let image_one = write((1, usize::MAX));
+        assert_eq!(write((4, 7)), image_one);
+        let slots0 = &image_one.0[offset["C0_S0"]..offset["C0_S0"] + 4 * nrows];
+        assert!(slots0.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).eq(cols[0].iter().copied()));
     }
 
     /// Which kernels store their tiles, and whether H is zeroed first. A
@@ -1964,7 +2187,7 @@ mod tests {
             let pattern = arael_faer::bsc::SymbolicSparseBlockColMat::covering(p.clone(), p, cells.len(), |k| (part[cells[k].0], part[cells[k].1]));
             let (slots, cross_slots) = ([s0, s1], [n, if second { 5 } else { 0 }]);
             let mut t = tiles(&shape, &st, &slots, &cross_slots, &Resolver::new(&pattern), (1, usize::MAX));
-            let owners: Vec<Vec<u32>> = t.cross_block.iter().map(|b| tile_owners(b, pattern.nblocks())).collect();
+            let owners = all_tile_owners(&t, pattern.nblocks(), (1, usize::MAX));
             let zero = stores(&shape, &groups(&shape, &st, &slots, &cross_slots, &owners, (1, usize::MAX)), &mut t, pattern.nblocks());
             let stored = |recs: &[u32]| recs.chunks(3).map(|r| r[1] & TILE_STORE != 0).collect::<Vec<bool>>();
             (stored(&t.entity[0]), stored(&t.entity[1]), stored(&t.cross[0]), zero)

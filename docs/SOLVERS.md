@@ -501,9 +501,10 @@ without such state can leave it empty.
 
 A solve of a generated root builds a block store: one array per
 declared block field, holding every Hessian block and gradient entry
-the sweeps write, and one store per thread when the sweeps thread. The
-plain entry points, `lm_solve` and the `solve_*` methods, build it per
-solve and drop it after. To keep it across solves of one model, hold an
+the sweeps write, and one store per thread when the sweeps thread. A
+solve that assembles on its GPU builds none, and drops the stores a
+context holds. The plain entry points, `lm_solve` and the `solve_*`
+methods, build it per solve and drop it after. To keep it across solves of one model, hold an
 `arael::Context` and solve through `lm_solve_with_context`, or solve
 through an `LmSession`, which keeps one of its own. A solve through a
 context fills the same allocations again; the `_with_context`
