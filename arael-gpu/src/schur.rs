@@ -241,6 +241,10 @@ pub struct GpuSchurParams {
     /// most 32 for the right-hand side and 8 for the residual. Kept blocks
     /// wider than 32 columns take one warp.
     pub kept_warps: Option<u32>,
+    /// Host threads of arael's worker pool ([`arael_faer::pool`]) that
+    /// build the reduction's plan, at least 1. The plan does not depend on
+    /// it. Default 1.
+    pub threads: usize,
 }
 
 /// The most warps a kept block takes in a kernel whose lanes are its rows:
@@ -277,7 +281,7 @@ impl GpuSchurParams {
 
 impl Default for GpuSchurParams {
     fn default() -> Self {
-        GpuSchurParams { tile_warps: None, split_pairs: 128, tile_groups: None, f32_reduction: false, kept_warps: None }
+        GpuSchurParams { tile_warps: None, split_pairs: 128, tile_groups: None, f32_reduction: false, kept_warps: None, threads: 1 }
     }
 }
 
@@ -337,6 +341,87 @@ struct Elimination<'a> {
     pairs: usize,
     /// Per tile of S, its pairs ([`SchurSymbolic::tile_pairs`]).
     tile_pairs: std::borrow::Cow<'a, [u32]>,
+}
+
+/// Observers a thread of a reduction's plan takes at least.
+const PLAN_MIN_OBSERVERS: usize = 1 << 15;
+
+/// A range of eliminated blocks of a reduction's plan: its sums, and the
+/// offsets it starts at (the earlier ranges' sums).
+#[derive(Default)]
+struct PlanRange {
+    slots: core::ops::Range<usize>,
+    sum_dfac: u32,
+    sum_z: u32,
+    sum_w: u32,
+    sum_pairs: u32,
+    ew_max: usize,
+    kw_max: usize,
+    dfac: u32,
+    z: u32,
+    w: u32,
+    pairs: u32,
+}
+
+/// A range's slices of the plan's words: the eliminated blocks' and the
+/// observers' records, the observers' kept blocks, and per eliminated
+/// block its block of H and its pairs' end.
+struct PlanSlices<'a> {
+    se: &'a mut [u32],
+    so: &'a mut [u32],
+    obs_kept: &'a mut [u32],
+    elim_blk: &'a mut [u32],
+    e_pair_ptr: &'a mut [u32],
+}
+
+impl PlanRange {
+    /// The range's sums: the factors' and the solves' lengths, W's
+    /// length, the pairs, the widest eliminated and kept blocks.
+    fn sum(&mut self, sym: &Elimination) {
+        let p = sym.elim_obs_ptr;
+        (self.ew_max, self.kw_max) = (1, 1);
+        for slot in self.slots.clone() {
+            let we = sym.elim_w[slot];
+            self.ew_max = self.ew_max.max(we as usize);
+            self.sum_dfac += we * we;
+            self.sum_z += we;
+            for o in p[slot] as usize..p[slot + 1] as usize {
+                let wo = sym.obs_w[o];
+                self.sum_w += wo * we;
+                self.kw_max = self.kw_max.max(wo as usize);
+            }
+            let m = p[slot + 1] - p[slot];
+            self.sum_pairs += m * (m + 1) / 2;
+        }
+    }
+
+    /// The range's records from its first offsets.
+    fn fill(&self, sym: &Elimination, hsym: &SymbolicSparseBlockColMat<SparseIndex>, sl: &mut PlanSlices<'_>) {
+        let (p, hpart) = (sym.elim_obs_ptr, hsym.col_part());
+        let (mut dfac, mut z, mut w, mut pairs) = (self.dfac, self.z, self.w, self.pairs);
+        let (s0, o0) = (self.slots.start, p[self.slots.start] as usize);
+        for slot in self.slots.clone() {
+            let ls = slot - s0;
+            let r = &mut sl.se[SE_REC * ls..][..SE_REC];
+            let dblk = sym.elim_diag[slot] as usize;
+            let e = hsym.blk_row(dblk);
+            let we = sym.elim_w[slot];
+            (r[SE_DIAG_OFF], r[SE_W], r[SE_ORIG_OFF], r[SE_OBS_PTR], r[SE_DFAC_OFF], r[SE_Z_OFF]) = (hsym.val_range(dblk).start as u32, we, hpart[e], p[slot], dfac, z);
+            sl.elim_blk[ls] = e as u32;
+            dfac += we * we;
+            z += we;
+            for o in p[slot] as usize..p[slot + 1] as usize {
+                let wo = sym.obs_w[o];
+                let r = &mut sl.so[SO_REC * (o - o0)..][..SO_REC];
+                (r[SO_W_OFF], r[SO_DIMS], r[SO_CA_OFF], r[SO_E], r[SO_ORIG_OFF]) = (w, so_dims(wo, we, sym.obs_trans[o]), sym.obs_ca_off[o], slot as u32, sym.obs_orig_off[o]);
+                w += wo * we;
+                sl.obs_kept[o - o0] = sym.obs_kept[o];
+            }
+            let m = p[slot + 1] - p[slot];
+            pairs += m * (m + 1) / 2;
+            sl.e_pair_ptr[ls] = pairs;
+        }
+    }
 }
 
 /// Where the status starts in a solve's output, after the step's `n`
@@ -404,27 +489,28 @@ pub(crate) struct SchurPlan {
 
 impl SchurPlan {
     /// The plan of `sym`, the reduction of a matrix with the block structure `hsym`.
-    pub fn reduction(sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
+    /// Built on up to `threads` threads of the worker pool
+    /// ([`arael_faer::pool`]), each taking at least `min_obs` observers;
+    /// the plan does not depend on either.
+    pub fn reduction(sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, threads: usize, min_obs: usize) -> Self {
         let (src, dst) = sym.copy_tiles();
-        Self::build(
-            &Elimination {
-                elim_diag: sym.elim_diag(),
-                elim_w: sym.elim_w(),
-                elim_obs_ptr: sym.elim_obs_ptr(),
-                obs_w: sym.obs_w(),
-                obs_ca_off: sym.obs_ca_off(),
-                obs_trans: sym.obs_trans(),
-                obs_orig_off: sym.obs_orig_off(),
-                obs_kept: sym.obs_kept(),
-                kept: std::borrow::Cow::Borrowed(&sym.kept),
-                s: &sym.s,
-                copy_src: std::borrow::Cow::Borrowed(src),
-                copy_dst: std::borrow::Cow::Borrowed(dst),
-                pairs: sym.pair_count(),
-                tile_pairs: std::borrow::Cow::Borrowed(sym.tile_pairs()),
-            },
-            hsym,
-        )
+        let elim = Elimination {
+            elim_diag: sym.elim_diag(),
+            elim_w: sym.elim_w(),
+            elim_obs_ptr: sym.elim_obs_ptr(),
+            obs_w: sym.obs_w(),
+            obs_ca_off: sym.obs_ca_off(),
+            obs_trans: sym.obs_trans(),
+            obs_orig_off: sym.obs_orig_off(),
+            obs_kept: sym.obs_kept(),
+            kept: std::borrow::Cow::Borrowed(&sym.kept),
+            s: &sym.s,
+            copy_src: std::borrow::Cow::Borrowed(src),
+            copy_dst: std::borrow::Cow::Borrowed(dst),
+            pairs: sym.pair_count(),
+            tile_pairs: std::borrow::Cow::Borrowed(sym.tile_pairs()),
+        };
+        Self::build(&elim, hsym, threads, min_obs)
     }
 
     /// The plan with nothing eliminated: S is H.
@@ -448,148 +534,197 @@ impl SchurPlan {
                 tile_pairs: std::borrow::Cow::Owned(vec![0; hsym.nblocks()]),
             },
             hsym,
+            1,
+            PLAN_MIN_OBSERVERS,
         )
     }
 
-    fn build(sym: &Elimination, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
+    fn build(sym: &Elimination, hsym: &SymbolicSparseBlockColMat<SparseIndex>, threads: usize, min_obs: usize) -> Self {
         let ne = sym.elim_diag.len();
         let no = sym.obs_w.len();
         let nk = sym.kept.len();
         let n = hsym.ncols();
         let nks = sym.s.nrows();
         let hpart = hsym.col_part();
-        // The plan's words: the header, then the eliminated blocks' and the
-        // observers' tables, their records written in place; room for the
-        // tiles', the observers' and the kept blocks' words that follow.
-        let (at_se, at_so) = (SHEADER, SHEADER + SE_REC * (ne + 1));
-        // the words packed below: six arrays of a word per tile and its pair
-        // pointers (nt + 1), the observers' kept blocks and the kept
-        // blocks' observers (no each), the kept blocks' observer pointers
-        // and first tiles (nk + 1 each) and three words each (nk), the
-        // eliminated blocks' pair pointers (ne + 1); sized once, so the
-        // buffer is never reallocated
-        let nt = sym.s.nblocks();
-        let words = at_so + SO_REC * no + 7 * nt + 1 + 2 * no + 2 * (nk + 1) + 3 * nk + ne + 1;
-        let mut buf: Vec<u32> = Vec::with_capacity(words);
-        buf.resize(at_so + SO_REC * no, 0);
-        (buf[SE], buf[SO]) = (at_se as u32, at_so as u32);
-        let (se, so) = buf[at_se..].split_at_mut(SE_REC * (ne + 1));
-        // a record per eliminated block, and one more for the end of the
-        // last one's observers
-        let e_obs_ptr = sym.elim_obs_ptr;
-        let mut elim_blk = Vec::with_capacity(ne);
-        let (mut dfac_len, mut z_len) = (0u32, 0u32);
-        let mut ew_max = 1usize;
-        for (slot, r) in se.chunks_exact_mut(SE_REC).enumerate() {
-            r[SE_OBS_PTR] = e_obs_ptr[slot];
-            if slot == ne {
-                break;
-            }
-            let dblk = sym.elim_diag[slot] as usize;
-            let e = hsym.blk_row(dblk);
-            let we = sym.elim_w[slot];
-            ew_max = ew_max.max(we as usize);
-            (r[SE_DIAG_OFF], r[SE_W], r[SE_ORIG_OFF], r[SE_DFAC_OFF], r[SE_Z_OFF]) = (hsym.val_range(dblk).start as u32, we, hpart[e], dfac_len, z_len);
-            elim_blk.push(e as u32);
-            dfac_len += we * we;
-            z_len += we;
-        }
-        // a record per observer, in the order of their eliminated blocks
-        let mut w_len = 0u32;
-        let mut kw_max = 1usize;
-        for slot in 0..ne {
-            let we = sym.elim_w[slot];
-            for o in e_obs_ptr[slot] as usize..e_obs_ptr[slot + 1] as usize {
-                let wo = sym.obs_w[o];
-                let r = &mut so[SO_REC * o..][..SO_REC];
-                (r[SO_W_OFF], r[SO_DIMS], r[SO_CA_OFF], r[SO_E], r[SO_ORIG_OFF]) = (w_len, so_dims(wo, we, sym.obs_trans[o]), sym.obs_ca_off[o], slot as u32, sym.obs_orig_off[o]);
-                w_len += wo * we;
-                kw_max = kw_max.max(wo as usize);
-            }
-        }
-        // the tiles of S, in storage order, with their kept-kept source
         let ssym = sym.s;
         let spart = ssym.col_part();
-        let mut copy_of = vec![NONE; nt];
-        let (csrc, cdst) = (&sym.copy_src[..], &sym.copy_dst[..]);
-        for (&src, &dst) in csrc.iter().zip(cdst) {
-            copy_of[dst as usize] = hsym.val_range(src as usize).start as u32;
+        let nt = ssym.nblocks();
+        let e_obs_ptr = sym.elim_obs_ptr;
+        // The plan's words: the header, then the eliminated blocks' and the
+        // observers' records, then a word per tile in six arrays and the
+        // tiles' pair pointers, the observers' kept blocks and the kept
+        // blocks' observers, the kept blocks' tables and the eliminated
+        // blocks' pair pointers. Laid out once here, every region written
+        // in place.
+        let (at_se, at_so) = (SHEADER, SHEADER + SE_REC * (ne + 1));
+        let packed: [(usize, usize); 15] = [
+            (ST_VAL_OFF, nt),
+            (ST_WR, nt),
+            (ST_WC, nt),
+            (ST_A, nt),
+            (ST_B, nt),
+            (ST_COPY_OFF, nt),
+            (ST_PAIR_PTR, nt + 1),
+            (OBS_KEPT, no),
+            (SK_OBS_PTR, nk + 1),
+            (SK_OBS, no),
+            (SK_S_OFF, nk),
+            (SK_ORIG_OFF, nk),
+            (SK_W, nk),
+            (SK_T_PTR, nk + 1),
+            (SE_PAIR_PTR, ne + 1),
+        ];
+        let words = at_so + SO_REC * no + packed.iter().map(|p| p.1).sum::<usize>();
+        let mut buf: Vec<u32> = vec![0; words];
+        (buf[SE], buf[SO]) = (at_se as u32, at_so as u32);
+        let mut at = at_so + SO_REC * no;
+        for &(slot, len) in &packed {
+            buf[slot] = at as u32;
+            at += len;
         }
-        // a tile's blocks' offsets in the reduced vector are the kept blocks' (SK_S_OFF of ST_A and ST_B)
-        let (mut t_val, mut t_wr, mut t_wc, mut t_a, mut t_b, mut t_copy) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for bcol in 0..ssym.nblk_cols() {
-            for t in ssym.col_range(bcol) {
-                // a tile's index in these arrays is its block index in S
-                debug_assert_eq!(t, t_val.len());
-                let a = ssym.blk_row(t);
-                let (wr, wc) = ssym.block_dims(t);
-                kw_max = kw_max.max(wr).max(wc);
-                t_val.push(ssym.val_range(t).start as u32);
-                t_wr.push(wr as u32);
-                t_wc.push(wc as u32);
-                t_a.push(a as u32);
-                t_b.push(bcol as u32);
-                t_copy.push(copy_of[t]);
+        let rest = &mut buf[at_se..];
+        let (se, rest) = rest.split_at_mut(SE_REC * (ne + 1));
+        let (so, rest) = rest.split_at_mut(SO_REC * no);
+        let (t_val, rest) = rest.split_at_mut(nt);
+        let (t_wr, rest) = rest.split_at_mut(nt);
+        let (t_wc, rest) = rest.split_at_mut(nt);
+        let (t_a, rest) = rest.split_at_mut(nt);
+        let (t_b, rest) = rest.split_at_mut(nt);
+        let (t_copy, rest) = rest.split_at_mut(nt);
+        let (t_pair_ptr, rest) = rest.split_at_mut(nt + 1);
+        let (obs_kept, rest) = rest.split_at_mut(no);
+        let (k_obs_ptr, rest) = rest.split_at_mut(nk + 1);
+        let (k_obs, rest) = rest.split_at_mut(no);
+        let (k_s_off, rest) = rest.split_at_mut(nk);
+        let (k_orig, rest) = rest.split_at_mut(nk);
+        let (k_w, rest) = rest.split_at_mut(nk);
+        let (k_t_ptr, e_pair_ptr) = rest.split_at_mut(nk + 1);
+
+        // The eliminated blocks by ranges of about equal observers, on up
+        // to `threads` threads: first each range's sums, from which every
+        // range's first offsets follow, then each range's records.
+        let parts = threads.min(no / min_obs.max(1)).clamp(1, ne.max(1));
+        let mut cuts = vec![0usize];
+        for t in 1..parts {
+            let at = e_obs_ptr.partition_point(|&o| (o as usize) < no * t / parts).min(ne);
+            cuts.push(at.max(cuts[t - 1]));
+        }
+        cuts.push(ne);
+        let mut ranges: Vec<PlanRange> = (0..parts).map(|t| PlanRange { slots: cuts[t]..cuts[t + 1], ..Default::default() }).collect();
+        let sum = |_: usize, r: &mut PlanRange| r.sum(sym);
+        let over = |ranges: &mut Vec<PlanRange>, f: &(dyn Fn(usize, &mut PlanRange) + Sync)| {
+            if let [one] = &mut ranges[..] {
+                f(0, one);
+            } else {
+                arael_faer::pool::run_over(ranges, f);
+            }
+        };
+        over(&mut ranges, &sum);
+        let (mut dfac_len, mut z_len, mut w_len, mut pairs) = (0u32, 0u32, 0u32, 0u32);
+        let (mut ew_max, mut kw_max) = (1usize, 1usize);
+        for r in ranges.iter_mut() {
+            (r.dfac, r.z, r.w, r.pairs) = (dfac_len, z_len, w_len, pairs);
+            dfac_len += r.sum_dfac;
+            z_len += r.sum_z;
+            w_len += r.sum_w;
+            pairs += r.sum_pairs;
+            ew_max = ew_max.max(r.ew_max);
+            kw_max = kw_max.max(r.kw_max);
+        }
+        let mut elim_blk = vec![0u32; ne];
+        {
+            // each range's slices of the records, the observers' kept
+            // blocks, the eliminated blocks and their pair pointers
+            let obs_cut = |c: usize| e_obs_ptr[c] as usize;
+            let mut se = arael_faer::cut_slices(&mut se[..SE_REC * ne], &cuts.iter().map(|&c| SE_REC * c).collect::<Vec<_>>()).into_iter();
+            let mut so = arael_faer::cut_slices(so, &cuts.iter().map(|&c| SO_REC * obs_cut(c)).collect::<Vec<_>>()).into_iter();
+            let mut ok = arael_faer::cut_slices(obs_kept, &cuts.iter().map(|&c| obs_cut(c)).collect::<Vec<_>>()).into_iter();
+            let mut eb = arael_faer::cut_slices(&mut elim_blk, &cuts).into_iter();
+            let mut ep = arael_faer::cut_slices(&mut e_pair_ptr[1..], &cuts).into_iter();
+            let mut fills: Vec<(&PlanRange, PlanSlices<'_>)> = ranges
+                .iter()
+                .map(|r| (r, PlanSlices { se: se.next().unwrap(), so: so.next().unwrap(), obs_kept: ok.next().unwrap(), elim_blk: eb.next().unwrap(), e_pair_ptr: ep.next().unwrap() }))
+                .collect();
+            let fill = |_: usize, (r, sl): &mut (&PlanRange, PlanSlices<'_>)| r.fill(sym, hsym, sl);
+            if let [one] = &mut fills[..] {
+                fill(0, one);
+            } else {
+                arael_faer::pool::run_over(&mut fills, fill);
             }
         }
-        // the kept blocks' observer lists
+        // the end of the last eliminated block's observers
+        se[SE_REC * ne + SE_OBS_PTR] = e_obs_ptr[ne];
+
+        // the tiles of S, in storage order, with their kept-kept source
+        t_copy.fill(NONE);
+        for (&src, &dst) in sym.copy_src.iter().zip(sym.copy_dst.iter()) {
+            t_copy[dst as usize] = hsym.val_range(src as usize).start as u32;
+        }
+        // a tile's blocks' offsets in the reduced vector are the kept blocks' (SK_S_OFF of ST_A and ST_B)
+        for bcol in 0..ssym.nblk_cols() {
+            for t in ssym.col_range(bcol) {
+                let (wr, wc) = ssym.block_dims(t);
+                kw_max = kw_max.max(wr).max(wc);
+                (t_val[t], t_wr[t], t_wc[t], t_a[t], t_b[t]) = (ssym.val_range(t).start as u32, wr as u32, wc as u32, ssym.blk_row(t) as u32, bcol as u32);
+            }
+        }
+        // the kept blocks' observer lists, by the ranges: each counts its
+        // observers per kept block, then places them after the earlier
+        // ranges' of the block
         let kept_of_obs = sym.obs_kept;
-        let mut k_obs_ptr = vec![0u32; nk + 1];
-        for &k in kept_of_obs {
-            k_obs_ptr[k as usize + 1] += 1;
+        let obs_range = |t: usize| e_obs_ptr[cuts[t]] as usize..e_obs_ptr[cuts[t + 1]] as usize;
+        let mut kat: Vec<Vec<u32>> = vec![Vec::new(); parts];
+        let count = |t: usize, at: &mut Vec<u32>| {
+            at.resize(nk, 0);
+            for &k in &kept_of_obs[obs_range(t)] {
+                at[k as usize] += 1;
+            }
+        };
+        if let [one] = &mut kat[..] {
+            count(0, one);
+        } else {
+            arael_faer::pool::run_over(&mut kat, count);
         }
         for k in 0..nk {
-            k_obs_ptr[k + 1] += k_obs_ptr[k];
+            let mut m = 0u32;
+            for at in kat.iter_mut() {
+                let c = at[k];
+                at[k] = k_obs_ptr[k] + m;
+                m += c;
+            }
+            k_obs_ptr[k + 1] = k_obs_ptr[k] + m;
         }
-        let mut fill = k_obs_ptr.clone();
-        let mut k_obs = vec![0u32; no];
-        for (o, &k) in kept_of_obs.iter().enumerate() {
-            k_obs[fill[k as usize] as usize] = o as u32;
-            fill[k as usize] += 1;
+        {
+            let out = arael_faer::pool::SharedMut(k_obs.as_mut_ptr());
+            let place = |t: usize, at: &mut Vec<u32>| {
+                for o in obs_range(t) {
+                    let k = kept_of_obs[o] as usize;
+                    // A (range, kept block) pair owns the entries from its
+                    // offset above to the next range's: no two writes
+                    // meet, and every write is below no.
+                    unsafe { *out.ptr().add(at[k] as usize) = o as u32 };
+                    at[k] += 1;
+                }
+            };
+            if let [one] = &mut kat[..] {
+                place(0, one);
+            } else {
+                arael_faer::pool::run_over(&mut kat, place);
+            }
         }
-        let k_s_off: Vec<u32> = (0..nk).map(|k| spart[k]).collect();
-        let k_orig: Vec<u32> = sym.kept.iter().map(|&orig| hpart[orig as usize]).collect();
-        let k_w: Vec<u32> = (0..nk).map(|k| spart[k + 1] - spart[k]).collect();
+        for k in 0..nk {
+            (k_s_off[k], k_orig[k], k_w[k], k_t_ptr[k]) = (spart[k], hpart[sym.kept[k] as usize], spart[k + 1] - spart[k], ssym.col_range(k).start as u32);
+        }
+        k_t_ptr[nk] = nt as u32;
         // each tile's first pair, from the symbolic's count of each tile's
         // pairs (every (oa, ob) of one eliminated block with kept(oa) <=
         // kept(ob)); the device writes the pairs (`k_schur_pairs`)
         let np = sym.pairs;
         assert_eq!(sym.tile_pairs.len(), nt, "a pair count per tile of S");
-        let mut t_pair_ptr = vec![0u32; nt + 1];
         for t in 0..nt {
             t_pair_ptr[t + 1] = t_pair_ptr[t] + sym.tile_pairs[t];
         }
         assert_eq!(t_pair_ptr[nt] as usize, np, "the reduction counted its pairs");
-        let k_t_ptr: Vec<u32> = (0..nk).map(|b| ssym.col_range(b).start as u32).chain([nt as u32]).collect();
-        let obs_kept: Vec<u32> = kept_of_obs.iter().map(|&k| k as u32).collect();
-        let mut e_pair_ptr = vec![0u32; ne + 1];
-        for e in 0..ne {
-            let m = e_obs_ptr[e + 1] - e_obs_ptr[e];
-            e_pair_ptr[e + 1] = e_pair_ptr[e] + m * (m + 1) / 2;
-        }
-        // pack the rest
-        let arrays: [(usize, &[u32]); 15] = [
-            (ST_VAL_OFF, &t_val),
-            (ST_WR, &t_wr),
-            (ST_WC, &t_wc),
-            (ST_A, &t_a),
-            (ST_B, &t_b),
-            (ST_COPY_OFF, &t_copy),
-            (ST_PAIR_PTR, &t_pair_ptr),
-            (OBS_KEPT, &obs_kept),
-            (SK_OBS_PTR, &k_obs_ptr),
-            (SK_OBS, &k_obs),
-            (SK_S_OFF, &k_s_off),
-            (SK_ORIG_OFF, &k_orig),
-            (SK_W, &k_w),
-            (SK_T_PTR, &k_t_ptr),
-            (SE_PAIR_PTR, &e_pair_ptr),
-        ];
-        for (slot, v) in arrays {
-            buf[slot] = buf.len() as u32;
-            buf.extend_from_slice(v);
-        }
-        debug_assert_eq!(buf.len(), words, "the plan's words are the ones reserved");
         let ew_cap = round_cap(ew_max);
         let kw_cap = round_cap(kw_max);
         SchurPlan {
@@ -890,7 +1025,8 @@ impl<D: Device> GpuSchur<D> {
     /// As [`new`](Self::new), and for `params` out of range: `tile_warps`
     /// 0, `tile_groups` not 1, 2, 4 or 8, `kept_warps` not 1 to 32.
     pub fn with_params(dev: &Arc<D>, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, values: impl Into<Values>, params: &GpuSchurParams) -> Result<Self, GpuError> {
-        Self::build(dev, SchurPlan::reduction(sym, hsym), hsym.val_count(), values.into(), params)
+        let plan = SchurPlan::reduction(sym, hsym, params.threads, PLAN_MIN_OBSERVERS);
+        Self::build(dev, plan, hsym.val_count(), values.into(), params)
     }
 
     /// [`new`](Self::new) with nothing eliminated: S is H, and a solve is
@@ -2276,7 +2412,7 @@ mod tests {
         for (poses, landmarks, seed) in [(10, 30, 2), (12, 60, 4), (6, 40, 5)] {
             let (h, _, _, elim) = ba_like(poses, landmarks, seed);
             let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
-            let p = SchurPlan::reduction(&sym, h.symbolic());
+            let p = SchurPlan::reduction(&sym, h.symbolic(), 1, PLAN_MIN_OBSERVERS);
             let w = &p.words;
             let (ssym, kept, eptr, so) = (&sym.s, sym.obs_kept(), sym.elim_obs_ptr(), w[SO] as usize);
             let rec = |oa: usize, ob: usize| [w[so + SO_REC * oa + SO_W_OFF], w[so + SO_REC * ob + SO_CA_OFF], w[so + SO_REC * ob + SO_DIMS]];
@@ -2326,7 +2462,7 @@ mod tests {
     fn the_device_expands_each_kept_observer_into_its_words() {
         let (h, _, _, elim) = ba_like(10, 30, 2);
         let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
-        let p = SchurPlan::reduction(&sym, h.symbolic());
+        let p = SchurPlan::reduction(&sym, h.symbolic(), 1, PLAN_MIN_OBSERVERS);
         let w = &p.words;
         let so = w[SO] as usize;
         let se = w[SE] as usize;
@@ -2353,7 +2489,7 @@ mod tests {
     fn the_device_expands_a_kept_blocks_tile_entries_into_records() {
         let (h, _, _, elim) = ba_like(10, 30, 2);
         let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
-        let p = SchurPlan::reduction(&sym, h.symbolic());
+        let p = SchurPlan::reduction(&sym, h.symbolic(), 1, PLAN_MIN_OBSERVERS);
         let (nt, nk) = (p.nt as usize, p.nk as usize);
         let at = |slot: usize, i: usize| p.words[p.words[slot] as usize + i];
         let (ptr, _) = tiles_by_kept_block(&p);
@@ -2381,6 +2517,20 @@ mod tests {
         }
     }
 
+    /// The plan built on threads, the eliminated blocks cut into ranges
+    /// of a few observers, is the plan one thread builds.
+    #[test]
+    fn the_plan_on_threads_is_the_plan_on_one() {
+        let (h, _, _, elim) = ba_like(40, 3000, 5);
+        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
+        let one = SchurPlan::reduction(&sym, h.symbolic(), 1, PLAN_MIN_OBSERVERS);
+        let key = |p: &SchurPlan| (p.words.clone(), p.elim_blk.clone(), p.dfac_len, p.z_len, p.w_len, p.ew_max, p.kw_max, p.np);
+        for (threads, min_obs) in [(2, 1), (3, 100), (8, 1), (64, 1)] {
+            let many = SchurPlan::reduction(&sym, h.symbolic(), threads, min_obs);
+            assert!(key(&many) == key(&one), "{threads} threads, {min_obs} observers at least");
+        }
+    }
+
     /// The plan's tables: a record per eliminated block and one more for
     /// the end of the last one's observers; a record per observer, its
     /// sizes in one word; per tile of S the count of its pairs (two
@@ -2391,7 +2541,7 @@ mod tests {
         assert_eq!(so_dims(6, 3, false), 0x306);
         let (h, _, _, elim) = ba_like(10, 30, 2);
         let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
-        let p = SchurPlan::reduction(&sym, h.symbolic());
+        let p = SchurPlan::reduction(&sym, h.symbolic(), 1, PLAN_MIN_OBSERVERS);
         let (ne, no, nt, np) = (p.ne as usize, p.no as usize, p.nt as usize, sym.pair_count());
         let w = &p.words;
         // the words were reserved for, not grown into
@@ -2440,7 +2590,7 @@ mod tests {
     fn the_tile_blocks_hold_every_tile_once() {
         let (h, _, _, elim) = ba_like(40, 300, 5);
         let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
-        let p = SchurPlan::reduction(&sym, h.symbolic());
+        let p = SchurPlan::reduction(&sym, h.symbolic(), 1, PLAN_MIN_OBSERVERS);
         let ptr = &p.words[p.words[ST_PAIR_PTR] as usize..][..p.nt as usize + 1];
         let pairs = |t: u32| ptr[t as usize + 1] - ptr[t as usize];
         let split_pairs = 20;
@@ -2530,7 +2680,7 @@ mod tests {
         for wide in wides(&*device()) {
             for groups in [1, 4] {
                 let reduce = |lanes| {
-                    let p = SchurPlan::reduction(&sym, h.symbolic());
+                    let p = SchurPlan::reduction(&sym, h.symbolic(), 1, PLAN_MIN_OBSERVERS);
                     let params = GpuSchurParams { tile_groups: Some(groups), ..Default::default() };
                     let mut g = GpuSchur::build_lanes(&dev, p, h.symbolic().val_count(), wide.into(), lanes, &params).unwrap();
                     g.reduce(h.vals(), &rhs).unwrap();
