@@ -374,33 +374,8 @@ mod tests {
         assert_eq!(finished.load(Ordering::SeqCst), 3, "the workers finished before the panic resumed");
     }
 
-    #[test]
-    fn the_pool_grows_with_the_call_and_keeps_its_workers() {
-        let _t = turn();
-        shutdown();
-        for (n, alive) in [(2usize, 1usize), (8, 7), (3, 7), (6, 7), (1, 7)] {
-            let hits = AtomicUsize::new(0);
-            run(n, &|_| { hits.fetch_add(1, Ordering::SeqCst); });
-            assert_eq!(hits.load(Ordering::SeqCst), n);
-            assert_eq!(workers(), alive, "after a run of {}", n);
-        }
-    }
-
-    #[test]
-    fn shutdown_joins_every_worker_and_the_next_run_spawns_again() {
-        let _t = turn();
-        shutdown();
-        run(4, &|_| {});
-        assert_eq!(workers(), 3);
-        shutdown();
-        assert_eq!(workers(), 0);
-        shutdown();
-        assert_eq!(workers(), 0, "a second shutdown finds nothing to do");
-        let hits = AtomicUsize::new(0);
-        run(4, &|_| { hits.fetch_add(1, Ordering::SeqCst); });
-        assert_eq!(hits.load(Ordering::SeqCst), 4);
-        assert_eq!(workers(), 3);
-    }
+    // The tests that count the pool's workers are in tests/pool_workers.rs:
+    // a process of their own, where no other module's test runs on the pool.
 
     #[test]
     fn shutdown_waits_for_a_dispatch_in_progress() {
