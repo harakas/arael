@@ -946,6 +946,27 @@ fn par_ranges<R: Send>(n: usize, threads: usize, min: usize, r: &Resolver<'_>, f
     out.into_iter().map(|(_, res)| res.expect("every range ran")).collect()
 }
 
+/// `n` copies of `value`, written by ranges of at least `min` on up to
+/// `threads` threads of the worker pool: a large array's pages are first
+/// touched by the threads that fill it, not by the caller alone.
+fn filled(n: usize, value: u32, (threads, min): (usize, usize)) -> Vec<u32> {
+    let parts = threads.min(n / min.max(1)).max(1);
+    if parts == 1 {
+        return vec![value; n];
+    }
+    let mut v: Vec<u32> = Vec::with_capacity(n);
+    let mut chunks: Vec<&mut [core::mem::MaybeUninit<u32>]> = v.spare_capacity_mut()[..n].chunks_mut(n.div_ceil(parts)).collect();
+    arael_faer::pool::run_over(&mut chunks, |_, c| {
+        for x in c.iter_mut() {
+            x.write(value);
+        }
+    });
+    drop(chunks);
+    // every element of the first `n` was written above
+    unsafe { v.set_len(n) };
+    v
+}
+
 /// The tiles of the structure `st` in the pattern `r` resolves, on up to
 /// `threads` threads of at least `min` lookups each: per entity table
 /// `(base, stride, start)` per slot,
@@ -969,88 +990,181 @@ fn tiles(
         tile_extent(&st.idx[e][s * n..(s + 1) * n])
     };
     let mut entity: Vec<Vec<u32>> = Vec::with_capacity(slots.len());
+    // per entity table, per slot: its block row of H and its stride word
+    // (`NO_BLOCK` and 0 where it is fixed throughout), what a cross tile
+    // between whole tiles is found from
+    let mut ekey: Vec<Vec<u32>> = Vec::with_capacity(slots.len());
     let mut whole = Vec::with_capacity(slots.len());
     for (e, &ns) in slots.iter().enumerate() {
-        // per range its records, and whether each of its tiles is its block
-        let parts: Vec<(Vec<u32>, bool)> = par_ranges(ns, threads, min, r, |range, r| {
+        // per range its records and keys, and whether each of its tiles is
+        // its block
+        let parts: Vec<(Vec<u32>, Vec<u32>, bool)> = par_ranges(ns, threads, min, r, |range, r| {
             let mut all = true;
-            let recs = range
-                .flat_map(|s| {
-                    let (start, live) = extent(e, s);
-                    if live == 0 {
-                        return [0, 0, 0];
-                    }
-                    let (base, stride, b) = r.resolve_tile_block(start as usize, start as usize);
-                    all &= stride == live && base == sym.val_range(b).start;
-                    [device_word(base), device_word(stride), start]
-                })
-                .collect::<Vec<u32>>();
-            (recs, all)
+            let mut recs = Vec::with_capacity(3 * range.len());
+            let mut keys = Vec::with_capacity(2 * range.len());
+            for s in range {
+                let (start, live) = extent(e, s);
+                if live == 0 {
+                    recs.extend_from_slice(&[0, 0, 0]);
+                    keys.extend_from_slice(&[NO_BLOCK, 0]);
+                    continue;
+                }
+                let (base, stride, b) = r.resolve_tile_block(start as usize, start as usize);
+                all &= stride == live && base == sym.val_range(b).start;
+                recs.extend_from_slice(&[device_word(base), device_word(stride), start]);
+                keys.extend_from_slice(&[sym.blk_row(b) as u32, device_word(stride)]);
+            }
+            (recs, keys, all)
         });
-        whole.push(parts.iter().all(|p| p.1));
-        entity.push(parts.into_iter().map(|p| p.0).collect::<Vec<_>>().concat());
+        whole.push(parts.iter().all(|p| p.2));
+        entity.push(parts.iter().map(|p| &p.0[..]).collect::<Vec<_>>().concat());
+        ekey.push(parts.iter().map(|p| &p.1[..]).collect::<Vec<_>>().concat());
     }
     let mut cross: Vec<Vec<u32>> = cross_slots.iter().map(|&n| vec![0u32; 3 * n]).collect();
-    let mut cross_block: Vec<Vec<u32>> = cross_slots.iter().map(|&n| vec![NO_BLOCK; n]).collect();
+    let mut cross_block: Vec<Vec<u32>> = cross_slots.iter().map(|&n| filled(n, NO_BLOCK, (threads, min))).collect();
+    // per stored block of H its block row
+    let blk_rows: &[arael_faer::SparseIndex] = sym.parts().3;
     let mut done: Vec<Vec<bool>> = cross_slots.iter().map(|&n| vec![false; n]).collect();
     for (c, k) in shape.constraints.iter().enumerate() {
         let (w, rows) = (k.words(), &st.rows[c]);
         let nrows = rows.len() / w;
+        // The rows of one slot name the same two entities, so a slot's
+        // tile is its first row's. Rows that name a pair's slots in
+        // non-decreasing order (the order a walk of the model gives them)
+        // have each slot's rows in one run: its first row starts the run,
+        // and a range of rows starts the runs of a range of slots, which
+        // it writes alone. Per pair, whether its slots come so.
+        let ns_sides = k.sides.len();
+        let sorted: Vec<bool> = par_ranges(nrows, threads, min, r, |range, _| {
+            let mut ok = vec![true; k.pairs.len()];
+            for row in range.start.max(1)..range.end {
+                let (prev, this) = (&rows[(row - 1) * w + ns_sides..row * w], &rows[row * w + ns_sides..(row + 1) * w]);
+                for (o, (a, b)) in ok.iter_mut().zip(prev.iter().zip(this)) {
+                    *o &= a <= b;
+                }
+            }
+            ok
+        })
+        .into_iter()
+        .fold(vec![true; k.pairs.len()], |all, ok| all.iter().zip(&ok).map(|(a, b)| *a && *b).collect());
         for (p, &(i, j, x)) in k.pairs.iter().enumerate() {
             let (ea, eb) = (k.sides[i], k.sides[j]);
-            let q = k.sides.len() + p;
+            let q = ns_sides + p;
             let ns = cross_slots[x];
-            // per cross slot not yet done, the first row naming it: the
-            // rows of one slot name the same two entities, so the first
-            // one's tile is the slot's
-            let first: Vec<core::sync::atomic::AtomicU32> = (0..ns).map(|_| core::sync::atomic::AtomicU32::new(u32::MAX)).collect();
-            {
-                let done = &done[x];
-                par_ranges(nrows, threads, min, r, |range, _| {
-                    for row in range {
-                        let s = rows[row * w + q] as usize;
-                        if !done[s] {
-                            first[s].fetch_min(row as u32, core::sync::atomic::Ordering::Relaxed);
-                        }
+            // The tile between the slots `a` and `b` of the pair's sides,
+            // its record and its block of H; `None` where a side is fixed
+            // throughout. Between whole tiles the tile is its block, found
+            // from the two block rows alone; else through the resolver,
+            // from the sides' first live indices.
+            let direct = whole[ea] && whole[eb];
+            let tile = |a: usize, b: usize, r: &mut Resolver<'_>| -> Option<([u32; 3], u32)> {
+                if direct {
+                    let (ka, kb) = (&ekey[ea][2 * a..2 * a + 2], &ekey[eb][2 * b..2 * b + 2]);
+                    if ka[0] == NO_BLOCK || kb[0] == NO_BLOCK {
+                        return None;
                     }
-                });
-            }
-            // per range of slots, its slices of the records, blocks and marks
-            let parts = threads.min(ns / min.max(1)).max(1);
-            let step = ns.div_ceil(parts).max(1);
-            let mut tasks: Vec<(usize, &mut [u32], &mut [u32], &mut [bool], Resolver<'_>)> = cross[x]
-                .chunks_mut(3 * step)
-                .zip(cross_block[x].chunks_mut(step))
-                .zip(done[x].chunks_mut(step))
-                .enumerate()
-                .map(|(t, ((rec, blk), dn))| (t * step, rec, blk, dn, r.clone()))
-                .collect();
-            let lookup = |_: usize, (s0, rec, blk, dn, r): &mut (usize, &mut [u32], &mut [u32], &mut [bool], Resolver<'_>)| {
-                for ls in 0..blk.len() {
-                    let row = first[*s0 + ls].load(core::sync::atomic::Ordering::Relaxed);
-                    if row == u32::MAX {
-                        continue;
-                    }
-                    dn[ls] = true;
-                    let at = row as usize * w;
-                    let (a, b) = (rows[at + i] as usize, rows[at + j] as usize);
-                    // the sides' first live indices from their entity
-                    // tiles, a zero stride where a side is fixed throughout
-                    let (ta, tb) = (&entity[ea][3 * a..], &entity[eb][3 * b..]);
+                    let flip = kb[0] < ka[0];
+                    let (row, col) = if flip { (kb, ka) } else { (ka, kb) };
+                    // the block of row `row[0]` among the column's, which
+                    // are in row order
+                    let range = sym.col_range(col[0] as usize);
+                    let bl = range.start + blk_rows[range].binary_search(&row[0]).expect("a pair's block is outside H's structure");
+                    Some(([device_word(sym.val_range(bl).start), row[1], flip as u32], bl as u32))
+                } else {
+                    let (ta, tb) = (&entity[ea][3 * a..3 * a + 3], &entity[eb][3 * b..3 * b + 3]);
                     if ta[1] == 0 || tb[1] == 0 {
-                        continue;
+                        return None;
                     }
                     let (ra, rb) = (ta[2], tb[2]);
                     let flip = rb < ra;
                     let (base, stride, bl) = if flip { r.resolve_tile_block(rb as usize, ra as usize) } else { r.resolve_tile_block(ra as usize, rb as usize) };
-                    rec[3 * ls..3 * ls + 3].copy_from_slice(&[device_word(base), device_word(stride), flip as u32]);
-                    blk[ls] = bl as u32;
+                    Some(([device_word(base), device_word(stride), flip as u32], bl as u32))
                 }
             };
-            if let [one] = &mut tasks[..] {
-                lookup(0, one);
+            let slot = |row: usize| rows[row * w + q] as usize;
+            if sorted[p] {
+                let parts = threads.min(nrows / min.max(1)).max(1);
+                let step = nrows.div_ceil(parts).max(1);
+                let row_cuts: Vec<usize> = (0..=parts).map(|t| (t * step).min(nrows)).collect();
+                // a range starts the runs of the slots above the one its
+                // preceding row names
+                let mut slot_cuts: Vec<usize> = row_cuts[..parts].iter().map(|&r0| if r0 == 0 { 0 } else { slot(r0 - 1) + 1 }).collect();
+                slot_cuts.push(ns);
+                let rec_cuts: Vec<usize> = slot_cuts.iter().map(|&s| 3 * s).collect();
+                type Task<'t, 'r> = (core::ops::Range<usize>, usize, &'t mut [u32], &'t mut [u32], &'t mut [bool], Resolver<'r>);
+                let mut tasks: Vec<Task<'_, '_>> = arael_faer::cut_slices(&mut cross[x], &rec_cuts)
+                    .into_iter()
+                    .zip(arael_faer::cut_slices(&mut cross_block[x], &slot_cuts))
+                    .zip(arael_faer::cut_slices(&mut done[x], &slot_cuts))
+                    .enumerate()
+                    .map(|(t, ((rec, blk), dn))| (row_cuts[t]..row_cuts[t + 1], slot_cuts[t], rec, blk, dn, r.clone()))
+                    .collect();
+                let lookup = |_: usize, (range, s0, rec, blk, dn, r): &mut Task<'_, '_>| {
+                    for row in range.clone() {
+                        let s = slot(row);
+                        if row > 0 && slot(row - 1) == s {
+                            continue;
+                        }
+                        let ls = s - *s0;
+                        if dn[ls] {
+                            continue;
+                        }
+                        dn[ls] = true;
+                        let at = row * w;
+                        if let Some((t, bl)) = tile(rows[at + i] as usize, rows[at + j] as usize, r) {
+                            rec[3 * ls..3 * ls + 3].copy_from_slice(&t);
+                            blk[ls] = bl;
+                        }
+                    }
+                };
+                if let [one] = &mut tasks[..] {
+                    lookup(0, one);
+                } else {
+                    arael_faer::pool::run_over(&mut tasks, lookup);
+                }
             } else {
-                arael_faer::pool::run_over(&mut tasks, lookup);
+                // per cross slot not yet done, the first row naming it
+                let first: Vec<core::sync::atomic::AtomicU32> = (0..ns).map(|_| core::sync::atomic::AtomicU32::new(u32::MAX)).collect();
+                {
+                    let done = &done[x];
+                    par_ranges(nrows, threads, min, r, |range, _| {
+                        for row in range {
+                            let s = slot(row);
+                            if !done[s] {
+                                first[s].fetch_min(row as u32, core::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    });
+                }
+                // per range of slots, its slices of the records, blocks and marks
+                let parts = threads.min(ns / min.max(1)).max(1);
+                let step = ns.div_ceil(parts).max(1);
+                let mut tasks: Vec<(usize, &mut [u32], &mut [u32], &mut [bool], Resolver<'_>)> = cross[x]
+                    .chunks_mut(3 * step)
+                    .zip(cross_block[x].chunks_mut(step))
+                    .zip(done[x].chunks_mut(step))
+                    .enumerate()
+                    .map(|(t, ((rec, blk), dn))| (t * step, rec, blk, dn, r.clone()))
+                    .collect();
+                let lookup = |_: usize, (s0, rec, blk, dn, r): &mut (usize, &mut [u32], &mut [u32], &mut [bool], Resolver<'_>)| {
+                    for ls in 0..blk.len() {
+                        let row = first[*s0 + ls].load(core::sync::atomic::Ordering::Relaxed);
+                        if row == u32::MAX {
+                            continue;
+                        }
+                        dn[ls] = true;
+                        let at = row as usize * w;
+                        if let Some((t, bl)) = tile(rows[at + i] as usize, rows[at + j] as usize, r) {
+                            rec[3 * ls..3 * ls + 3].copy_from_slice(&t);
+                            blk[ls] = bl;
+                        }
+                    }
+                };
+                if let [one] = &mut tasks[..] {
+                    lookup(0, one);
+                } else {
+                    arael_faer::pool::run_over(&mut tasks, lookup);
+                }
             }
         }
     }
@@ -2091,6 +2205,58 @@ mod tests {
         let one = tiles(&shape, &st, &[s0, s1], &[nrows], &r, (1, usize::MAX));
         let many = tiles(&shape, &st, &[s0, s1], &[nrows], &r, (4, 1));
         assert_eq!(one, many);
+        // every slot's tile is the one the resolver gives its two entities
+        // from their first live indices
+        let agrees = |t: &Tiles, r: &Resolver<'_>| {
+            let mut resolve = r.clone();
+            for k in 0..nrows {
+                let (a, b) = (cols[0][k] as usize, cols[1][k] as usize);
+                let rec = &t.cross[0][3 * k..3 * k + 3];
+                if a == 7 || b == 11 {
+                    assert_eq!((rec, t.cross_block[0][k]), (&[0u32, 0, 0][..], NO_BLOCK), "slot {k}: a side fixed throughout");
+                    continue;
+                }
+                let (base, stride, bl) = resolve.resolve_tile_block(3 * a, 3 * s0 + 2 * b);
+                assert_eq!((rec, t.cross_block[0][k]), (&[base as u32, stride as u32, 0][..], bl as u32), "slot {k}");
+            }
+        };
+        agrees(&one, &r);
+        // the first two entities in one block of H: the first table's
+        // tiles are not whole blocks, and its pairs' tiles are parts of
+        // theirs
+        let mut part2 = vec![0usize, 6];
+        for k in 2..s0 + s1 {
+            part2.push(part2[k - 1] + if k < s0 { 3 } else { 2 });
+        }
+        let coords: Vec<(usize, usize)> = (0..s0)
+            .map(|a| (3 * a, 3 * a))
+            .chain((0..s1).map(|b| (3 * s0 + 2 * b, 3 * s0 + 2 * b)))
+            .chain((0..nrows).map(|k| (3 * cols[0][k] as usize, 3 * s0 + 2 * cols[1][k] as usize)))
+            .collect();
+        let p2 = crate::simple_lm::partition_idx(&part2);
+        let pattern2 = arael_faer::bsc::SymbolicSparseBlockColMat::covering(p2.clone(), p2, coords.len(), |k| coords[k]);
+        let r2 = Resolver::new(&pattern2);
+        let loose = tiles(&shape, &st, &[s0, s1], &[nrows], &r2, (1, usize::MAX));
+        assert_eq!(loose.whole, [false, true]);
+        assert_eq!(tiles(&shape, &st, &[s0, s1], &[nrows], &r2, (4, 1)), loose);
+        agrees(&loose, &r2);
+        // the rows in another order name their slots out of order: the same tiles
+        let reversed: Vec<u32> = (0..nrows).rev().flat_map(|k| [cols[0][k], cols[1][k], cols[2][k]]).collect();
+        let st_rev = DeviceStructure { idx: st.idx.clone(), rows: vec![reversed, st.rows[1].clone()], keep: st.keep.clone() };
+        for par in [(1, usize::MAX), (4, 1)] {
+            assert_eq!(tiles(&shape, &st_rev, &[s0, s1], &[nrows], &r, par), one, "{par:?}");
+        }
+        // three rows a slot, in runs that straddle the threads' ranges (43
+        // rows each), and the same rows reversed
+        let run_rows = |order: &mut dyn Iterator<Item = usize>| -> Vec<u32> { order.flat_map(|k| [cols[0][k / 3], cols[1][k / 3], (k / 3) as u32]).collect() };
+        let st_runs = DeviceStructure { idx: st.idx.clone(), rows: vec![run_rows(&mut (0..nrows)), st.rows[1].clone()], keep: st.keep.clone() };
+        let st_runs_rev = DeviceStructure { idx: st.idx.clone(), rows: vec![run_rows(&mut (0..nrows).rev()), st.rows[1].clone()], keep: st.keep.clone() };
+        let runs = tiles(&shape, &st_runs, &[s0, s1], &[nrows / 3], &r, (1, usize::MAX));
+        assert_eq!(runs.cross[0][..], one.cross[0][..nrows], "slot k of the runs is slot k of the rows");
+        assert_eq!(tiles(&shape, &st_runs, &[s0, s1], &[nrows / 3], &r, (7, 1)), runs);
+        for par in [(1, usize::MAX), (7, 1)] {
+            assert_eq!(tiles(&shape, &st_runs_rev, &[s0, s1], &[nrows / 3], &r, par), runs, "{par:?}");
+        }
         // the fixed entities have no tile, the others one each, all of its block
         assert_eq!(one.entity[0][21..24], [0, 0, 0]);
         assert!(one.entity[0][..21].chunks(3).all(|t| t[1] > 0));
