@@ -26,6 +26,7 @@ dependencies = [
  "rand",
  "rand_distr",
  "serde",
+ "serde_json",
  "web-time",
 ]
 
@@ -76,6 +77,7 @@ name = "bench-harness"
 version = "0.1.0"
 dependencies = [
  "arael",
+ "arael-faer",
  "factrs",
  "faer 0.23.2",
  "libc",
