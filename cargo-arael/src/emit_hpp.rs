@@ -7,6 +7,7 @@
 
 use crate::emit_ffi::surfaced_types;
 use crate::ir::{Field, Model, Type, snake};
+use crate::leaves::{Leaf, LeafTy, leaves};
 
 fn scalar_cpp(of: &str) -> Option<&'static str> {
     Some(match of {
@@ -91,9 +92,33 @@ struct Cpp {
     body: String,
 }
 
+/// A leaf's element type in the batch calls, as (C++ type, the C
+/// function's pointee): a ref is its typed handle, a math value its
+/// struct, a bool one byte.
+fn leaf_cpp(l: &Leaf, elem_ty: &Type) -> Result<(String, &'static str), String> {
+    Ok(match &l.ty {
+        LeafTy::F64 => ("double".into(), "double"),
+        LeafTy::F32 => ("float".into(), "float"),
+        LeafTy::U32 => ("uint32_t".into(), "uint32_t"),
+        LeafTy::I32 => ("int32_t".into(), "int32_t"),
+        LeafTy::Bool => ("bool".into(), "uint8_t"),
+        LeafTy::Ref => {
+            let target = elem_ty.fields.iter().find(|f| f.name == l.access && f.kind == "ref")
+                .and_then(|f| f.of.as_deref())
+                .ok_or_else(|| format!("ref leaf `{}`: no ref field of that name", l.name))?;
+            (format!("{target}Ref"), "uint32_t")
+        }
+        LeafTy::Math { scalar, of, .. } => (
+            math_cpp(of).ok_or_else(|| format!("leaf `{}`: no C++ type for `{of}`", l.name))?,
+            if scalar == "f32" { "float" } else { "double" },
+        ),
+    })
+}
+
 /// One collection field's view class + the owner method line.
 fn collection_cpp(
     cpp: &mut Cpp,
+    model: &Model,
     owner: &str,
     sym_prefix: &str,
     owner_methods: &mut String,
@@ -324,6 +349,56 @@ fn collection_cpp(
     reverse_iterator rbegin() {{ return reverse_iterator(end()); }}
     reverse_iterator rend() {{ return reverse_iterator(begin()); }}\n"));
 
+    // The batch path of an index-addressable collection: many default
+    // elements per call, and one field of a range of elements per call
+    // (the C interface's push_n and column functions).
+    if container != "arena" {
+        let elem_ty = model.types.get(elem)
+            .ok_or_else(|| format!("collection `{field}`: element type `{elem}` not in sidecar"))?;
+        let lv = leaves(model, elem_ty);
+        let (push, push_c) = if container == "vec" { ("push_many", "push_n") } else { ("push_back_many", "push_back_n") };
+        cpp.ffi.push_str(&format!("uint32_t {prefix}_{push_c}({owner}*, const uint64_t*, uint32_t);\n"));
+        methods.push_str(&format!(
+            "    /// Appends `n` default elements in one call and returns the index of\n\
+             \x20   /// the first; the set_<field>() calls below fill them in.\n\
+             \x20   uint32_t {push}(uint32_t n) {{\n\
+             \x20       uint32_t first = size();\n\
+             \x20       ffi::{prefix}_{push_c}(h_, nullptr, n);\n\
+             \x20       return first;\n\
+             \x20   }}\n"));
+        if lv.iter().any(|l| l.ty == LeafTy::Bool) {
+            methods.push_str("    static_assert(sizeof(bool) == 1, \"a bool column crosses as one byte per value\");\n");
+        }
+        for l in &lv {
+            let (t, c) = leaf_cpp(l, elem_ty)?;
+            let leaf = &l.name;
+            cpp.ffi.push_str(&format!(
+                "bool {prefix}_set_{leaf}_n({owner}*, uint32_t, const {c}*, uint32_t, int64_t);\n\
+                 bool {prefix}_get_{leaf}_n(const {owner}*, uint32_t, {c}*, uint32_t, int64_t);\n"));
+            methods.push_str(&format!(
+                "    /// Sets `{leaf}` of elements `start..start + n` from `values`, `stride`\n\
+                 \x20   /// bytes apart (0 sets every one to `values[0]`); false when the range\n\
+                 \x20   /// exceeds the collection.\n\
+                 \x20   bool set_{leaf}(uint32_t start, const {t}* values, uint32_t n, int64_t stride = sizeof({t})) {{\n\
+                 \x20       return ffi::{prefix}_set_{leaf}_n(h_, start, reinterpret_cast<const {c}*>(values), n, stride);\n\
+                 \x20   }}\n\
+                 \x20   /// Reads `{leaf}` of elements `start..start + n` into `out`, `stride`\n\
+                 \x20   /// bytes apart; false when the range exceeds the collection.\n\
+                 \x20   bool get_{leaf}(uint32_t start, {t}* out, uint32_t n, int64_t stride = sizeof({t})) const {{\n\
+                 \x20       return ffi::{prefix}_get_{leaf}_n(h_, start, reinterpret_cast<{c}*>(out), n, stride);\n\
+                 \x20   }}\n"));
+        }
+        if refs_flavor || container == "deque" {
+            cpp.ffi.push_str(&format!("bool {prefix}_get_refs_n(const {owner}*, uint32_t, uint32_t*, uint32_t);\n"));
+            methods.push_str(&format!(
+                "    /// The refs of elements `start..start + n` into `out`, in index order;\n\
+                 \x20   /// false when the range exceeds the collection.\n\
+                 \x20   bool get_refs(uint32_t start, {elem}Ref* out, uint32_t n) const {{\n\
+                 \x20       return ffi::{prefix}_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);\n\
+                 \x20   }}\n"));
+        }
+    }
+
     let stability = if refs_flavor {
         "Element pointers are STABLE across pushes (chunked storage)."
     } else {
@@ -348,7 +423,7 @@ public:
 /// `owner` names the opaque ffi pointer type the accessors take.
 fn field_cpp(
     cpp: &mut Cpp,
-    _model: &Model,
+    model: &Model,
     owner: &str,
     prefix: &str,
     owner_methods: &mut String,
@@ -502,7 +577,7 @@ fn field_cpp(
                 "    {of}Ref {name}() const {{ return {of}Ref{{ffi::{prefix}_{name}(h_)}}; }}\n\
                  \x20   void set_{name}({of}Ref r) {{ ffi::{prefix}_set_{name}(h_, r.raw); }}\n"));
         }
-        "collection" => collection_cpp(cpp, owner, prefix, owner_methods, f)?,
+        "collection" => collection_cpp(cpp, model, owner, prefix, owner_methods, f)?,
         "self_block" | "cross_block" | "triplet_block" | "skip" => {}
         "opaque" => {
             owner_methods.push_str(&format!(

@@ -147,6 +147,16 @@ uint32_t decay_cells_last_ref(const Decay*);
 Cell* decay_cells_get(Decay*, uint32_t);
 bool decay_cells_contains(const Decay*, uint32_t);
 Cell* decay_cells_try_get(Decay*, uint32_t);
+uint32_t decay_cells_push_n(Decay*, const uint64_t*, uint32_t);
+bool decay_cells_set_v_n(Decay*, uint32_t, const float*, uint32_t, int64_t);
+bool decay_cells_get_v_n(const Decay*, uint32_t, float*, uint32_t, int64_t);
+bool decay_cells_set_v_optimize_n(Decay*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool decay_cells_get_v_optimize_n(const Decay*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool decay_cells_set_t_n(Decay*, uint32_t, const float*, uint32_t, int64_t);
+bool decay_cells_get_t_n(const Decay*, uint32_t, float*, uint32_t, int64_t);
+bool decay_cells_set_w_n(Decay*, uint32_t, const float*, uint32_t, int64_t);
+bool decay_cells_get_w_n(const Decay*, uint32_t, float*, uint32_t, int64_t);
+bool decay_cells_get_refs_n(const Decay*, uint32_t, uint32_t*, uint32_t);
 double decay_cost(Decay*);
 int32_t decay_solve_band(Decay*, uint32_t, const LmConfig*, LmResultT<float>*);
 void decay_lm_config(uint32_t, LmConfig*);
@@ -515,6 +525,63 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::decay_cells_push_n(h_, nullptr, n);
+        return first;
+    }
+    static_assert(sizeof(bool) == 1, "a bool column crosses as one byte per value");
+    /// Sets `v` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_v(uint32_t start, const float* values, uint32_t n, int64_t stride = sizeof(float)) {
+        return ffi::decay_cells_set_v_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `v` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_v(uint32_t start, float* out, uint32_t n, int64_t stride = sizeof(float)) const {
+        return ffi::decay_cells_get_v_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+    /// Sets `v_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_v_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::decay_cells_set_v_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `v_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_v_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::decay_cells_get_v_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `t` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_t(uint32_t start, const float* values, uint32_t n, int64_t stride = sizeof(float)) {
+        return ffi::decay_cells_set_t_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `t` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_t(uint32_t start, float* out, uint32_t n, int64_t stride = sizeof(float)) const {
+        return ffi::decay_cells_get_t_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+    /// Sets `w` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_w(uint32_t start, const float* values, uint32_t n, int64_t stride = sizeof(float)) {
+        return ffi::decay_cells_set_w_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `w` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_w(uint32_t start, float* out, uint32_t n, int64_t stride = sizeof(float)) const {
+        return ffi::decay_cells_get_w_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+    /// The refs of elements `start..start + n` into `out`, in index order;
+    /// false when the range exceeds the collection.
+    bool get_refs(uint32_t start, CellRef* out, uint32_t n) const {
+        return ffi::decay_cells_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);
+    }
 private:
     ffi::Decay* h_;
 };

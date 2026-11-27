@@ -235,6 +235,36 @@ views are named by their container's nature: `PathPosesDeque`,
 - Option entities: `has_x()` / `make_x()` / `clear_x()` and `x()`
   returning `option<X>`.
 
+#### Many elements per call
+
+Vec and deque views build and read whole runs of elements in one call
+each, rather than one call per element and field:
+
+- `push_many(n)` (deque: `push_back_many(n)`) appends `n` default
+  elements and returns the index of the first.
+- `set_<field>(start, values, n, stride)` sets one field of elements
+  `start..start + n` from an array, and `get_<field>(start, out, n,
+  stride)` reads it back. Every field the element wrapper has a setter
+  for has one: a `Param` gives `x` and `x_optimize`, a math value is
+  its struct (`vect2d`, `quaternd`), a ref its `XRef`. `stride` is the
+  distance between values in bytes, the element size by default; 0 sets
+  every element to `values[0]`. Both return false, and change nothing,
+  when the range runs past the end.
+- `refs::` containers give `get_refs(start, out, n)`, the refs of a run
+  of elements.
+
+```cpp
+std::vector<vect2d> px = ...;          // one per observation
+std::vector<PointRef> point = ...;
+auto obs = img.obs();
+uint32_t first = obs.push_many(px.size());
+obs.set_px(first, px.data(), px.size());
+obs.set_point(first, point.data(), point.size());
+
+std::vector<vect3d> pos(f.points().size());
+f.points().get_pos(0, pos.data(), pos.size());   // after the solve
+```
+
 ### Solving
 
 - `solve_dense` / `solve_sparse` / `solve_band(kd)` -- the last a

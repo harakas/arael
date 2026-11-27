@@ -137,6 +137,11 @@ Ob* line_obs_at(Line*, uint32_t);
 bool line_obs_pop(Line*);
 void line_obs_clear(Line*);
 void line_obs_truncate(Line*, uint32_t);
+uint32_t line_obs_push_n(Line*, const uint64_t*, uint32_t);
+bool line_obs_set_x_n(Line*, uint32_t, const double*, uint32_t, int64_t);
+bool line_obs_get_x_n(const Line*, uint32_t, double*, uint32_t, int64_t);
+bool line_obs_set_y_n(Line*, uint32_t, const double*, uint32_t, int64_t);
+bool line_obs_get_y_n(const Line*, uint32_t, double*, uint32_t, int64_t);
 double line_cost(Line*);
 int32_t line_solve_band(Line*, uint32_t, const LmConfig*, LmResultT<double>*);
 void line_lm_config(uint32_t, LmConfig*);
@@ -469,6 +474,35 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::line_obs_push_n(h_, nullptr, n);
+        return first;
+    }
+    /// Sets `x` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_x(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::line_obs_set_x_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `x` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_x(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::line_obs_get_x_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `y` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_y(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::line_obs_set_y_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `y` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_y(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::line_obs_get_y_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
 private:
     ffi::Line* h_;
 };

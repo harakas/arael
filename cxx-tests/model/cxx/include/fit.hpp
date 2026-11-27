@@ -392,6 +392,11 @@ Obs* fit_obs_at(Fit*, uint32_t);
 bool fit_obs_pop(Fit*);
 void fit_obs_clear(Fit*);
 void fit_obs_truncate(Fit*, uint32_t);
+uint32_t fit_obs_push_n(Fit*, const uint64_t*, uint32_t);
+bool fit_obs_set_x_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_obs_get_x_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_obs_set_y_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_obs_get_y_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
 uint32_t fit_items_len(const Fit*);
 void fit_items_reserve(Fit*, uint32_t);
 N* fit_items_push(Fit*);
@@ -405,6 +410,16 @@ uint32_t fit_items_last_ref(const Fit*);
 N* fit_items_get(Fit*, uint32_t);
 bool fit_items_contains(const Fit*, uint32_t);
 N* fit_items_try_get(Fit*, uint32_t);
+uint32_t fit_items_push_n(Fit*, const uint64_t*, uint32_t);
+bool fit_items_set_v_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_items_get_v_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_items_set_v_optimize_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_items_get_v_optimize_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_items_set_t_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_items_get_t_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_items_set_w_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_items_get_w_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_items_get_refs_n(const Fit*, uint32_t, uint32_t*, uint32_t);
 uint32_t fit_poses_len(const Fit*);
 void fit_poses_reserve(Fit*, uint32_t);
 Pose* fit_poses_push_back(Fit*);
@@ -420,6 +435,24 @@ uint32_t fit_poses_back_ref(const Fit*);
 Pose* fit_poses_get(Fit*, uint32_t);
 bool fit_poses_contains(const Fit*, uint32_t);
 Pose* fit_poses_try_get(Fit*, uint32_t);
+uint32_t fit_poses_push_back_n(Fit*, const uint64_t*, uint32_t);
+bool fit_poses_set_ea_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_poses_get_ea_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_poses_set_ea_optimize_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_poses_get_ea_optimize_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_poses_set_heading_angle_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_poses_get_heading_angle_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_poses_set_heading_angle_optimize_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_poses_get_heading_angle_optimize_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_poses_set_pos_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_poses_get_pos_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_poses_set_pos_optimize_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_poses_get_pos_optimize_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_poses_set_target_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_poses_get_target_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_poses_set_target_dir_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_poses_get_target_dir_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_poses_get_refs_n(const Fit*, uint32_t, uint32_t*, uint32_t);
 uint32_t fit_ties_len(const Fit*);
 void fit_ties_reserve(Fit*, uint32_t);
 Tie* fit_ties_push(Fit*);
@@ -427,6 +460,15 @@ Tie* fit_ties_at(Fit*, uint32_t);
 bool fit_ties_pop(Fit*);
 void fit_ties_clear(Fit*);
 void fit_ties_truncate(Fit*, uint32_t);
+uint32_t fit_ties_push_n(Fit*, const uint64_t*, uint32_t);
+bool fit_ties_set_a_n(Fit*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool fit_ties_get_a_n(const Fit*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool fit_ties_set_b_n(Fit*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool fit_ties_get_b_n(const Fit*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool fit_ties_set_d_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_ties_get_d_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_ties_set_w_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_ties_get_w_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
 uint32_t fit_marks_len(const Fit*);
 void fit_marks_reserve(Fit*, uint32_t);
 uint32_t fit_marks_push(Fit*);
@@ -452,6 +494,26 @@ uint32_t fit_rigs_last_ref(const Fit*);
 Rig* fit_rigs_get(Fit*, uint32_t);
 bool fit_rigs_contains(const Fit*, uint32_t);
 Rig* fit_rigs_try_get(Fit*, uint32_t);
+uint32_t fit_rigs_push_n(Fit*, const uint64_t*, uint32_t);
+bool fit_rigs_set_ea_u_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_rigs_get_ea_u_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_rigs_set_ea_u_optimize_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_rigs_get_ea_u_optimize_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_rigs_set_q_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_rigs_get_q_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_rigs_set_q_optimize_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_rigs_get_q_optimize_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_rigs_set_target_u0_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_rigs_get_target_u0_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_rigs_set_target_u2_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_rigs_get_target_u2_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_rigs_set_target_q0_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_rigs_get_target_q0_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_rigs_set_target_q2_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_rigs_get_target_q2_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_rigs_set_target_g_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_rigs_get_target_g_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_rigs_get_refs_n(const Fit*, uint32_t, uint32_t*, uint32_t);
 uint32_t fit_vns_len(const Fit*);
 void fit_vns_reserve(Fit*, uint32_t);
 Vn* fit_vns_push(Fit*);
@@ -465,6 +527,20 @@ uint32_t fit_vns_last_ref(const Fit*);
 Vn* fit_vns_get(Fit*, uint32_t);
 bool fit_vns_contains(const Fit*, uint32_t);
 Vn* fit_vns_try_get(Fit*, uint32_t);
+uint32_t fit_vns_push_n(Fit*, const uint64_t*, uint32_t);
+bool fit_vns_set_v_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_vns_get_v_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_vns_set_v_optimize_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_vns_get_v_optimize_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_vns_set_t_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_vns_get_t_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_vns_set_h_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_vns_get_h_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_vns_set_wp_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_vns_get_wp_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_vns_set_w_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_vns_get_w_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_vns_get_refs_n(const Fit*, uint32_t, uint32_t*, uint32_t);
 uint32_t fit_wraps_len(const Fit*);
 void fit_wraps_reserve(Fit*, uint32_t);
 Wrap* fit_wraps_push(Fit*);
@@ -472,6 +548,7 @@ Wrap* fit_wraps_at(Fit*, uint32_t);
 bool fit_wraps_pop(Fit*);
 void fit_wraps_clear(Fit*);
 void fit_wraps_truncate(Fit*, uint32_t);
+uint32_t fit_wraps_push_n(Fit*, const uint64_t*, uint32_t);
 uint32_t fit_frames_len(const Fit*);
 void fit_frames_reserve(Fit*, uint32_t);
 Frame* fit_frames_push(Fit*);
@@ -485,6 +562,38 @@ uint32_t fit_frames_last_ref(const Fit*);
 Frame* fit_frames_get(Fit*, uint32_t);
 bool fit_frames_contains(const Fit*, uint32_t);
 Frame* fit_frames_try_get(Fit*, uint32_t);
+uint32_t fit_frames_push_n(Fit*, const uint64_t*, uint32_t);
+bool fit_frames_set_pose_translation_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_frames_get_pose_translation_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_frames_set_pose_rotation_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_frames_get_pose_rotation_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_frames_set_pose_optimize_translation_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_frames_get_pose_optimize_translation_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_frames_set_pose_optimize_rotation_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_frames_get_pose_optimize_rotation_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_frames_set_st_translation_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_frames_get_st_translation_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_frames_set_st_rotation_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_frames_get_st_rotation_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_frames_set_st_scale_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_frames_get_st_scale_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_frames_set_st_optimize_translation_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_frames_get_st_optimize_translation_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_frames_set_st_optimize_rotation_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_frames_get_st_optimize_rotation_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_frames_set_st_optimize_scale_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_frames_get_st_optimize_scale_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_frames_set_dir_unit_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_frames_get_dir_unit_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_frames_set_dir_optimize_n(Fit*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool fit_frames_get_dir_optimize_n(const Fit*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool fit_frames_set_anchor_n(Fit*, uint32_t, const double*, uint32_t, int64_t);
+bool fit_frames_get_anchor_n(const Fit*, uint32_t, double*, uint32_t, int64_t);
+bool fit_frames_set_tag_n(Fit*, uint32_t, const int32_t*, uint32_t, int64_t);
+bool fit_frames_get_tag_n(const Fit*, uint32_t, int32_t*, uint32_t, int64_t);
+bool fit_frames_set_scale_n(Fit*, uint32_t, const float*, uint32_t, int64_t);
+bool fit_frames_get_scale_n(const Fit*, uint32_t, float*, uint32_t, int64_t);
+bool fit_frames_get_refs_n(const Fit*, uint32_t, uint32_t*, uint32_t);
 int32_t fit_cost_table(Fit*);
 const char* fit_cost_table_name(const Fit*, uint32_t);
 double fit_cost_table_value(const Fit*, uint32_t);
@@ -1384,6 +1493,35 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::fit_obs_push_n(h_, nullptr, n);
+        return first;
+    }
+    /// Sets `x` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_x(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::fit_obs_set_x_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `x` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_x(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::fit_obs_get_x_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `y` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_y(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::fit_obs_set_y_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `y` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_y(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::fit_obs_get_y_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
 private:
     ffi::Fit* h_;
 };
@@ -1478,6 +1616,63 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::fit_items_push_n(h_, nullptr, n);
+        return first;
+    }
+    static_assert(sizeof(bool) == 1, "a bool column crosses as one byte per value");
+    /// Sets `v` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_v(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::fit_items_set_v_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `v` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_v(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::fit_items_get_v_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `v_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_v_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_items_set_v_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `v_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_v_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_items_get_v_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `t` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_t(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::fit_items_set_t_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `t` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_t(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::fit_items_get_t_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `w` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_w(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::fit_items_set_w_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `w` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_w(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::fit_items_get_w_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// The refs of elements `start..start + n` into `out`, in index order;
+    /// false when the range exceeds the collection.
+    bool get_refs(uint32_t start, NRef* out, uint32_t n) const {
+        return ffi::fit_items_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);
+    }
 private:
     ffi::Fit* h_;
 };
@@ -1575,6 +1770,107 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_back_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::fit_poses_push_back_n(h_, nullptr, n);
+        return first;
+    }
+    static_assert(sizeof(bool) == 1, "a bool column crosses as one byte per value");
+    /// Sets `ea` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_ea(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_poses_set_ea_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `ea` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_ea(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_poses_get_ea_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `ea_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_ea_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_poses_set_ea_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `ea_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_ea_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_poses_get_ea_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `heading_angle` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_heading_angle(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::fit_poses_set_heading_angle_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `heading_angle` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_heading_angle(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::fit_poses_get_heading_angle_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `heading_angle_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_heading_angle_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_poses_set_heading_angle_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `heading_angle_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_heading_angle_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_poses_get_heading_angle_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `pos` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pos(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_poses_set_pos_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `pos` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pos(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_poses_get_pos_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `pos_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pos_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_poses_set_pos_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `pos_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pos_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_poses_get_pos_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `target` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_target(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_poses_set_target_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `target` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_target(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_poses_get_target_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `target_dir` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_target_dir(uint32_t start, const vect2d* values, uint32_t n, int64_t stride = sizeof(vect2d)) {
+        return ffi::fit_poses_set_target_dir_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `target_dir` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_target_dir(uint32_t start, vect2d* out, uint32_t n, int64_t stride = sizeof(vect2d)) const {
+        return ffi::fit_poses_get_target_dir_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// The refs of elements `start..start + n` into `out`, in index order;
+    /// false when the range exceeds the collection.
+    bool get_refs(uint32_t start, PoseRef* out, uint32_t n) const {
+        return ffi::fit_poses_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);
+    }
 private:
     ffi::Fit* h_;
 };
@@ -1657,6 +1953,57 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::fit_ties_push_n(h_, nullptr, n);
+        return first;
+    }
+    /// Sets `a` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_a(uint32_t start, const PoseRef* values, uint32_t n, int64_t stride = sizeof(PoseRef)) {
+        return ffi::fit_ties_set_a_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `a` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_a(uint32_t start, PoseRef* out, uint32_t n, int64_t stride = sizeof(PoseRef)) const {
+        return ffi::fit_ties_get_a_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `b` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_b(uint32_t start, const PoseRef* values, uint32_t n, int64_t stride = sizeof(PoseRef)) {
+        return ffi::fit_ties_set_b_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `b` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_b(uint32_t start, PoseRef* out, uint32_t n, int64_t stride = sizeof(PoseRef)) const {
+        return ffi::fit_ties_get_b_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `d` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_d(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_ties_set_d_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `d` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_d(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_ties_get_d_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `w` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_w(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::fit_ties_set_w_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `w` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_w(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::fit_ties_get_w_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
 private:
     ffi::Fit* h_;
 };
@@ -1831,6 +2178,118 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::fit_rigs_push_n(h_, nullptr, n);
+        return first;
+    }
+    static_assert(sizeof(bool) == 1, "a bool column crosses as one byte per value");
+    /// Sets `ea_u` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_ea_u(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_rigs_set_ea_u_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `ea_u` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_ea_u(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_rigs_get_ea_u_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `ea_u_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_ea_u_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_rigs_set_ea_u_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `ea_u_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_ea_u_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_rigs_get_ea_u_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `q` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_q(uint32_t start, const quaternd* values, uint32_t n, int64_t stride = sizeof(quaternd)) {
+        return ffi::fit_rigs_set_q_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `q` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_q(uint32_t start, quaternd* out, uint32_t n, int64_t stride = sizeof(quaternd)) const {
+        return ffi::fit_rigs_get_q_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `q_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_q_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_rigs_set_q_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `q_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_q_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_rigs_get_q_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `target_u0` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_target_u0(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_rigs_set_target_u0_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `target_u0` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_target_u0(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_rigs_get_target_u0_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `target_u2` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_target_u2(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_rigs_set_target_u2_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `target_u2` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_target_u2(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_rigs_get_target_u2_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `target_q0` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_target_q0(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_rigs_set_target_q0_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `target_q0` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_target_q0(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_rigs_get_target_q0_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `target_q2` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_target_q2(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_rigs_set_target_q2_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `target_q2` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_target_q2(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_rigs_get_target_q2_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `target_g` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_target_g(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::fit_rigs_set_target_g_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `target_g` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_target_g(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::fit_rigs_get_target_g_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// The refs of elements `start..start + n` into `out`, in index order;
+    /// false when the range exceeds the collection.
+    bool get_refs(uint32_t start, RigRef* out, uint32_t n) const {
+        return ffi::fit_rigs_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);
+    }
 private:
     ffi::Fit* h_;
 };
@@ -1925,6 +2384,85 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::fit_vns_push_n(h_, nullptr, n);
+        return first;
+    }
+    static_assert(sizeof(bool) == 1, "a bool column crosses as one byte per value");
+    /// Sets `v` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_v(uint32_t start, const vect<double, 4>* values, uint32_t n, int64_t stride = sizeof(vect<double, 4>)) {
+        return ffi::fit_vns_set_v_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `v` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_v(uint32_t start, vect<double, 4>* out, uint32_t n, int64_t stride = sizeof(vect<double, 4>)) const {
+        return ffi::fit_vns_get_v_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `v_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_v_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_vns_set_v_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `v_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_v_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_vns_get_v_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `t` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_t(uint32_t start, const vect<double, 4>* values, uint32_t n, int64_t stride = sizeof(vect<double, 4>)) {
+        return ffi::fit_vns_set_t_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `t` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_t(uint32_t start, vect<double, 4>* out, uint32_t n, int64_t stride = sizeof(vect<double, 4>)) const {
+        return ffi::fit_vns_get_t_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `h` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_h(uint32_t start, const matrix<double, 2, 4>* values, uint32_t n, int64_t stride = sizeof(matrix<double, 2, 4>)) {
+        return ffi::fit_vns_set_h_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `h` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_h(uint32_t start, matrix<double, 2, 4>* out, uint32_t n, int64_t stride = sizeof(matrix<double, 2, 4>)) const {
+        return ffi::fit_vns_get_h_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `wp` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_wp(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::fit_vns_set_wp_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `wp` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_wp(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::fit_vns_get_wp_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `w` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_w(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::fit_vns_set_w_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `w` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_w(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::fit_vns_get_w_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// The refs of elements `start..start + n` into `out`, in index order;
+    /// false when the range exceeds the collection.
+    bool get_refs(uint32_t start, VnRef* out, uint32_t n) const {
+        return ffi::fit_vns_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);
+    }
 private:
     ffi::Fit* h_;
 };
@@ -2007,6 +2545,13 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::fit_wraps_push_n(h_, nullptr, n);
+        return first;
+    }
 private:
     ffi::Fit* h_;
 };
@@ -2101,6 +2646,184 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::fit_frames_push_n(h_, nullptr, n);
+        return first;
+    }
+    static_assert(sizeof(bool) == 1, "a bool column crosses as one byte per value");
+    /// Sets `pose_translation` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pose_translation(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_frames_set_pose_translation_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `pose_translation` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pose_translation(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_frames_get_pose_translation_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `pose_rotation` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pose_rotation(uint32_t start, const quaternd* values, uint32_t n, int64_t stride = sizeof(quaternd)) {
+        return ffi::fit_frames_set_pose_rotation_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `pose_rotation` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pose_rotation(uint32_t start, quaternd* out, uint32_t n, int64_t stride = sizeof(quaternd)) const {
+        return ffi::fit_frames_get_pose_rotation_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `pose_optimize_translation` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pose_optimize_translation(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_frames_set_pose_optimize_translation_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `pose_optimize_translation` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pose_optimize_translation(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_frames_get_pose_optimize_translation_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `pose_optimize_rotation` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pose_optimize_rotation(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_frames_set_pose_optimize_rotation_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `pose_optimize_rotation` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pose_optimize_rotation(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_frames_get_pose_optimize_rotation_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `st_translation` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_st_translation(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_frames_set_st_translation_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `st_translation` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_st_translation(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_frames_get_st_translation_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `st_rotation` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_st_rotation(uint32_t start, const quaternd* values, uint32_t n, int64_t stride = sizeof(quaternd)) {
+        return ffi::fit_frames_set_st_rotation_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `st_rotation` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_st_rotation(uint32_t start, quaternd* out, uint32_t n, int64_t stride = sizeof(quaternd)) const {
+        return ffi::fit_frames_get_st_rotation_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `st_scale` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_st_scale(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::fit_frames_set_st_scale_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `st_scale` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_st_scale(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::fit_frames_get_st_scale_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `st_optimize_translation` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_st_optimize_translation(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_frames_set_st_optimize_translation_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `st_optimize_translation` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_st_optimize_translation(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_frames_get_st_optimize_translation_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `st_optimize_rotation` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_st_optimize_rotation(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_frames_set_st_optimize_rotation_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `st_optimize_rotation` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_st_optimize_rotation(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_frames_get_st_optimize_rotation_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `st_optimize_scale` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_st_optimize_scale(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_frames_set_st_optimize_scale_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `st_optimize_scale` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_st_optimize_scale(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_frames_get_st_optimize_scale_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `dir_unit` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_dir_unit(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_frames_set_dir_unit_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `dir_unit` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_dir_unit(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_frames_get_dir_unit_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `dir_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_dir_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::fit_frames_set_dir_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `dir_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_dir_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::fit_frames_get_dir_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `anchor` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_anchor(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::fit_frames_set_anchor_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `anchor` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_anchor(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::fit_frames_get_anchor_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `tag` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_tag(uint32_t start, const int32_t* values, uint32_t n, int64_t stride = sizeof(int32_t)) {
+        return ffi::fit_frames_set_tag_n(h_, start, reinterpret_cast<const int32_t*>(values), n, stride);
+    }
+    /// Reads `tag` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_tag(uint32_t start, int32_t* out, uint32_t n, int64_t stride = sizeof(int32_t)) const {
+        return ffi::fit_frames_get_tag_n(h_, start, reinterpret_cast<int32_t*>(out), n, stride);
+    }
+    /// Sets `scale` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_scale(uint32_t start, const float* values, uint32_t n, int64_t stride = sizeof(float)) {
+        return ffi::fit_frames_set_scale_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `scale` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_scale(uint32_t start, float* out, uint32_t n, int64_t stride = sizeof(float)) const {
+        return ffi::fit_frames_get_scale_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+    /// The refs of elements `start..start + n` into `out`, in index order;
+    /// false when the range exceeds the collection.
+    bool get_refs(uint32_t start, FrameRef* out, uint32_t n) const {
+        return ffi::fit_frames_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);
+    }
 private:
     ffi::Fit* h_;
 };

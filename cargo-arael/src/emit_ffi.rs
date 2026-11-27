@@ -253,7 +253,7 @@ fn slot_expr(ty: &LeafTy, j: usize) -> String {
         LeafTy::I32 => format!("*s.add({j}) as i32"),
         LeafTy::Bool => format!("*s.add({j}) != 0"),
         LeafTy::Ref => format!("arael::refs::Ref::from_raw(*s.add({j}) as u32)"),
-        LeafTy::Math { scalar, n, mirror } => {
+        LeafTy::Math { scalar, n, mirror, .. } => {
             let cast = if scalar == "f32" { " as f32" } else { "" };
             let comps: Vec<String> = (0..*n)
                 .map(|k| format!("f64::from_bits(*s.add({})){cast}", j + k))
@@ -300,7 +300,7 @@ fn column_set_expr(ty: &LeafTy) -> String {
             "std::ptr::read_unaligned(src)".to_string(),
         LeafTy::Bool => "std::ptr::read_unaligned(src) != 0".to_string(),
         LeafTy::Ref => "arael::refs::Ref::from_raw(std::ptr::read_unaligned(src))".to_string(),
-        LeafTy::Math { scalar, n, mirror } => format!(
+        LeafTy::Math { scalar, n, mirror, .. } => format!(
             "std::mem::transmute::<[{scalar}; {n}], {mirror}>(\
              std::ptr::read_unaligned(src as *const [{scalar}; {n}])).into()"),
     }
@@ -313,7 +313,7 @@ fn column_get_stmt(ty: &LeafTy, value: &str) -> String {
             format!("std::ptr::write_unaligned(dst, {value});"),
         LeafTy::Bool => format!("std::ptr::write_unaligned(dst, {value} as u8);"),
         LeafTy::Ref => format!("std::ptr::write_unaligned(dst, {value}.to_raw());"),
-        LeafTy::Math { scalar, n, mirror } => format!(
+        LeafTy::Math { scalar, n, mirror, .. } => format!(
             "let mv: {mirror} = {value}.into();
         std::ptr::write_unaligned(dst as *mut [{scalar}; {n}], \
              std::mem::transmute::<{mirror}, [{scalar}; {n}]>(mv));"),

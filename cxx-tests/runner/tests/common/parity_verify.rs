@@ -851,6 +851,34 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("bad_param"), param);
     }
 
+    // The C++ batch path (push_many and the column calls) builds fill()'s
+    // problem and solves to the digits the per-property path did.
+    if got.contains_key("cxx_cols_end") {
+        assert_eq!(g("cxx_cols_first"), 0.0);
+        assert_eq!(g("cxx_cols_clean"), 1.0);
+        assert_eq!(g("cxx_cols_end"), g("dense_end"));
+        assert_eq!(g("cxx_cols_m"), g("dense_m"));
+        assert_eq!(g("cxx_cols_c"), g("dense_c"));
+        for i in 0..3 {
+            assert_eq!(g(&format!("cxx_cols_v{i}")), g(&format!("dense_v{i}")), "cxx cols v{i}");
+        }
+        assert_eq!(g("cxx_cols_get_ok"), 1.0);
+        assert_eq!(g("cxx_cols_get_v_sum"), g("dense_v0") + g("dense_v1") + g("dense_v2"));
+        assert_eq!(g("cxx_cols_obs3_y"), g("obs3_y"));
+        assert_eq!(g("cxx_cols_h13"), g("vn_h13"));
+        assert_eq!(g("cxx_cols_stride_x2"), 2.0);
+        assert_eq!(g("cxx_cols_broadcast_w"), 3.0);
+        assert_eq!(g("cxx_cols_past_end"), 0.0);
+        assert_eq!(g("cxx_cols_past_end_get"), 0.0);
+        assert_eq!(g("cxx_cols_x5"), 5.0);
+        assert_eq!(g("cxx_cols_opt"), 7.0);
+        assert_eq!(g("cxx_cols_deque_first"), 1.0);
+        assert_eq!(g("cxx_cols_deque_pos3y"), 0.5);
+        assert_eq!(g("cxx_cols_deque_refs"), 1.0);
+        assert_eq!(g("cxx_cols_tie_refs"), 1.0);
+        assert_eq!(g("cxx_cols_item_refs"), 1.0);
+    }
+
     // The one-call construction paths (push(**fields); push_many plus
     // column setters) build fill()'s problem and solve to the digits
     // the per-property path did (dense_* above, already pinned to

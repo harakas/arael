@@ -50,6 +50,36 @@ static void fill(Fit& fit) {
     vn.set_w(1.3);
 }
 
+// fill()'s problem through the batch calls: many elements per push and
+// one field of a range of elements per call.
+static void fill_cols(Fit& fit) {
+    double xs[6], ys[6];
+    for (int i = 0; i < 6; i++) {
+        xs[i] = double(i);
+        ys[i] = 2.0 * i + 1.0 + (i % 2 == 0 ? 0.05 : -0.05);
+    }
+    pi("cxx_cols_first", fit.obs().push_many(6));
+    fit.obs().set_x(0, xs, 6);
+    fit.obs().set_y(0, ys, 6);
+    const double t[3] = {1.5, -0.3, 0.7};
+    const double w[3] = {1.0, 2.0, 0.5};
+    fit.items().push_many(3);
+    fit.items().set_t(0, t, 3);
+    fit.items().set_w(0, w, 3);
+    fit.vns().push_many(1);
+    const vect<double, 4> v{{0.4, -0.1, 0.9, 0.0}};
+    const vect<double, 4> vt{{0.1, 0.2, 0.5, -0.3}};
+    const matrix<double, 2, 4> h{{
+        vect<double, 4>{{1.0, 0.5, 0.0, -0.2}},
+        vect<double, 4>{{0.0, 1.0, 0.3, 0.4}}}};
+    const double wp = 0.7, wv = 1.3;
+    fit.vns().set_v(0, &v, 1);
+    fit.vns().set_t(0, &vt, 1);
+    fit.vns().set_h(0, &h, 1);
+    fit.vns().set_wp(0, &wp, 1);
+    fit.vns().set_w(0, &wv, 1);
+}
+
 int main() {
     // Log control crosses the FFI; Warn quiets the backend's INFO
     // chatter for this run.
@@ -129,6 +159,82 @@ int main() {
         char name[16];
         std::snprintf(name, sizeof name, "dense_vn%d", k);
         p(name, fit.vns()[0].v()[k]);
+    }
+
+    // The batch path: fill_cols() solves to fill()'s digits; the column
+    // getters read the solution back.
+    {
+        Fit fc;
+        fill_cols(fc);
+        pi("cxx_cols_clean", std::strlen(fc.validate()) == 0 ? 1 : 0);
+        LmResult rc = fc.solve_dense(cfg).value();
+        p("cxx_cols_end", rc.end_cost);
+        p("cxx_cols_m", fc.m());
+        p("cxx_cols_c", fc.c());
+        for (int i = 0; i < 3; i++) {
+            char name[24];
+            std::snprintf(name, sizeof name, "cxx_cols_v%d", i);
+            p(name, fc.items()[i].v());
+        }
+        double v[3] = {0, 0, 0};
+        pi("cxx_cols_get_ok", fc.items().get_v(0, v, 3) ? 1 : 0);
+        p("cxx_cols_get_v_sum", v[0] + v[1] + v[2]);
+        double y3 = 0;
+        fc.obs().get_y(3, &y3, 1);
+        p("cxx_cols_obs3_y", y3);
+        matrix<double, 2, 4> h{};
+        fc.vns().get_h(0, &h, 1);
+        p("cxx_cols_h13", h[1][3]);
+        // a strided read: x into the second double of each pair
+        double pairs[12] = {0};
+        fc.obs().get_x(0, pairs + 1, 6, 2 * sizeof(double));
+        p("cxx_cols_stride_x2", pairs[5]);
+        // stride 0 sets every element to one value
+        const double one = 1.0;
+        fc.items().set_w(0, &one, 3, 0);
+        double ws[3] = {0, 0, 0};
+        fc.items().get_w(0, ws, 3);
+        p("cxx_cols_broadcast_w", ws[0] + ws[1] + ws[2]);
+        // a range past the end is refused and changes nothing
+        pi("cxx_cols_past_end", fc.obs().set_x(5, pairs, 2) ? 1 : 0);
+        pi("cxx_cols_past_end_get", fc.obs().get_x(4, pairs, 3) ? 1 : 0);
+        double x5 = 0;
+        fc.obs().get_x(5, &x5, 1);
+        p("cxx_cols_x5", x5);
+        // bool columns
+        const bool frozen[3] = {false, true, false};
+        fc.items().set_v_optimize(0, frozen, 3);
+        bool opt[3] = {true, true, true};
+        fc.items().get_v_optimize(0, opt, 3);
+        pi("cxx_cols_opt", (opt[0] ? 0 : 1) + (opt[1] ? 2 : 0) + (opt[2] ? 0 : 4));
+        // a deque's batch push, its math column and its refs
+        fc.poses().push_back();
+        pi("cxx_cols_deque_first", fc.poses().push_back_many(3));
+        const vect3d pos[3] = {{1.0, 0.0, 0.0}, {2.0, 0.0, 0.0}, {3.0, 0.5, 0.0}};
+        fc.poses().set_pos(1, pos, 3);
+        vect3d pz{};
+        fc.poses().get_pos(3, &pz, 1);
+        p("cxx_cols_deque_pos3y", pz.y);
+        PoseRef pr[4];
+        fc.poses().get_refs(0, pr, 4);
+        bool same = true;
+        for (uint32_t i = 0; i < 4; i++) {
+            same = same && pr[i].raw == fc.poses().ref_at(i).raw;
+        }
+        pi("cxx_cols_deque_refs", same ? 1 : 0);
+        // ref columns from the refs
+        uint32_t ties = fc.ties().push_many(3);
+        fc.ties().set_a(ties, pr, 3);
+        fc.ties().set_b(ties, pr + 1, 3);
+        PoseRef ta[3], tb[3];
+        fc.ties().get_a(ties, ta, 3);
+        fc.ties().get_b(ties, tb, 3);
+        pi("cxx_cols_tie_refs", ta[2].raw == pr[2].raw && tb[2].raw == pr[3].raw
+                                     && fc.ties()[1].b().raw == pr[2].raw ? 1 : 0);
+        // a refs::Vec's refs
+        NRef nr[3];
+        fc.items().get_refs(0, nr, 3);
+        pi("cxx_cols_item_refs", nr[2].raw == fc.items().ref_at(2).raw ? 1 : 0);
     }
 
     // Covariance at the solution: the 1x1 marginal of the first item.

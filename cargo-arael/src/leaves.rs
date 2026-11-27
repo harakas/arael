@@ -21,8 +21,9 @@ pub enum LeafTy {
     Bool,
     Ref,
     /// `n` scalars of `scalar` (`f64` / `f32`), crossing through the
-    /// shim's repr(C) `mirror` type.
-    Math { scalar: String, n: usize, mirror: String },
+    /// shim's repr(C) `mirror` type; `of` is the sidecar's spelling of
+    /// the math type (`vect2d`, an n-dimensional instantiation).
+    Math { scalar: String, n: usize, mirror: String, of: String },
 }
 
 #[derive(Debug, Clone)]
@@ -116,10 +117,10 @@ fn math_ty(of: &str) -> Option<LeafTy> {
             let inst = crate::ir::ndim_math(of)?;
             let n = inst.1.iter().product();
             let mirror = crate::emit_ffi::ndim_mirror_name(&inst);
-            return Some(LeafTy::Math { scalar: inst.0, n, mirror });
+            return Some(LeafTy::Math { scalar: inst.0, n, mirror, of: of.to_string() });
         }
     };
-    Some(LeafTy::Math { scalar: scalar.to_string(), n, mirror })
+    Some(LeafTy::Math { scalar: scalar.to_string(), n, mirror, of: of.to_string() })
 }
 
 fn value_ty(of: &str) -> Option<LeafTy> {
@@ -260,9 +261,9 @@ mod tests {
         narrow.wide = Some("f32".into());
         let (m, t) = model_with(vec![ea, plain, narrow]);
         let lv = leaves(&m, &t);
-        assert_eq!(lv[0].ty, LeafTy::Math { scalar: "f64".into(), n: 3, mirror: "CVec3F64".into() });
-        assert_eq!(lv[2].ty, LeafTy::Math { scalar: "f32".into(), n: 3, mirror: "CVec3F32".into() });
-        assert_eq!(lv[4].ty, LeafTy::Math { scalar: "f32".into(), n: 3, mirror: "CVec3F32".into() });
+        assert_eq!(lv[0].ty, LeafTy::Math { scalar: "f64".into(), n: 3, mirror: "CVec3F64".into(), of: "vect3d".into() });
+        assert_eq!(lv[2].ty, LeafTy::Math { scalar: "f32".into(), n: 3, mirror: "CVec3F32".into(), of: "vect3f".into() });
+        assert_eq!(lv[4].ty, LeafTy::Math { scalar: "f32".into(), n: 3, mirror: "CVec3F32".into(), of: "vect3f".into() });
     }
 
     /// A df32 value has no interface type: the export stops with a message
@@ -332,15 +333,15 @@ mod tests {
         ]);
         assert_eq!(lv[1].ty, LeafTy::I32);
         assert_eq!(lv[3].ty, LeafTy::Bool);
-        assert!(matches!(&lv[6].ty, LeafTy::Math { scalar, n: 4, mirror }
+        assert!(matches!(&lv[6].ty, LeafTy::Math { scalar, n: 4, mirror, .. }
             if scalar == "f32" && mirror == "CQuatF32"));
-        assert!(matches!(&lv[8].ty, LeafTy::Math { scalar, n: 3, mirror }
+        assert!(matches!(&lv[8].ty, LeafTy::Math { scalar, n: 3, mirror, .. }
             if scalar == "f32" && mirror == "CVec3F32"));
-        assert!(matches!(&lv[13].ty, LeafTy::Math { scalar, n: 4, mirror }
+        assert!(matches!(&lv[13].ty, LeafTy::Math { scalar, n: 4, mirror, .. }
             if scalar == "f64" && mirror == "CQuatF64"));
         assert_eq!(lv[14].ty, LeafTy::F64);
         assert_eq!(lv[19].ty, LeafTy::Bool);
-        assert!(matches!(&lv[23].ty, LeafTy::Math { scalar, n: 8, mirror }
+        assert!(matches!(&lv[23].ty, LeafTy::Math { scalar, n: 8, mirror, .. }
             if scalar == "f32" && mirror == "CMatF32x2x4"));
         assert_eq!(lv[22].ty, LeafTy::Ref);
         // 1 mask word + 50 slots.
