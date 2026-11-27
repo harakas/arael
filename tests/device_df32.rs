@@ -306,10 +306,12 @@ fn device_df32_helpers_match_the_host() {
         for i in 0..n {
             let (x, y) = (a[i], b[i]);
             let ax = x.abs();
-            // safe_sqrt of a value at or below 0 is 0, of NaN NaN (the
-            // host's asserts on a value well below 0)
+            // safe_sqrt of a value at or below 0 is 0, of NaN NaN. The
+            // host's asserts in a debug build on a value well below 0 and on
+            // NaN, so it is not asked for those.
+            let root = if ax.hi.is_nan() { df32::NAN } else { safe_sqrt(ax) };
             let below = if ax.hi.is_nan() { df32::NAN } else { df32::ZERO };
-            let want = [rad_diff(x, y), rad_sum(x, y), safe_sqrt(ax), below, epsilon_for(x), fast_atan(x), fast_atan2(x, y)];
+            let want = [rad_diff(x, y), rad_sum(x, y), root, below, epsilon_for(x), fast_atan(x), fast_atan2(x, y)];
             for (k, w) in want.iter().enumerate() {
                 let g = df32 { hi: got[14 * i + 2 * k], lo: got[14 * i + 2 * k + 1] };
                 if !same(g, *w) && !(flushes && flushed(g, *w, x, y)) {

@@ -57,7 +57,7 @@ fn imported_models_assemble_on_the_device_as_on_the_cpu() {
     let x1 = moved(&x);
     for wide in [Wide::F64, Wide::Df32] {
         let chk = arael::__gpu::device_check(&mut w, &x, &x1, &device(), wide);
-        assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-11 * chk.cpu_cost, "f64 {wide:?}: {chk:?}");
+        assert!((chk.device_cost - chk.host_cost).abs() <= 1e-11 * chk.host_cost, "f64 {wide:?}: {chk:?}");
         assert!(chk.grad_err < 1e-11 && chk.hess_err < 1e-11, "f64 {wide:?}: {chk:?}");
     }
     let mut w = CalWorld32 { cals: cals!(f32) };
@@ -67,7 +67,7 @@ fn imported_models_assemble_on_the_device_as_on_the_cpu() {
     let x1 = moved(&x);
     for wide in [Wide::F64, Wide::Df32] {
         let chk = arael::__gpu::device_check(&mut w, &x, &x1, &device(), wide);
-        assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-5 * chk.cpu_cost, "f32 {wide:?}: {chk:?}");
+        assert!((chk.device_cost - chk.host_cost).abs() <= 1e-5 * chk.host_cost, "f32 {wide:?}: {chk:?}");
         assert!(chk.grad_err < 1e-4 && chk.hess_err < 1e-4, "f32 {wide:?}: {chk:?}");
     }
 }
