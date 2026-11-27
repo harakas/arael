@@ -251,6 +251,33 @@ pub fn workers() -> usize {
     lock(&pool().hands).len()
 }
 
+/// Drop `value` on a thread of its own rather than the caller's: for
+/// large allocations, whose release hands their pages back to the system
+/// page by page and would stall the caller. The thread starts on the
+/// first call; where it cannot start, `value` is dropped here.
+///
+/// ```
+/// let scratch = vec![0u32; 1 << 20];
+/// arael_faer::pool::drop_later(scratch);
+/// ```
+pub fn drop_later<T: Send + 'static>(value: T) {
+    type Dropped = Box<dyn Send>;
+    static DROPPER: OnceLock<Option<std::sync::mpsc::Sender<Dropped>>> = OnceLock::new();
+    let tx = DROPPER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Dropped>();
+        std::thread::Builder::new()
+            .name("arael-drop".into())
+            .spawn(move || rx.into_iter().for_each(drop))
+            .ok()
+            .map(|_| tx)
+    });
+    if let Some(tx) = tx {
+        // a send fails only when the thread is gone; the value comes back
+        // and is dropped here
+        let _ = tx.send(Box::new(value));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +289,22 @@ mod tests {
     fn turn() -> MutexGuard<'static, ()> {
         static TURN: Mutex<()> = Mutex::new(());
         lock(&TURN)
+    }
+
+    /// A value handed to drop_later is dropped, on a thread other than
+    /// the caller's.
+    #[test]
+    fn drop_later_drops_on_another_thread() {
+        struct Signal(std::sync::mpsc::Sender<std::thread::ThreadId>);
+        impl Drop for Signal {
+            fn drop(&mut self) {
+                let _ = self.0.send(std::thread::current().id());
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop_later(Signal(tx));
+        let id = rx.recv_timeout(Duration::from_secs(10)).expect("the value is dropped");
+        assert_ne!(id, std::thread::current().id());
     }
 
     #[test]

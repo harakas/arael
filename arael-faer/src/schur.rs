@@ -675,6 +675,24 @@ impl<I> Default for PatternPart<I> {
 /// split over more.
 const ELIM_MIN_OBSERVERS: usize = 1 << 15;
 
+/// One range of columns of the Schur symbolic's scan over H's tiles: per
+/// eliminated block its observers in the range (counted, then where the
+/// next goes), the kept-kept copies and eliminated diagonals it met, and
+/// the first coupling of two eliminated blocks.
+struct TileScan<I> {
+    cols: core::ops::Range<usize>,
+    at: Vec<u32>,
+    copies: Vec<(I, usize, usize)>,
+    diag: Vec<(usize, I)>,
+    coupled: Option<(usize, usize)>,
+}
+
+impl<I> Default for TileScan<I> {
+    fn default() -> Self {
+        TileScan { cols: 0..0, at: Vec::new(), copies: Vec::new(), diag: Vec::new(), coupled: None }
+    }
+}
+
 /// What every range of the per-observer lists reads.
 struct ElimShared<'a, I> {
     h: &'a SymbolicSparseBlockColMat<I>,
@@ -829,53 +847,107 @@ fn symbolic<I: Index>(
         }
     }
 
-    // single scan over all stored tiles: classify each as kept-kept
-    // (copy), eliminated diagonal, or coupling tile of one eliminated
-    // block. observers of one eliminated block arrive in ascending
-    // block order (rows of its own column first, then transposed tiles
-    // from later columns), so the per-block lists come out sorted.
-    let mut diag: Vec<Option<I>> = vec![None; ne];
-    // the observers in one list, by eliminated block: counted by the
-    // classifying scan, then placed by a second scan in the same order
-    let mut obs_ptr = vec![0usize; ne + 1];
-    let mut copy_kk: Vec<(I, usize, usize)> = Vec::new(); // (hblk, kr, kc)
-    for c in 0..nblk {
-        for b in h.col_range(c) {
-            let r = h.blk_row(b);
-            let (re, ce) = (elim_slot[r], elim_slot[c]);
-            match (re != usize::MAX, ce != usize::MAX) {
-                (true, true) => {
-                    if r == c {
-                        diag[ce] = Some(I::truncate(b));
-                    } else {
-                        return Err(SchurError::CoupledEliminated { row: r, col: c });
+    // one scan over all stored tiles, by ranges of columns of about equal
+    // tiles on up to `threads` threads: each tile classified as kept-kept
+    // (copy), an eliminated block's diagonal, or a coupling tile of one
+    // eliminated block (an observer of it). Within a range the observers
+    // of one eliminated block arrive in ascending block order (rows of its
+    // own column first, then transposed tiles from later columns), and the
+    // ranges are in column order: each block's list, its ranges' parts one
+    // after another, comes out sorted. A second scan by the same ranges
+    // places them.
+    let nb = h.nblocks();
+    let scan_parts = threads.min(nb / min_obs.max(1)).clamp(1, nblk.max(1));
+    let col_at = |target: usize| {
+        let (mut lo, mut hi) = (0usize, nblk);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if h.col_range(mid).start < target { lo = mid + 1 } else { hi = mid }
+        }
+        lo
+    };
+    let mut col_cuts = vec![0usize];
+    for t in 1..scan_parts {
+        col_cuts.push(col_at(nb * t / scan_parts).max(col_cuts[t - 1]));
+    }
+    col_cuts.push(nblk);
+    let mut scans: Vec<TileScan<I>> = col_cuts.windows(2).map(|c| TileScan { cols: c[0]..c[1], ..Default::default() }).collect();
+    let classify = |_: usize, sc: &mut TileScan<I>| {
+        sc.at = vec![0u32; ne];
+        for c in sc.cols.clone() {
+            for b in h.col_range(c) {
+                let r = h.blk_row(b);
+                let (re, ce) = (elim_slot[r], elim_slot[c]);
+                match (re != usize::MAX, ce != usize::MAX) {
+                    (true, true) => {
+                        if r == c {
+                            sc.diag.push((ce, I::truncate(b)));
+                        } else if sc.coupled.is_none() {
+                            sc.coupled = Some((r, c));
+                        }
                     }
-                }
-                (false, true) => obs_ptr[ce + 1] += 1,
-                (true, false) => obs_ptr[re + 1] += 1,
-                (false, false) => {
-                    copy_kk.push((I::truncate(b), kept_of[r].zx(), kept_of[c].zx()));
+                    (false, true) => sc.at[ce] += 1,
+                    (true, false) => sc.at[re] += 1,
+                    (false, false) => sc.copies.push((I::truncate(b), kept_of[r].zx(), kept_of[c].zx())),
                 }
             }
         }
+    };
+    if let [one] = &mut scans[..] {
+        classify(0, one);
+    } else {
+        crate::pool::run_over(&mut scans, classify);
     }
+    let mut diag: Vec<Option<I>> = vec![None; ne];
+    let mut copy_kk: Vec<(I, usize, usize)> = Vec::with_capacity(scans.iter().map(|sc| sc.copies.len()).sum()); // (hblk, kr, kc)
+    for sc in scans.iter_mut() {
+        if let Some((row, col)) = sc.coupled {
+            return Err(SchurError::CoupledEliminated { row, col });
+        }
+        for &(slot, b) in &sc.diag {
+            diag[slot] = Some(b);
+        }
+        copy_kk.append(&mut sc.copies);
+    }
+    // per eliminated block where its observers start, and per range and
+    // block where the range's first observer of it goes
+    let mut obs_ptr = vec![0usize; ne + 1];
+    let mut placed = 0usize;
     for slot in 0..ne {
-        obs_ptr[slot + 1] += obs_ptr[slot];
-    }
-    let mut obs = vec![(I::truncate(0), false, I::truncate(0)); obs_ptr[ne]];
-    let mut fill = obs_ptr.clone();
-    for c in 0..nblk {
-        for b in h.col_range(c) {
-            let r = h.blk_row(b);
-            let (slot, entry) = match (elim_slot[r] != usize::MAX, elim_slot[c] != usize::MAX) {
-                (false, true) => (elim_slot[c], (I::truncate(b), false, I::truncate(r))),
-                (true, false) => (elim_slot[r], (I::truncate(b), true, I::truncate(c))),
-                _ => continue,
-            };
-            obs[fill[slot]] = entry;
-            fill[slot] += 1;
+        obs_ptr[slot] = placed;
+        for sc in scans.iter_mut() {
+            let k = sc.at[slot] as usize;
+            sc.at[slot] = u32::try_from(placed).expect("fewer than 2^32 observers");
+            placed += k;
         }
     }
+    obs_ptr[ne] = placed;
+    let mut obs = vec![(I::truncate(0), false, I::truncate(0)); placed];
+    {
+        let out = crate::pool::SharedMut(obs.as_mut_ptr());
+        let place = |_: usize, sc: &mut TileScan<I>| {
+            for c in sc.cols.clone() {
+                for b in h.col_range(c) {
+                    let r = h.blk_row(b);
+                    let (slot, entry) = match (elim_slot[r] != usize::MAX, elim_slot[c] != usize::MAX) {
+                        (false, true) => (elim_slot[c], (I::truncate(b), false, I::truncate(r))),
+                        (true, false) => (elim_slot[r], (I::truncate(b), true, I::truncate(c))),
+                        _ => continue,
+                    };
+                    // a (range, block) pair owns the entries from its offset
+                    // to the next range's: no two writes meet
+                    unsafe { *out.ptr().add(sc.at[slot] as usize) = entry };
+                    sc.at[slot] += 1;
+                }
+            }
+        };
+        if let [one] = &mut scans[..] {
+            place(0, one);
+        } else {
+            crate::pool::run_over(&mut scans, place);
+        }
+    }
+    drop(scans);
 
     // per-eliminated flat lists (observer order = ascending block id), by
     // ranges of eliminated blocks on up to `threads` threads: a range's
@@ -3217,6 +3289,28 @@ mod tests {
         for threads in [1, 2, 8] {
             match symbolic(&h, &elim, threads, 1, 1) {
                 Err(SchurError::MissingDiagonal { block }) => assert_eq!(block, 40, "{threads} threads"),
+                other => panic!("{threads} threads: {:?}", other.map(|_| ())),
+            }
+        }
+    }
+
+    /// The scan over H's tiles split over threads reports the first
+    /// coupling of two eliminated blocks in column order, as one thread
+    /// does.
+    #[test]
+    fn a_coupling_of_eliminated_blocks_on_threads_is_the_first_one() {
+        let (nk, ne) = (4usize, 64usize);
+        let part: Vec<usize> = (0..=nk + ne).map(|b| 2 * b).collect();
+        let mut cells: Vec<(usize, usize)> = (0..nk + ne).map(|b| (b, b)).collect();
+        cells.extend((nk..nk + ne).map(|e| (e % nk, e)));
+        // two couplings of eliminated blocks, in columns 30 and 60
+        cells.extend([(20, 30), (50, 60)]);
+        let anchors: Vec<(usize, usize)> = cells.iter().map(|&(r, c)| (part[r], part[c])).collect();
+        let (h, _) = SymbolicSparseBlockColMat::<usize>::from_scalar_coords(part.clone(), part, anchors.len(), |k| anchors[k]);
+        let elim: Vec<usize> = (nk..nk + ne).collect();
+        for threads in [1, 2, 8] {
+            match symbolic(&h, &elim, threads, 1, 1) {
+                Err(SchurError::CoupledEliminated { row, col }) => assert_eq!((row, col), (20, 30), "{threads} threads"),
                 other => panic!("{threads} threads: {:?}", other.map(|_| ())),
             }
         }

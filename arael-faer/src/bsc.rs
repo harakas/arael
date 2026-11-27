@@ -170,6 +170,26 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         self.val_ptr[self.nblocks()].zx()
     }
 
+    /// The stored block holding scalar `(i, j)`; `None` when no stored
+    /// block covers it or it lies outside the matrix.
+    ///
+    /// ```
+    /// use arael_faer::bsc::SymbolicSparseBlockColMat;
+    /// // blocks of widths 2 and 3; the diagonal blocks and (0, 1)
+    /// let s = SymbolicSparseBlockColMat::<usize>::covering(vec![0, 2, 5], vec![0, 2, 5], 3, |k| [(0, 0), (2, 2), (0, 2)][k]);
+    /// assert!(s.block_of_scalar(1, 4).is_some());
+    /// assert_eq!(s.block_of_scalar(4, 1), None);
+    /// ```
+    pub fn block_of_scalar(&self, i: usize, j: usize) -> Option<usize> {
+        if i >= self.nrows() || j >= self.ncols() {
+            return None;
+        }
+        let br = self.row_part.partition_point(|p| p.zx() <= i) - 1;
+        let bc = self.col_part.partition_point(|p| p.zx() <= j) - 1;
+        let range = self.col_range(bc);
+        self.blk_row_idx[range.clone()].binary_search_by_key(&br, |r| r.zx()).ok().map(|k| range.start + k)
+    }
+
     /// scalar row range of block-row `r`
     #[inline]
     pub fn row_span(&self, r: usize) -> core::ops::Range<usize> {
