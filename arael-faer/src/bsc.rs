@@ -247,8 +247,9 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         n_coords: usize,
         coord: impl Fn(usize) -> (usize, usize),
     ) -> (Self, Vec<ValueIndex>) {
-        let (this, cells, blk_row_of, blk_col_of) =
+        let (this, cells, tables) =
             Self::covering_with_cells(row_part, col_part, n_coords, &coord);
+        let (blk_row_of, blk_col_of) = (tables.row(), tables.col());
         let key = |i: usize, j: usize| {
             ((blk_col_of[j] as u64) << 32) | blk_row_of[i] as u64
         };
@@ -309,30 +310,48 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         if parts == 1 {
             return Self::covering(row_part, col_part, n_coords, coord);
         }
-        let (blk_row_of, blk_col_of) = block_tables(&row_part, &col_part);
+        let tables = block_tables(&row_part, &col_part);
         // per range of coordinates its run-compressed keys, in range order
         let step = n_coords.div_ceil(parts);
         let mut keys: Vec<Vec<u64>> = vec![Vec::new(); parts];
         crate::pool::run_over(&mut keys, |p, out| {
-            *out = cell_keys(p * step..((p + 1) * step).min(n_coords), &coord, &blk_row_of, &blk_col_of);
+            *out = cell_keys(p * step..((p + 1) * step).min(n_coords), &coord, &tables);
         });
-        let cells = keys.concat();
+        // the ranges' keys into one list, each range copied by a thread
+        let mut cuts = Vec::with_capacity(parts + 1);
+        cuts.push(0usize);
+        for k in &keys {
+            cuts.push(cuts[cuts.len() - 1] + k.len());
+        }
+        let total = cuts[parts];
+        let mut cells: Vec<u64> = Vec::with_capacity(total);
+        {
+            let mut tasks: Vec<(&mut [core::mem::MaybeUninit<u64>], &[u64])> =
+                crate::cut_slices(&mut cells.spare_capacity_mut()[..total], &cuts).into_iter().zip(keys.iter().map(|k| &k[..])).collect();
+            crate::pool::run_over(&mut tasks, |_, (dst, src)| {
+                for (d, &s) in dst.iter_mut().zip(src.iter()) {
+                    d.write(s);
+                }
+            });
+        }
+        // the tasks wrote every one of the first `total` keys
+        unsafe { cells.set_len(total) };
         drop(keys);
         Self::from_cell_keys(row_part, col_part, cells, threads)
     }
 
     /// The structure, the sorted keys of its cells (block column over
-    /// block row) and the two scalar-to-block tables.
+    /// block row) and the scalar-to-block tables.
     fn covering_with_cells(
         row_part: Vec<I>,
         col_part: Vec<I>,
         n_coords: usize,
         coord: &impl Fn(usize) -> (usize, usize),
-    ) -> (Self, Vec<u64>, Vec<u32>, Vec<u32>) {
-        let (blk_row_of, blk_col_of) = block_tables(&row_part, &col_part);
-        let cells = cell_keys(0..n_coords, coord, &blk_row_of, &blk_col_of);
+    ) -> (Self, Vec<u64>, BlockTables) {
+        let tables = block_tables(&row_part, &col_part);
+        let cells = cell_keys(0..n_coords, coord, &tables);
         let (this, cells) = Self::from_cell_keys_kept(row_part, col_part, cells, 1);
-        (this, cells, blk_row_of, blk_col_of)
+        (this, cells, tables)
     }
 
     /// The structure of the cells `cells` (keys of [`cell_keys`], in any
@@ -1017,9 +1036,12 @@ impl<'a, I: Index> PositionResolver<'a, I> {
             of.into()
         };
         let (row_part, col_part, _, _, _) = sym.parts();
+        // one table for both when the partitions are the same (a Hessian's)
+        let blk_row_of = of(row_part);
+        let blk_col_of = if row_part == col_part { blk_row_of.clone() } else { of(col_part) };
         Self {
-            blk_row_of: of(row_part),
-            blk_col_of: of(col_part),
+            blk_row_of,
+            blk_col_of,
             sym,
             last_key: u64::MAX,
             base: 0,
@@ -1090,8 +1112,24 @@ impl<'a, I: Index> PositionResolver<'a, I> {
 pub const COVER_MIN: usize = 64 * 1024;
 
 /// The scalar-to-block lookup tables of the two partitions: per scalar row
-/// its block row, per scalar column its block column.
-fn block_tables<I: Index>(row_part: &[I], col_part: &[I]) -> (Vec<u32>, Vec<u32>) {
+/// its block row, per scalar column its block column; one table for both
+/// when the partitions are the same (a Hessian's).
+struct BlockTables {
+    row: Vec<u32>,
+    col: Option<Vec<u32>>,
+}
+
+impl BlockTables {
+    fn row(&self) -> &[u32] {
+        &self.row
+    }
+    fn col(&self) -> &[u32] {
+        self.col.as_deref().unwrap_or(&self.row)
+    }
+}
+
+/// [`BlockTables`] of the partitions `row_part` and `col_part`.
+fn block_tables<I: Index>(row_part: &[I], col_part: &[I]) -> BlockTables {
     // the partitions are the caller's; the rest is built to hold
     // new_checked's rules
     monotone_from_zero(row_part);
@@ -1106,7 +1144,7 @@ fn block_tables<I: Index>(row_part: &[I], col_part: &[I]) -> (Vec<u32>, Vec<u32>
         }
         of
     };
-    (of(row_part), of(col_part))
+    BlockTables { row: of(row_part), col: (row_part != col_part).then(|| of(col_part)) }
 }
 
 /// The cells the coordinates `range` touch, as (block column, block row)
@@ -1115,7 +1153,8 @@ fn block_tables<I: Index>(row_part: &[I], col_part: &[I]) -> (Vec<u32>, Vec<u32>
 /// Contributions arrive block object by block object, so consecutive
 /// coordinates usually share a cell: run-compressing here shrinks the keys
 /// from one per scalar to about one per contributing block object.
-fn cell_keys(range: core::ops::Range<usize>, coord: &impl Fn(usize) -> (usize, usize), blk_row_of: &[u32], blk_col_of: &[u32]) -> Vec<u64> {
+fn cell_keys(range: core::ops::Range<usize>, coord: &impl Fn(usize) -> (usize, usize), tables: &BlockTables) -> Vec<u64> {
+    let (blk_row_of, blk_col_of) = (tables.row(), tables.col());
     let mut cells: Vec<u64> = Vec::with_capacity(1024);
     let mut last = u64::MAX;
     for k in range {
@@ -1251,6 +1290,24 @@ mod tests {
         let got: Vec<usize> =
             m.col_blocks(3).map(|(_, r, _)| r).collect();
         assert_eq!(got, vec![0, 3]);
+    }
+
+    /// Rows and columns cut differently have a scalar-to-block table each:
+    /// the structure, the positions and the resolver agree on a rectangular
+    /// matrix of three block rows (widths 2, 3, 1) and two block columns
+    /// (widths 1, 3).
+    #[test]
+    fn a_rectangular_structure_resolves_through_two_tables() {
+        let (rows, cols) = (vec![0usize, 2, 5, 6], vec![0usize, 1, 4]);
+        let coords = [(0usize, 0usize), (1, 0), (5, 1), (5, 3), (2, 2), (4, 3)];
+        let (s, positions) = SymbolicSparseBlockColMat::<usize>::from_scalar_coords(rows, cols, coords.len(), |k| coords[k]);
+        // the blocks (0, 0), (1, 1), (2, 1) hold 2, 9 and 3 values
+        assert_eq!((s.nblocks(), s.val_count()), (3, 14));
+        assert_eq!(positions, [0, 1, 11, 13, 5, 10]);
+        let mut r = PositionResolver::new(&s);
+        for (&(i, j), &p) in coords.iter().zip(&positions) {
+            assert_eq!(r.resolve(i, j), p as usize, "({i}, {j})");
+        }
     }
 
     /// A scalar resolves to its position, its tile's stride and its stored
