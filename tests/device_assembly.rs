@@ -6702,3 +6702,24 @@ fn a_gpu_solve_on_a_host_route_sets_up_from_the_stores() {
         }
     }
 }
+
+/// An f64 root on a GPU without f64 (Metal) assembles on the host, so its
+/// solve needs the block stores from the start and takes H's cells from
+/// them, not from the device structure. An f32 root on that GPU, and an
+/// f64 root on a GPU with f64, can assemble on the device and need none.
+/// Only the devices' descriptions are read; none is opened.
+#[test]
+fn an_f64_root_on_a_gpu_without_f64_needs_the_host_stores() {
+    use arael::simple_lm::{LmSolver, SparseFaer};
+    let (cameras, points, observations) = consistent_scene::<f64>();
+    let s = Scene { cameras, points, observations };
+    let (cameras, points, observations) = consistent_scene::<f32>();
+    let sf = SceneF { cameras, points, observations };
+    let needs64 = |d: &GpuDevice, assembly: bool| SparseFaer::<f64>::from_options(&options(Some(d), assembly)).needs_host_blocks(&s);
+    let needs32 = |d: &GpuDevice| SparseFaer::<f32>::from_options(&options(Some(d), true)).needs_host_blocks(&sf);
+    let (metal, cpu) = (GpuDevice::metal(0), GpuDevice::cpu());
+    assert!(needs64(&metal, true), "an f64 root on Metal assembles on the host");
+    assert!(!needs32(&metal), "an f32 root on Metal can assemble on the device");
+    assert!(!needs64(&cpu, true), "an f64 root on a GPU with f64 can assemble on the device");
+    assert!(needs64(&cpu, false), "without the device assembly a root assembles on the host");
+}

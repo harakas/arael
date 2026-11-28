@@ -7571,7 +7571,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     /// stores ([`setup_from_stores`](Self::setup_from_stores)).
     fn device_cells(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], cells: &mut Vec<(u32, u32)>, ctx: &crate::threads::Context) -> bool {
         #[cfg(feature = "gpu")]
-        if !self.force_store_cells && !ctx.has_blocks() && self.gpu.given.is_some() && self.gpu.assembly && problem.device_root().is_some() {
+        if !self.force_store_cells && !ctx.has_blocks() && self.may_assemble_on_gpu(&*problem) {
             problem.update_params(params);
             let root = problem.device_root().expect("checked above");
             let st = crate::device::structure_of(root);
@@ -7582,6 +7582,17 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
         let _ = (problem, params, cells, ctx);
         false
+    }
+
+    /// Whether this solve can assemble on its GPU: one is given with the
+    /// device assembly on, the root has a device form, and the GPU computes
+    /// in the root's scalar. An f64 root on a GPU without f64 (Metal)
+    /// assembles on the host ([`HostAssembly::NoF64`]).
+    #[cfg(feature = "gpu")]
+    fn may_assemble_on_gpu(&self, problem: &dyn LmProblemInternals<T>) -> bool {
+        self.gpu.given.as_ref().is_some_and(|g| core::mem::size_of::<T>() != 8 || g.has_f64())
+            && self.gpu.assembly
+            && problem.device_root().is_some()
     }
 
     /// The setup again, its H cells from the root's block stores (built
@@ -8350,11 +8361,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         SparseFaer::gpu_report(self)
     }
 
-    // A solve that assembles on its GPU takes H's cells from the device
+    // A solve that can assemble on its GPU takes H's cells from the device
     // structure (`device_cells`) and needs no block stores.
     fn needs_host_blocks(&self, problem: &dyn LmProblemInternals<T>) -> bool {
         #[cfg(feature = "gpu")]
-        if self.gpu.given.is_some() && self.gpu.assembly && problem.device_root().is_some() {
+        if self.may_assemble_on_gpu(problem) {
             return false;
         }
         let _ = problem;
