@@ -1,0 +1,5 @@
+error: `Link` declares `spare: CrossBlock<N, N>` but no constraint writes to it -- name it in a constraint's block list, or remove the field
+  --> tests/constraint_attr_errors/cross_block_unwritten.rs:27:8
+   |
+27 | struct W {
+   |        ^

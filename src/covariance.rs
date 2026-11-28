@@ -948,11 +948,9 @@ fn block_assemble<T: Float, M: Covariance<T> + ?Sized>(
 // The block route after a solve, under the solve's analysis of the whole
 // Hessian: no block graph, no ordering, no symbolic -- only the assembly at
 // the solution (through the solve's block positions, bound here when the
-// solve assembled on the device) and the factorization. `None` when the
-// solve's pattern lacks a block this assembly writes: a solve that
+// solve assembled on the device) and the factorization. A solve that
 // assembled on the device took its pattern from the device structure,
-// which leaves out the blocks the device never writes (an instance a guard
-// drops, a cross block no constraint writes).
+// whose cells are the block stores'.
 fn block_assemble_after_solve<T: Float, M: Covariance<T> + ?Sized>(
     m: &mut M,
     params: &[T],
@@ -961,16 +959,11 @@ fn block_assemble_after_solve<T: Float, M: Covariance<T> + ?Sized>(
     n: usize,
     ctx: &mut crate::threads::Context,
     threads: usize,
-) -> Result<Option<CovAssembly>, CovError> {
+) -> Result<CovAssembly, CovError> {
     let bound;
     let positions = match &analysis.positions {
         Some(p) => &**p,
         None => {
-            let mut cells: Vec<(u32, u32)> = Vec::new();
-            LmProblemInternals::collect_hessian_cells(m, &mut cells, ctx);
-            if !cells.iter().all(|&(i, j)| analysis.pattern.block_of_scalar(i as usize, j as usize).is_some()) {
-                return Ok(None);
-            }
             bound = crate::simple_lm::bind_block_positions(m, &analysis.pattern, ctx);
             &bound
         }
@@ -980,7 +973,7 @@ fn block_assemble_after_solve<T: Float, M: Covariance<T> + ?Sized>(
     m.calc_grad_hessian_sparse_indexed(params, grad, &mut vals_t, positions, ctx);
     let vals: Vec<f64> = vals_t.iter().map(|&x| x.to_f64().unwrap_or(f64::NAN)).collect();
     let plan = CovPlan { ordering: analysis.ordering, candidate_flops: None, symbolics_built: 0 };
-    block_factorize(n, hsym, vals, analysis.symbolic.clone(), plan, threads).map(Some)
+    block_factorize(n, hsym, vals, analysis.symbolic.clone(), plan, threads)
 }
 
 // Factorize the block H under `symbolic` into a block assembly.
@@ -1280,10 +1273,7 @@ pub(crate) fn assemble_after_solve<T: Float, M: Covariance<T> + ?Sized>(
     };
     if let Some(a) = analysis {
         if want_block && mode == CovMode::PerQuery {
-            // else the covariance's own analysis below, over every block
-            if let Some(asm) = block_assemble_after_solve(m, &params, &mut grad, a, n, ctx, threads)? {
-                return Ok(asm);
-            }
+            return block_assemble_after_solve(m, &params, &mut grad, a, n, ctx, threads);
         }
     }
 

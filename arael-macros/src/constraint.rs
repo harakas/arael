@@ -4818,6 +4818,15 @@ pub fn generate_root_methods(
     // constraints' are their cross groups)
     let mut device_groups: std::collections::BTreeMap<String, crate::device::DevGroup> = std::collections::BTreeMap::new();
     let mut device_unsupported: Option<String> = None;
+    // The keep walks of the guarded constraints (`Keep`), by instance
+    // walk: the walk, and per constraint its guard and the cross blocks it
+    // writes, each by its store array's name and its place in the walk.
+    type KeepMarks = Vec<(TokenStream2, Vec<(String, TokenStream2)>)>;
+    type KeepWalk = Box<dyn Fn(&TokenStream2) -> TokenStream2>;
+    let mut keep_groups: std::collections::BTreeMap<String, (KeepWalk, KeepMarks)> = std::collections::BTreeMap::new();
+    // Per cross array, by name: one entry per constraint writing it,
+    // whether that constraint marks the blocks it keeps.
+    let mut cross_writers: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
     let root_var_name = root_name.to_string().to_lowercase();
     let root_var_ident = syn::Ident::new(&root_var_name, proc_macro2::Span::call_site());
     let cast_type: syn::Type = syn::parse_str(precision)
@@ -7871,12 +7880,115 @@ pub fn generate_root_methods(
             })
             .transpose()?;
 
+        // The instance walk: a read-only walk over the constraint's
+        // instances along the instance type's containment paths, its body
+        // run once per instance with the names the plan's targets and the
+        // guard read: the instance (`__frine`), the assembly loop's
+        // `__item` (the instance, or its parent for a cross constraint
+        // nested in its parent entity), the self and parent names, the
+        // refs, the root. The root's own constraint has the root for its
+        // one instance, at the empty path. Returned with a key that is
+        // equal for two constraints walking the same instances under the
+        // same names, so their bodies can share one walk. `Err` names a
+        // placing that has no such walk.
+        type InstanceWalk = Box<dyn Fn(&TokenStream2) -> TokenStream2>;
+        let instance_walk = || -> Result<(String, InstanceWalk), String> {
+            let on_root = is_self_block && sc.struct_name == root_name.to_string();
+            let paths = if on_root {
+                vec![Vec::new()]
+            } else if is_self_block {
+                containing_paths.clone()
+            } else {
+                containment_paths(root_fields, &root_name.to_string(), &sc.struct_name)
+            };
+            if paths.is_empty() || (!on_root && paths.iter().any(|p| p.is_empty())) {
+                return Err("an instance outside the root's collections and fields has no device walk yet".into());
+            }
+            let item_is_parent = is_cross_block && !is_root_level_cross;
+            if item_is_parent && paths.iter().any(|p| p.len() < 2) {
+                return Err("a cross constraint nested in its parent entity outside a collection of it".into());
+            }
+            let mut names: Vec<TokenStream2> = Vec::new();
+            if is_self_block {
+                let v = syn::Ident::new(&self_var_name, proc_macro2::Span::call_site());
+                names.push(quote! { let #v = __frine; });
+                names.extend(self_resolve_stmts.iter().cloned());
+            } else {
+                names.extend(entity_index_copies.iter().cloned());
+                names.extend(resolve_stmts.iter().cloned());
+            }
+            let key = format!("{}.{}.{}.{}", sc.struct_name, item_is_parent, parent_name, quote! { #(#names)* });
+            let root_var = root_var_ident.clone();
+            // the parent under its name, first, so the instance's own
+            // names override it
+            let parent = syn::Ident::new(&parent_name, proc_macro2::Span::call_site());
+            let walk = move |body: &TokenStream2| -> TokenStream2 {
+                let walks = paths.iter().map(|path| {
+                    let n = path.len();
+                    if n == 0 {
+                        return quote! {
+                            {
+                                let __frine = &*self;
+                                let __item = __frine;
+                                #(#names)*
+                                let #root_var = &*self;
+                                #body
+                            }
+                        };
+                    }
+                    let seg = |k: usize| syn::Ident::new(&format!("__seg{k}"), proc_macro2::Span::call_site());
+                    let frine = seg(n - 1);
+                    let item = if item_is_parent { seg(n - 2) } else { frine.clone() };
+                    let parent_alias = (n >= 2).then(|| {
+                        let p = seg(n - 2);
+                        quote! { let #parent = #p; }
+                    });
+                    wrap_in_prefix_scoped(path, false, quote! {
+                        {
+                            #parent_alias
+                            let __frine = #frine;
+                            let __item = #item;
+                            #(#names)*
+                            let #root_var = &*self;
+                            #body
+                        }
+                    }, None, false)
+                });
+                quote! { #(#walks)* }
+            };
+            Ok((key, Box::new(walk)))
+        };
+
+        // The keep walk of a guarded constraint: its kept instances mark
+        // the cross blocks they write (`Keep`, `__keep_bits`), so the
+        // store fill can leave a block no kept constraint writes out of
+        // the Hessian pattern. Every cross write is recorded with whether
+        // it marks: an array takes bits only when every writer does. A
+        // guarded constraint whose placing has no instance walk does not
+        // mark, and its blocks stay in the pattern.
+        {
+            let writes: Vec<(String, TokenStream2)> = plan.iter().filter_map(|w| match w {
+                BlockWrite::Cross { holder, field, target, a, b } if a.1 > 0 && b.1 > 0 =>
+                    Some((store_array_ident(holder, field).to_string(), target.clone())),
+                _ => None,
+            }).collect();
+            if !writes.is_empty() {
+                let walked = guard_expr.as_ref().and_then(|g| instance_walk().ok().map(|kw| (g, kw)));
+                for (name, _) in &writes {
+                    cross_writers.entry(name.clone()).or_default().push(walked.is_some());
+                }
+                if let Some((g, (key, walk))) = walked {
+                    keep_groups.entry(key).or_insert_with(|| (walk, Vec::new())).1
+                        .push((quote! { #g }, writes));
+                }
+            }
+        }
+
         // The device form, read off the plan whatever the constraint's
         // form: a side per entity with parameters the rows write into a
         // self block of, in the order of the partials; a pair per cross
-        // tile between two of them. The instances are walked along the
-        // instance type's containment path, the body binding the names the
-        // plan's targets and the guard read. A select whose arms write
+        // tile between two of them. The instances are walked by the
+        // instance walk. A select whose arms write
         // apart needs nothing of its own: the record holds every partial,
         // an arm's absent ones zero, which sum as the CPU's skipped writes.
         if device_unsupported.is_none() {
@@ -7924,75 +8036,7 @@ pub fn generate_root_methods(
                     };
                     pairs.push(crate::device::DevPair { i: i.min(j), j: i.max(j), holder: holder.clone(), block: field.clone(), access: target.clone() });
                 }
-                // the walk: the instance (`__frine`), the assembly loop's
-                // `__item` (the instance, or its parent for a cross
-                // constraint nested in its parent entity), the self and
-                // parent names, the refs, the root. The root's own
-                // constraint has the root for its one instance, at the
-                // empty path.
-                let on_root = is_self_block && sc.struct_name == root_name.to_string();
-                let paths = if on_root {
-                    vec![Vec::new()]
-                } else if is_self_block {
-                    containing_paths.clone()
-                } else {
-                    containment_paths(root_fields, &root_name.to_string(), &sc.struct_name)
-                };
-                if paths.is_empty() || (!on_root && paths.iter().any(|p| p.is_empty())) {
-                    return Err("an instance outside the root's collections and fields has no device walk yet".into());
-                }
-                let item_is_parent = is_cross_block && !is_root_level_cross;
-                if item_is_parent && paths.iter().any(|p| p.len() < 2) {
-                    return Err("a cross constraint nested in its parent entity outside a collection of it".into());
-                }
-                let mut names: Vec<TokenStream2> = Vec::new();
-                if is_self_block {
-                    let v = syn::Ident::new(&self_var_name, proc_macro2::Span::call_site());
-                    names.push(quote! { let #v = __frine; });
-                    names.extend(self_resolve_stmts.iter().cloned());
-                } else {
-                    names.extend(entity_index_copies.iter().cloned());
-                    names.extend(resolve_stmts.iter().cloned());
-                }
-                let key = format!("{}.{}.{}.{}", sc.struct_name, item_is_parent, parent_name, quote! { #(#names)* });
-                let root_var = root_var_ident.clone();
-                // the parent under its name, first, so the instance's own
-                // names override it
-                let parent = syn::Ident::new(&parent_name, proc_macro2::Span::call_site());
-                let walk = move |body: &TokenStream2| -> TokenStream2 {
-                    let walks = paths.iter().map(|path| {
-                        let n = path.len();
-                        if n == 0 {
-                            return quote! {
-                                {
-                                    let __frine = &*self;
-                                    let __item = __frine;
-                                    #(#names)*
-                                    let #root_var = &*self;
-                                    #body
-                                }
-                            };
-                        }
-                        let seg = |k: usize| syn::Ident::new(&format!("__seg{k}"), proc_macro2::Span::call_site());
-                        let frine = seg(n - 1);
-                        let item = if item_is_parent { seg(n - 2) } else { frine.clone() };
-                        let parent_alias = (n >= 2).then(|| {
-                            let p = seg(n - 2);
-                            quote! { let #parent = #p; }
-                        });
-                        wrap_in_prefix_scoped(path, false, quote! {
-                            {
-                                #parent_alias
-                                let __frine = #frine;
-                                let __item = #item;
-                                #(#names)*
-                                let #root_var = &*self;
-                                #body
-                            }
-                        }, None, false)
-                    });
-                    quote! { #(#walks)* }
-                };
+                let (key, walk) = instance_walk()?;
                 let mut dc = crate::device::device_constraint(
                     device_constraints.len(),
                     key.clone(),
@@ -8011,7 +8055,7 @@ pub fn generate_root_methods(
                 dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
                 dc.site = (sc.attr_file.clone(), sc.attr_line);
                 dc.source = crate::device::attribute_text(&sc.attr_file, sc.attr_line).unwrap_or_else(|| sc.attr_tokens.clone());
-                Ok((dc, key, crate::device::DevGroup { walk: Box::new(walk) }))
+                Ok((dc, key, crate::device::DevGroup { walk }))
             })();
             match built {
                 Ok((dc, key, group)) => {
@@ -8771,6 +8815,35 @@ pub fn generate_root_methods(
             }
         }
     }
+
+    // A CrossBlock no constraint writes, on any struct: it would take a
+    // store array and a slot per instance and never hold a value. (A
+    // block with a parameter-less side has no array and is left alone.)
+    {
+        let mut names: Vec<&String> = reachable.iter().collect();
+        names.sort();
+        for tn in names {
+            let Some(l) = registry_lookup(tn) else { continue };
+            for f in &l.cross_block_fields {
+                if param_total(&f.a) == 0 || param_total(&f.b) == 0 { continue; }
+                if !cross_writers.contains_key(&store_array_ident(tn, &f.name).to_string()) {
+                    return Err(syn::Error::new(root_name.span(),
+                        format!("`{}` declares `{}: {}` but no constraint writes to it -- \
+                                 name it in a constraint's block list, or remove the field",
+                            tn, f.name, f.spelled())));
+                }
+            }
+        }
+    }
+    // The cross arrays that take keep bits, by name, each with its index
+    // in `Keep`: those of which every writer marks.
+    let keep_index: std::collections::BTreeMap<String, usize> = {
+        let mut names: Vec<&String> = cross_writers.iter()
+            .filter(|(_, w)| w.iter().all(|&marks| marks))
+            .map(|(n, _)| n).collect();
+        names.sort();
+        names.into_iter().cloned().enumerate().map(|(k, n)| (n, k)).collect()
+    };
 
     // Emit merged loops for collection groups FIRST, then append existing
     // non-merged loops. This ensures SelfBlock entities get lower constraint
@@ -9658,10 +9731,18 @@ pub fn generate_root_methods(
                     let claim_a = self_claim(a_type, &a_acc, &ai);
                     let claim_b = self_claim(b_type, &b_acc, &bi);
                     let claims = quote! { if __split { #claim_a #claim_b } };
-                    let fill = if guard.is_empty() {
-                        quote! { #(#a_stmts)* #(#b_stmts)* #claims }
-                    } else {
-                        quote! { if #guard { #(#a_stmts)* #(#b_stmts)* #claims } }
+                    // A block of an array with keep bits that no kept
+                    // constraint writes is left the same way: inactive, in
+                    // its slot, out of the Hessian pattern.
+                    let kept = keep_index.get(&name.to_string()).map(|k| {
+                        let f = syn::Ident::new(fname, proc_macro2::Span::call_site());
+                        quote! { __keep.kept(#k, #item.#f.slot()) }
+                    });
+                    let fill = match (kept, guard.is_empty()) {
+                        (None, true) => quote! { #(#a_stmts)* #(#b_stmts)* #claims },
+                        (None, false) => quote! { if #guard { #(#a_stmts)* #(#b_stmts)* #claims } },
+                        (Some(kept), true) => quote! { if #kept { #(#a_stmts)* #(#b_stmts)* #claims } },
+                        (Some(kept), false) => quote! { if #kept && #guard { #(#a_stmts)* #(#b_stmts)* #claims } },
                     };
                     body.push(quote! {
                         {
@@ -9749,6 +9830,26 @@ pub fn generate_root_methods(
         let terms = &store_cross_range_counts[&name.to_string()];
         quote! { 0usize #(+ #terms)* }
     }).collect();
+    // The keep bits: the slot count of each array that takes them, in
+    // index order, and the walks that mark, one per instance walk.
+    let mut keep_slot_terms: Vec<TokenStream2> = Vec::new();
+    for name in keep_index.keys() {
+        let Some(terms) = store_cross_counts.get(name) else {
+            return Err(syn::Error::new(root_name.span(), format!(
+                "`{}`: a constraint writes the cross block array `{}`, which the block store \
+                 does not hold (internal error)", root_name, name)));
+        };
+        keep_slot_terms.push(quote! { (0u64 #(+ #terms)*) as usize });
+    }
+    let keep_walks: Vec<TokenStream2> = keep_groups.values().filter_map(|(walk, marks)| {
+        let bodies: Vec<TokenStream2> = marks.iter().filter_map(|(guard, writes)| {
+            let ms: Vec<TokenStream2> = writes.iter().filter_map(|(name, target)| {
+                keep_index.get(name).map(|k| quote! { __keep.mark(#k, #target.slot()); })
+            }).collect();
+            (!ms.is_empty()).then(|| quote! { if #guard { #(#ms)* } })
+        }).collect();
+        (!bodies.is_empty()).then(|| walk(&quote! { #(#bodies)* }))
+    }).collect();
     // The model's shape: the count of every block array, self arrays
     // then cross arrays. A build is recorded under it, and a direct call
     // with a model of another shape trips on it. Counts only: the same
@@ -9830,13 +9931,13 @@ pub fn generate_root_methods(
     let fill_stores = if par {
         quote! {
             arael::store::run_indexed(&*self, __stores.len() > 1, __stores, |__model, __s, __store| {
-                __model.__fill_blocks_at(__store, __cut.store(__s));
+                __model.__fill_kept(__store, __cut.store(__s), &__keep);
             });
         }
     } else {
         quote! {
             for (__s, __store) in __stores.iter_mut().enumerate() {
-                self.__fill_blocks_at(__store, __cut.store(__s));
+                self.__fill_kept(__store, __cut.store(__s), &__keep);
             }
         }
     };
@@ -10240,15 +10341,41 @@ pub fn generate_root_methods(
                 )*
             }
 
+            /// The cross blocks the kept constraints write
+            /// ([`Keep`](arael::store::Keep)): every guarded constraint's
+            /// instances walked once, a kept one marking the blocks it
+            /// writes. Read-only in the model. Empty, and no walk, for a
+            /// root without a cross array whose writers are all guarded.
+            #[doc(hidden)]
+            #[allow(unused_variables, unused_mut, dead_code, clippy::all)]
+            pub fn __keep_bits(&self) -> arael::store::Keep {
+                use arael::utils::{Float as _, SelectIndex as _};
+                use arael::store::Leaves as _;
+                let mut __keep = arael::store::Keep::new(&[#(#keep_slot_terms),*]);
+                #(#keep_walks)*
+                __keep
+            }
+
+            /// [`__fill_kept`](Self::__fill_kept) with the model's keep
+            /// bits, taken here.
+            #[doc(hidden)]
+            #[allow(unused_variables, dead_code)]
+            pub fn __fill_blocks_at(&self, __store: &mut #store_ty, __ranges: &[(u32, u32)]) {
+                let __keep = self.__keep_bits();
+                self.__fill_kept(__store, __ranges, &__keep);
+            }
+
             /// Fill one store from the units `__ranges` gives it: every
             /// block's parameter indices, pushed in the container order
             /// `__assign_block_slots` numbers by, so a block's slot is where
-            /// its entry landed. Read-only in the model -- a reference can
+            /// its entry landed. A cross block `__keep` has bits for and
+            /// does not mark keeps its entry with the indices unset.
+            /// Read-only in the model -- a reference can
             /// point into the very collection being walked -- and in the
             /// other stores, so the stores fill on threads.
             #[doc(hidden)]
             #[allow(unused_variables, dead_code)]
-            pub fn __fill_blocks_at(&self, __store: &mut #store_ty, __ranges: &[(u32, u32)]) {
+            pub fn __fill_kept(&self, __store: &mut #store_ty, __ranges: &[(u32, u32)], __keep: &arael::store::Keep) {
                 use arael::store::Leaves as _;
                 // A range table means the solve divided its walks, so the
                 // stores are addressed as slices rather than as the whole.
@@ -10300,8 +10427,8 @@ pub fn generate_root_methods(
             ///
             /// A context is tied to the structure it was built for. It
             /// is filled once and then reused, so a model whose blocks
-            /// have changed -- a fixed parameter, a collection resized
-            /// -- needs a fresh one, which is what every solve gets in
+            /// have changed -- a fixed parameter, a collection resized,
+            /// a guard switched -- needs a fresh one, which is what every solve gets in
             /// `begin_with_context`. A model of another shape, by its
             /// block-array counts, panics here; the same counts with
             /// other refs are not told apart.
@@ -10321,13 +10448,16 @@ pub fn generate_root_methods(
                     return;
                 }
                 ctx.cut_mut().clear();
+                let __keep = self.__keep_bits();
                 let (__stores, __cut) = ctx.stores_mut::<#store_ty>(1);
                 let mut __base = [0u32; #n_cross];
                 for (__s, __store) in __stores.iter_mut().enumerate() {
-                    self.__build_blocks_at(__store, __cut.store(__s), &mut __base);
+                    self.__fill_kept(__store, __cut.store(__s), &__keep);
+                    Self::__open_cross_at(__store, &mut __base);
                 }
                 #whole_pre
                 ctx.set_shape(&__shape);
+                ctx.set_keep(__keep.hash());
                 #set_whole
             }
 
@@ -10659,6 +10789,8 @@ pub fn generate_root_methods(
             #marginalize_candidates_fn
             fn begin_with_context(&mut self, ctx: &mut arael::threads::Context) {
                 #begin_cut
+                // The guards read once, before the stores fill on threads.
+                let __keep = self.__keep_bits();
                 let (__stores, __cut) = ctx.stores_mut::<#store_ty>(__n);
                 #fill_stores
                 let mut __base = [0u32; #n_cross];
@@ -10668,6 +10800,7 @@ pub fn generate_root_methods(
                 }
                 #whole_pre
                 ctx.set_shape(&self.__shape());
+                ctx.set_keep(__keep.hash());
                 #set_whole
             }
             fn calc_cost_with_context(&mut self, params: &[#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {

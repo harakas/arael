@@ -162,6 +162,10 @@ pub struct Context {
     /// block array, as the generated `__shape` reads it. A direct call
     /// with a model of another shape trips on it.
     pub(crate) shape: Vec<u64>,
+    /// The hash of the keep bits the stores were built with
+    /// ([`Keep::hash`](crate::store::Keep::hash)); 0 for a model without
+    /// guarded cross blocks.
+    pub(crate) keep: u64,
     /// What one whole store of the model holds, as the build records it.
     pub(crate) whole: StoreFootprint,
     pub(crate) cut: Cut,
@@ -223,6 +227,7 @@ impl Clone for Context {
             blocks: self.blocks.as_ref().map(|b| b.store_clone()),
             blocks_len: self.blocks_len,
             shape: self.shape.clone(),
+            keep: self.keep,
             whole: self.whole,
             cut: self.cut.clone(),
             sweeps: self.sweeps.clone(),
@@ -241,7 +246,7 @@ impl Context {
     pub fn new() -> Self {
         Context {
             threads: 1, timing: false, runtime_coo: false,
-            blocks: None, blocks_len: 0, shape: Vec::new(), whole: StoreFootprint::default(),
+            blocks: None, blocks_len: 0, shape: Vec::new(), keep: 0, whole: StoreFootprint::default(),
             cut: Cut::new(), sweeps: ParTiming::default(),
         }
     }

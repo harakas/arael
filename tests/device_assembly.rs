@@ -5940,13 +5940,13 @@ fn a_covariance_after_a_device_solve_reuses_its_analysis() {
     }
 }
 
-/// A covariance after a device solve of a model with blocks the device
-/// never writes (the guarded graph's edges turned off): the solve's
-/// pattern, from the device structure, lacks the blocks the host's
-/// assembly binds, so the covariance runs its own analysis, and matches
-/// the covariance after the CPU's solve.
+/// A covariance after a device solve of a model with blocks no kept
+/// constraint writes (the guarded graph's edges turned off): the solve's
+/// pattern, from the device structure, is the pattern the host's assembly
+/// binds, so the covariance factors under the solve's analysis, and
+/// matches the covariance after the CPU's solve.
 #[test]
-fn a_covariance_after_a_device_solve_covers_the_blocks_the_device_leaves_out() {
+fn a_covariance_after_a_device_solve_of_a_guarded_model_reuses_its_analysis() {
     use arael::covariance::CovMode;
     let run = |gpu: Option<&GpuDevice>| {
         let mut g = guarded_graph(40, 3, true);
@@ -5955,6 +5955,8 @@ fn a_covariance_after_a_device_solve_covers_the_blocks_the_device_leaves_out() {
         let r = g.solve_with(&mut solver, &cfg).unwrap();
         assert_eq!(looped(solver.gpu_report()), gpu.is_some());
         let cov = r.covariance.as_ref().expect("the covariance");
+        assert!(cov.took_block_route());
+        assert_eq!(cov.plan().symbolics_built, 0, "the covariance factors under the solve's analysis");
         cov.marginal_cov(&g.poses[7]).unwrap()
     };
     let cpu = run(None);
@@ -6597,27 +6599,33 @@ fn wide_scopes_compute_the_functions_on_the_device() {
     checks_f32(&mut s, 1e-5, 1e-4, "the wide functions");
 }
 
-/// H's cells from the device structure are the block stores' but those of
-/// the blocks the device never writes: the guarded graph turns every tenth
-/// edge off, and a pair of poses only such an edge joins has its block in
-/// the stores alone; the consistent scene drops nothing, and the two lists
-/// match.
+/// H's cells from the block stores are the device structure's (the device
+/// check asserts the two lists are equal). The guarded graph turns every
+/// tenth edge off, and a pair of poses only such an edge joins has a block
+/// in neither: with every edge on the pattern has more blocks. The
+/// consistent scene has no guard.
 #[test]
-fn the_device_structure_lists_the_stores_blocks_but_those_it_never_writes() {
+fn the_stores_cells_are_the_device_structures() {
     if !checks_f64("the device structure's cells") {
         return;
     }
+    let blocks = |g: &mut GraphG| {
+        let mut x = Vec::new();
+        g.serialize(&mut x);
+        arael::__gpu::device_check(g, &x, &x, &device(), arael::__gpu::Wide::F64).blocks
+    };
     let mut g = guarded_graph(40, 3, true);
-    let mut x = Vec::new();
-    g.serialize(&mut x);
-    let chk = arael::__gpu::device_check(&mut g, &x, &x, &device(), arael::__gpu::Wide::F64);
-    assert!(chk.device_blocks < chk.store_blocks, "{chk:?}");
+    let guarded = blocks(&mut g);
+    for e in g.edges.iter_mut() {
+        e.on = true;
+    }
+    let whole = blocks(&mut g);
+    assert!(guarded < whole, "{guarded} blocks with the guards, {whole} with every edge on");
     let (cameras, points, observations) = consistent_scene::<f64>();
     let mut s = Scene { cameras, points, observations };
     let mut x = Vec::new();
     s.serialize(&mut x);
-    let chk = arael::__gpu::device_check(&mut s, &x, &x, &device(), arael::__gpu::Wide::F64);
-    assert_eq!(chk.device_blocks, chk.store_blocks, "{chk:?}");
+    arael::__gpu::device_check(&mut s, &x, &x, &device(), arael::__gpu::Wide::F64);
 }
 
 /// A solve that assembles on its GPU builds no host block stores: H's
@@ -6655,15 +6663,14 @@ fn a_solve_that_assembles_on_its_gpu_builds_no_host_block_stores() {
 }
 
 /// A solve given a GPU whose route assembles on the host takes H's cells
-/// from the device structure first, then builds the stores. On the
-/// consistent scene, the reduced system solved by conjugate gradients
-/// without being formed, their cells match and the setup goes on; on the
-/// guarded graph, the whole system factored by the scalar sparse Cholesky,
-/// the stores hold the blocks of edges turned off, which the device
-/// structure leaves out, and the setup runs again from them. Both reach
-/// the host solve's optimum.
+/// from the device structure first, then builds the stores and goes on:
+/// their cells are the device structure's. On the consistent scene the
+/// reduced system is solved by conjugate gradients without being formed;
+/// on the guarded graph, with edges turned off, the whole system is
+/// factored by the scalar sparse Cholesky. Both reach the host solve's
+/// optimum.
 #[test]
-fn a_gpu_solve_on_a_host_route_sets_up_from_the_stores() {
+fn a_gpu_solve_on_a_host_route_builds_its_stores() {
     use arael::simple_lm::{BlockSupernodalMode, LmConfig, SchurPolicy, SparseFaer, SparseFaerOptions};
     let cfg = LmConfig::<f64> { max_iters: 50, ..Default::default() };
     let scene = |gpu: Option<&GpuDevice>| {

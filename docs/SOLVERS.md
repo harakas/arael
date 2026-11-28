@@ -509,7 +509,10 @@ methods, build it per solve and drop it after. To keep it across solves of one m
 through an `LmSession`, which keeps one of its own. A solve through a
 context fills the same allocations again; the `_with_context`
 evaluations of `LmProblemInternals` panic on a model of another block
-count than the one the context was built for.
+count than the one the context was built for. The stores follow the
+guards as they were at the build: a cross block that no constraint with
+a true guard writes is left out of the Hessian pattern. After a guard
+changes, such an evaluation needs a fresh context.
 
 `LmSession` keeps a backend and what it learns about one problem's
 structure -- the sparsity pattern, the position map, the ordering, the
@@ -520,8 +523,10 @@ parameter values may change freely; that is what the session is for.
 The structure may not: after any change to the constraints, their
 couplings or the block layout, call `invalidate` first, or the next
 warm solve is undefined. A changed parameter count or block count
-panics, as it cannot be the same structure; a change that keeps every
-count passes unnoticed, so `invalidate` stays the rule. The sweep
+panics, as it cannot be the same structure, and so does a changed guard
+that switches a cross block in or out of the pattern. Any other change
+that keeps every count passes unnoticed, so `invalidate` stays the
+rule. The sweep
 thread count is part of the structure too: the count the first solve
 used holds for the session's life, a later solve asking for another is
 run at the pinned count with a warning, and `invalidate` releases it.

@@ -524,11 +524,10 @@ pub struct DeviceCheck {
     /// The most instances of one constraint: the longest chain of adds in
     /// the host's cost sum ([`check_cost_tolerance`]).
     pub chain: usize,
-    /// H's blocks from the block stores' cells, and from the device
-    /// structure's; the device's are among the stores' (checked), fewer by
-    /// the blocks the device never writes.
-    pub store_blocks: usize,
-    pub device_blocks: usize,
+    /// H's blocks: the cells the block stores list, which are the device
+    /// structure's (checked). A block no kept constraint writes is not
+    /// among them.
+    pub blocks: usize,
 }
 
 /// Threads per block of every assembly kernel (`kernels/assembly.cpp`).
@@ -1860,8 +1859,9 @@ where
     problem.update_params(x0);
     let host_cost = host_cost?.to_f64().unwrap();
     let root = problem.device_root().expect("the root has a device assembly");
-    // H's cells from the device structure: every one a block store's
-    let (store_blocks, device_blocks) = {
+    // H's cells from the device structure are the block stores': a block no
+    // kept constraint writes is in neither
+    let blocks = {
         let mut stored: Vec<(u32, u32)> = cells.iter().map(|&(i, j)| (i as u32, j as u32)).collect();
         stored.sort_unstable();
         stored.dedup();
@@ -1871,7 +1871,9 @@ where
         device.dedup();
         let foreign: Vec<&(u32, u32)> = device.iter().filter(|c| stored.binary_search(c).is_err()).collect();
         assert!(foreign.is_empty(), "the device structure's cells {foreign:?} are no block store's");
-        (stored.len(), device.len())
+        let unwritten: Vec<&(u32, u32)> = stored.iter().filter(|c| device.binary_search(c).is_err()).collect();
+        assert!(unwritten.is_empty(), "the block stores' cells {unwritten:?} are not the device structure's");
+        stored.len()
     };
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
     let asm = DeviceAssembly::<T, D>::new(dev, root, &hsym, threads, wide, Staging::Pinned, None)
@@ -1904,7 +1906,7 @@ where
         if max > 0.0 { diff / max } else { diff }
     };
     let chain = asm.counts.iter().copied().max().unwrap_or(0);
-    Ok(DeviceCheck { host_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv, leaf_bits: asm.leaf_bits(), chain, store_blocks, device_blocks })
+    Ok(DeviceCheck { host_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv, leaf_bits: asm.leaf_bits(), chain, blocks })
 }
 
 /// The environment variable that turns on the device check: set (to

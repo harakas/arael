@@ -54,6 +54,7 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/coo_own_params_with_refs.rs");
     t.compile_fail("tests/constraint_attr_errors/coo_data_refs_only.rs");
     t.compile_fail("tests/constraint_attr_errors/coo_nary_reads_root.rs");
+    t.compile_fail("tests/constraint_attr_errors/cross_block_unwritten.rs");
     // A root is only generated threaded under the `threads` feature;
     // without it the root is sequential, needs no `Sync`, and compiles.
     if cfg!(feature = "threads") {

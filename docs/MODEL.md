@@ -251,8 +251,8 @@ struct PathMatch {
   instance, unchanged.
 - A parent with an empty collection leaves its block unwired and
   inert.
-- A CrossBlock declared on a plain (non-constraint) struct that no
-  constraint claims is a compile error.
+- A CrossBlock that no constraint writes is a compile error, on a
+  constraint struct as on a plain one.
 
 With NO Ref fields on the constraint struct, the **parent's** ref
 fields fill the slots instead -- no per-instance ref storage, the
@@ -892,7 +892,11 @@ constraint's cells in or out of the pattern, so a guard that flips
 mid-solve either writes outside the discovered pattern or leaves a
 zero-curvature parameter (the solve fails DegenerateDiagonal). Set
 guards before solving; flipping them BETWEEN solves is fine (call
-`invalidate()` on a warm `LmSession`). For a residual that must switch
+`invalidate()` on a warm `LmSession`). A cross block is in the pattern
+only while a constraint with a true guard writes it, so a warm session
+panics on a flip that switches one in or out; other flips it does not
+notice, and `invalidate()` is the rule for all of them. For a residual
+that must switch
 itself off numerically DURING a solve -- an observation that becomes
 undefined at the current iterate -- use `branch()` in the body instead:
 it changes the value, not the pattern.

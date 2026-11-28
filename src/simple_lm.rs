@@ -3218,8 +3218,8 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     // A warm session's context was built for the structure its cached
     // pattern serves; a model of another shape means `invalidate` was
     // missed. A tripwire, not a structure check (see `LmSession`).
-    let built_for: Option<std::vec::Vec<u64>> = match pin.as_deref() {
-        Some(&p) if p != 0 => Some(ctx.shape().to_vec()),
+    let built_for: Option<(std::vec::Vec<u64>, u64)> = match pin.as_deref() {
+        Some(&p) if p != 0 => Some((ctx.shape().to_vec(), ctx.keep())),
         _ => None,
     };
     // A session's cached pattern is bound to the stores' count, so it
@@ -3229,11 +3229,21 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     } else {
         ctx.clear_blocks();
     }
-    if let Some(prev) = built_for && prev != ctx.shape() {
-        panic!("LmSession: the problem's structure changed without invalidate(): its block \
-                counts differ from the ones the session's cached pattern was built over -- \
-                call LmSession::invalidate() after a structural change (the next solve \
-                then runs cold)");
+    if let Some((prev, prev_keep)) = built_for {
+        if prev != ctx.shape() {
+            panic!("LmSession: the problem's structure changed without invalidate(): its block \
+                    counts differ from the ones the session's cached pattern was built over -- \
+                    call LmSession::invalidate() after a structural change (the next solve \
+                    then runs cold)");
+        }
+        // The cross blocks the kept constraints write are part of the
+        // pattern; their hash falls out of the store build.
+        if prev_keep != ctx.keep() {
+            panic!("LmSession: a guard changed without invalidate(): the constraints it \
+                    switches write other cross blocks than the session's cached pattern was \
+                    built over -- call LmSession::invalidate() after changing a guard (the \
+                    next solve then runs cold)");
+        }
     }
     // A cached pattern is bound to the store count it was built at: a
     // split store claims its own blocks, so the position stream is per
@@ -7108,11 +7118,9 @@ pub struct SparseFaer<T = f64> {
     #[cfg(feature = "gpu")]
     host_assembly: Option<HostAssembly>,
     // The structure's H cells came from the root's device structure
-    // (`device_cells`), not from the block stores.
-    cells_from_device: bool,
-    // The setup takes H's cells from the block stores whatever the route:
-    // set by `setup_from_stores` for the setup it runs again.
-    force_store_cells: bool,
+    // (`device_cells`) and the block stores are not built: a route that
+    // assembles on the host builds them (`host_stores`).
+    stores_pending: bool,
     // The device structure `device_cells` walked, for the device assembly.
     #[cfg(feature = "gpu")]
     device_structure: Option<crate::device::DeviceStructure>,
@@ -7240,8 +7248,7 @@ impl<T> SparseFaer<T> {
             on_device: false,
             #[cfg(feature = "gpu")]
             host_assembly: None,
-            cells_from_device: false,
-            force_store_cells: false,
+            stores_pending: false,
             #[cfg(feature = "gpu")]
             device_structure: None,
             bdiag_pos: Vec::new(),
@@ -7565,19 +7572,19 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     /// assembles on its GPU and the context holds no block stores
     /// ([`LmSolver::needs_host_blocks`]): the structure is kept for the
     /// device assembly, which then walks the model once. Returns whether it
-    /// took them. The device structure leaves out the blocks the device
-    /// never writes (an instance a guard drops, a cross block no constraint
-    /// writes); a route that assembles on the host sets up again from the
-    /// stores ([`setup_from_stores`](Self::setup_from_stores)).
+    /// took them. They are the cells the block stores list: a cross block
+    /// no constraint with a true guard writes is in neither. A route that
+    /// assembles on the host builds the stores and goes on
+    /// ([`host_stores`](Self::host_stores)).
     fn device_cells(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], cells: &mut Vec<(u32, u32)>, ctx: &crate::threads::Context) -> bool {
         #[cfg(feature = "gpu")]
-        if !self.force_store_cells && !ctx.has_blocks() && self.may_assemble_on_gpu(&*problem) {
+        if !ctx.has_blocks() && self.may_assemble_on_gpu(&*problem) {
             problem.update_params(params);
             let root = problem.device_root().expect("checked above");
             let st = crate::device::structure_of(root);
             crate::device::cells_of(&root.device_shape(), &st, cells, (self.ctx.threads(), crate::device::PAR_MIN));
             self.device_structure = Some(st);
-            self.cells_from_device = true;
+            self.stores_pending = true;
             return true;
         }
         let _ = (problem, params, cells, ctx);
@@ -7595,43 +7602,24 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             && problem.device_root().is_some()
     }
 
-    /// The setup again, its H cells from the root's block stores (built
-    /// now), for a route that assembles on the host after the cells came
-    /// from the device structure ([`device_cells`](Self::device_cells)).
-    fn setup_from_stores(
-        &mut self,
-        problem: &mut dyn LmProblemInternals<T>,
-        params: &[T],
-        grad: &mut [T],
-        matrix: &mut FaerMatrix<T>,
-        ctx: &mut crate::threads::Context,
-    ) -> Result<T, SolveFailureKind> {
+    /// The block stores of a route that assembles on the host, built now
+    /// when the solve took H's cells from the device structure and built
+    /// none ([`device_cells`](Self::device_cells)). Their cells are the
+    /// device structure's, so the setup goes on over the structure built
+    /// so far; the device structure is dropped.
+    fn host_stores(&mut self, problem: &mut dyn LmProblemInternals<T>, ctx: &mut crate::threads::Context) {
+        if !self.stores_pending {
+            return;
+        }
+        self.stores_pending = false;
+        #[cfg(feature = "gpu")]
+        {
+            self.device_structure = None;
+        }
         if self.verbose {
-            info!("setup: this route assembles on the host -- building the block stores and setting up again from them");
+            info!("setup: this route assembles on the host -- building the block stores");
         }
-        LmSolver::reset(self);
-        self.force_store_cells = true;
         problem.begin_with_context(ctx);
-        self.compute(problem, params, grad, matrix, ctx)
-    }
-
-    /// For a route that assembles on the host after H's cells came from the
-    /// device structure ([`device_cells`](Self::device_cells)): builds the
-    /// block stores, and whether every cell of theirs is in the structure
-    /// set up so far (`contains`). The device structure leaves out only
-    /// the blocks the device never writes, so the cells match unless the
-    /// model has such blocks; when they match, the setup goes on with the
-    /// stores, and when not, it starts again from them
-    /// ([`setup_from_stores`](Self::setup_from_stores)).
-    fn host_stores_fit(&mut self, problem: &mut dyn LmProblemInternals<T>, ctx: &mut crate::threads::Context, contains: &dyn Fn(usize, usize) -> bool) -> bool {
-        problem.begin_with_context(ctx);
-        let mut cells = std::vec::Vec::new();
-        problem.collect_hessian_cells(&mut cells, ctx);
-        let fit = cells.iter().all(|&(i, j)| contains(i as usize, j as usize));
-        if fit {
-            self.cells_from_device = false;
-        }
-        fit
     }
 
     /// A structure's first numeric fill at `params` of the block structure
@@ -7703,9 +7691,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 }
             }
         }
-        if self.cells_from_device && !self.host_stores_fit(problem, ctx, &|i, j| hsym.block_of_scalar(i, j).is_some()) {
-            return self.setup_from_stores(problem, params, grad, matrix, ctx);
-        }
+        self.host_stores(problem, ctx);
         let positions = bind_block_positions(problem, &hsym, ctx);
         if vb {
             info!(
@@ -8334,8 +8320,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.on_device = false;
             self.device_structure = None;
         }
-        self.cells_from_device = false;
-        self.force_store_cells = false;
+        self.stores_pending = false;
         self.schur = None;
         self.s = None;
         self.llt_symbolic = None;
@@ -8508,7 +8493,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // discovered the slow way.
         let mut cells = std::vec::Vec::new();
         let mut spans = std::vec::Vec::new();
-        self.cells_from_device = false;
+        self.stores_pending = false;
         if !problem.hessian_pattern_requires_compute() && !ctx.runtime_coo() {
             if !self.device_cells(problem, params, &mut cells, ctx) {
                 problem.collect_hessian_cells(&mut cells, ctx);
@@ -8543,9 +8528,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 refinements: None,
                 refinement_shortfalls: None,
             });
-            if self.cells_from_device && !self.host_stores_fit(problem, ctx, &|_, _| false) {
-                return self.setup_from_stores(problem, params, grad, matrix, ctx);
-            }
+            self.host_stores(problem, ctx);
             return self.setup_full(problem, ctx, params, grad, matrix, n, None, None, vb);
         }
         let partition = block_partition_from_spans(&spans, n);
@@ -8640,9 +8623,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 if self.narrow_band_enabled {
                     let band = block_half_bandwidth(&hsym);
                     if matches!(ordering_for(hsym.val_count(), n, band), ReducedOrdering::NaturalBanded) {
-                        if self.cells_from_device && !self.host_stores_fit(problem, ctx, &|i, j| hsym.block_of_scalar(i, j).is_some()) {
-                            return self.setup_from_stores(problem, params, grad, matrix, ctx);
-                        }
+                        self.host_stores(problem, ctx);
                         return self.setup_whole_band(problem, ctx, params, grad, matrix, &partition, hsym, band, vb);
                     }
                 }
@@ -8670,14 +8651,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 refinements: None,
                 refinement_shortfalls: None,
             });
-            if self.cells_from_device {
-                let mut sorted = cells.clone();
-                sorted.sort_unstable();
-                sorted.dedup();
-                if !self.host_stores_fit(problem, ctx, &|i, j| sorted.binary_search(&(i as u32, j as u32)).is_ok()) {
-                    return self.setup_from_stores(problem, params, grad, matrix, ctx);
-                }
-            }
+            self.host_stores(problem, ctx);
             return self.setup_full(
                 problem,
                 ctx, params, grad, matrix, n, Some((&partition, &cells)), None, vb,

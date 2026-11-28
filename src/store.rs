@@ -252,6 +252,7 @@ impl Context {
         self.blocks = None;
         self.blocks_len = 0;
         self.shape.clear();
+        self.keep = 0;
         self.cut.clear();
         self.whole = StoreFootprint::default();
     }
@@ -327,6 +328,15 @@ impl Context {
         self.shape.clear();
         self.shape.extend_from_slice(shape);
     }
+
+    /// The hash of the keep bits the stores were built with
+    /// ([`Keep::hash`]): which cross blocks the kept constraints write. 0
+    /// until a build records one, and for a model without guarded cross
+    /// blocks.
+    pub fn keep(&self) -> u64 { self.keep }
+
+    /// Record the keep bits' hash a build was made with.
+    pub fn set_keep(&mut self, keep: u64) { self.keep = keep; }
 }
 
 /// The store list for `S` in `blocks`, `n` long at least, replacing
@@ -468,6 +478,67 @@ impl Cut {
 #[inline(always)]
 pub fn walk_range(ranges: &[(u32, u32)], k: usize) -> (u32, u32) {
     if ranges.is_empty() { (0, u32::MAX) } else { ranges[k] }
+}
+
+/// The cross blocks a kept constraint writes: a bit per slot, per cross
+/// array of which every writer has a guard. A kept constraint instance is
+/// one whose guard is true.
+///
+/// The generated `__keep_bits` marks them once per store build; the fill
+/// leaves the indices of an unmarked block unset, so its entry keeps its
+/// slot, lists no Hessian cell and scatters nothing. An array with an
+/// unguarded writer has no bits: all of its blocks are written.
+///
+/// ```ignore
+/// let mut keep = Keep::new(&[edges.len()]);
+/// keep.mark(0, 3);
+/// assert!(keep.kept(0, 3) && !keep.kept(0, 4));
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct Keep {
+    bits: std::vec::Vec<std::vec::Vec<u64>>,
+}
+
+impl Keep {
+    /// Nothing marked, `slots[k]` slots in array `k`.
+    pub fn new(slots: &[usize]) -> Self {
+        Keep { bits: slots.iter().map(|&n| std::vec![0u64; n.div_ceil(64)]).collect() }
+    }
+
+    /// Mark the block at `slot` of array `k`.
+    #[inline]
+    pub fn mark(&mut self, k: usize, slot: u32) {
+        self.bits[k][(slot >> 6) as usize] |= 1u64 << (slot & 63);
+    }
+
+    /// Whether the block at `slot` of array `k` is marked.
+    #[inline]
+    pub fn kept(&self, k: usize, slot: u32) -> bool {
+        (self.bits[k][(slot >> 6) as usize] >> (slot & 63)) & 1 != 0
+    }
+
+    /// A hash of the bits, 0 without any array: equal bits give an equal
+    /// hash, and a context records it so a warm
+    /// [`LmSession`](crate::simple_lm::LmSession) can tell a guard that
+    /// changed without `invalidate()`.
+    pub fn hash(&self) -> u64 {
+        if self.bits.is_empty() {
+            return 0;
+        }
+        let mut h = 0x9e37_79b9_7f4a_7c15u64;
+        let mut mix = |w: u64| {
+            h = (h ^ w).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            h ^= h >> 29;
+        };
+        for a in &self.bits {
+            mix(a.len() as u64);
+            for &w in a {
+                mix(w);
+            }
+        }
+        // 0 is the hash of no array
+        h | 1
+    }
 }
 
 
@@ -3378,6 +3449,36 @@ pub fn block_partition_from_spans(spans: &[(u32, u32)], n: usize) -> std::vec::V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The keep bits: a mark is read back at its slot and array alone, also
+    // across a word's edge; the hash is 0 without an array and tells apart
+    // one block switched for another at the same count.
+    #[test]
+    fn keep_bits_mark_their_slot_and_hash_their_marks() {
+        let mut keep = Keep::new(&[130, 5]);
+        for slot in [0, 63, 64, 129] {
+            keep.mark(0, slot);
+        }
+        keep.mark(1, 4);
+        for slot in 0..130 {
+            assert_eq!(keep.kept(0, slot), [0, 63, 64, 129].contains(&slot), "array 0, slot {slot}");
+        }
+        for slot in 0..5 {
+            assert_eq!(keep.kept(1, slot), slot == 4, "array 1, slot {slot}");
+        }
+        assert_eq!(Keep::new(&[]).hash(), 0);
+        assert_ne!(Keep::new(&[130, 5]).hash(), 0, "arrays without a mark are not no array");
+        let marked = |slots: &[u32]| {
+            let mut k = Keep::new(&[130, 5]);
+            for &s in slots {
+                k.mark(0, s);
+            }
+            k.hash()
+        };
+        assert_eq!(marked(&[3, 70]), marked(&[70, 3]));
+        assert_ne!(marked(&[3, 70]), marked(&[4, 70]), "one block switched for another");
+        assert_ne!(marked(&[3, 70]), marked(&[3]));
+    }
 
     // The property every later stage rests on: a set of contiguous slot
     // ranges covering the container yields the full walk, in order, once
