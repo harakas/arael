@@ -607,8 +607,12 @@ impl num::Float for df32 {
             return df32::from_f32(y.hi.atan2(x.hi));
         }
         if x.hi == 0.0 {
-            return if y.hi == 0.0 { df32::from_f32(y.hi.atan2(x.hi)) }
-                else if y.hi > 0.0 { df32::FRAC_PI_2 } else { -df32::FRAC_PI_2 };
+            // both zero: +-0 from +0, +-pi from -0, exactly (the f32
+            // library's pi may be a bit off, as macOS's is)
+            return if y.hi == 0.0 {
+                if x.hi.is_sign_positive() { df32::from_f32(y.hi) }
+                else if y.hi.is_sign_negative() { -df32::PI } else { df32::PI }
+            } else if y.hi > 0.0 { df32::FRAC_PI_2 } else { -df32::FRAC_PI_2 };
         }
         if y.hi == 0.0 {
             return if x.hi > 0.0 { df32::from_f32(y.hi.atan2(x.hi)) }
@@ -699,12 +703,16 @@ impl num::Float for df32 {
             s = s * x2 + df32::ONE;
             return s * self;
         }
-        let e = self.exp();
-        (e - df32::ONE / e) * df32::HALF
+        // odd, from exp(|x|) >= 1: exp of a large negative x is tiny, its
+        // low part subnormal (fewer bits, or flushed on a device)
+        let e = self.abs().exp();
+        let s = (e - df32::ONE / e) * df32::HALF;
+        if self.hi < 0.0 { -s } else { s }
     }
     fn cosh(self) -> df32 {
         if !self.hi.is_finite() { return self.abs(); }
-        let e = self.exp();
+        // even, from exp(|x|) >= 1, as sinh
+        let e = self.abs().exp();
         (e + df32::ONE / e) * df32::HALF
     }
     fn tanh(self) -> df32 {
@@ -814,6 +822,31 @@ mod tests {
     }
 
     fn rel(a: f64, b: f64) -> f64 { (a - b).abs() / b.abs().max(f64::MIN_POSITIVE) }
+
+    /// atan2 of signed zeros is exact: +-0 from +0, +-pi (with its low
+    /// part) from -0, whatever the platform's f32 library gives.
+    #[test]
+    fn atan2_of_zeros_is_exact() {
+        let (p, n) = (df32::ZERO, -df32::ZERO);
+        // the sign in hi's bits, lo's by value (a zero's lo may carry either)
+        let same = |a: df32, b: df32| a.hi.to_bits() == b.hi.to_bits() && a.lo == b.lo;
+        assert!(same(p.atan2(p), p) && same(n.atan2(p), n));
+        assert!(same(p.atan2(n), df32::PI) && same(n.atan2(n), -df32::PI));
+    }
+
+    /// sinh and cosh of a large negative x keep df32's precision (exp(x)
+    /// is tiny there, its low part subnormal) and are odd and even.
+    #[test]
+    fn sinh_and_cosh_of_a_large_negative_x_keep_their_precision() {
+        for x in [-79.43485f64, -60.0, -30.5, -1.25] {
+            let d = df32::from_f64(x);
+            let x = d.to_f64();
+            assert!(rel(d.sinh().to_f64(), x.sinh()) < 1e-13, "sinh({x}): {:?}", d.sinh());
+            assert!(rel(d.cosh().to_f64(), x.cosh()) < 1e-13, "cosh({x}): {:?}", d.cosh());
+            assert_eq!(d.sinh().to_f64(), -(-d).sinh().to_f64());
+            assert_eq!(d.cosh().to_f64(), (-d).cosh().to_f64());
+        }
+    }
 
     /// The unit in the last place of `x`: the spacing of f32 values at
     /// `|x|`, a subnormal spacing below 2^-103.

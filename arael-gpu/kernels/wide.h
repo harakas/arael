@@ -376,7 +376,11 @@ DEVICE df32 tan(df32 a) {
 DEVICE df32 atan2(df32 y, df32 x) {
     if (!(isfinite(x.hi) && isfinite(y.hi))) return df32(atan2(y.hi, x.hi));
     if (x.hi == 0.0f) {
-        if (y.hi == 0.0f) return df32(atan2(y.hi, x.hi));
+        // both zero: +-0 from +0, +-pi from -0, exactly, as the host's
+        if (y.hi == 0.0f) {
+            if (copysign(1.0f, x.hi) > 0.0f) return df32(y.hi);
+            return copysign(1.0f, y.hi) < 0.0f ? -DF32_PI : DF32_PI;
+        }
         return y.hi > 0.0f ? DF32_FRAC_PI_2 : -DF32_FRAC_PI_2;
     }
     if (y.hi == 0.0f) {
@@ -459,13 +463,17 @@ DEVICE df32 sinh(df32 a) {
         s = s * x2 + df32(1.0f);
         return s * a;
     }
-    df32 e = exp(a);
-    return (e - df32(1.0f) / e) * df32(0.5f);
+    // odd, from exp(|x|) >= 1: exp of a large negative x is tiny, its low
+    // part subnormal (flushed on Metal); as the host's
+    df32 e = exp(fabs(a));
+    df32 s = (e - df32(1.0f) / e) * df32(0.5f);
+    return a.hi < 0.0f ? -s : s;
 }
 
 DEVICE df32 cosh(df32 a) {
     if (!isfinite(a.hi)) return fabs(a);
-    df32 e = exp(a);
+    // even, from exp(|x|) >= 1, as sinh
+    df32 e = exp(fabs(a));
     return (e + df32(1.0f) / e) * df32(0.5f);
 }
 

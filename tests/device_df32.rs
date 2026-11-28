@@ -198,7 +198,8 @@ fn host_math(x: df32, y: df32) -> ([df32; 19], usize) {
 /// precision where they start from the f32 library's log or atan2, whose
 /// last bit may differ from the host's: 1e-12 of the result or of 1,
 /// whichever is larger, and 1e-10 of the result for pow, whose relative
-/// error is its exponent times its log's.
+/// error is its exponent times its log's. On a device that flushes
+/// subnormals, any of them may lose the low parts the flush takes.
 #[test]
 fn device_df32_functions_match_the_host() {
     let dev = Dev::new(0).unwrap();
@@ -224,13 +225,14 @@ fn device_df32_functions_match_the_host() {
                 if same(g, *w) {
                     continue;
                 }
-                let ok = if k >= seeded && w.hi.is_finite() && g.hi.is_finite() {
-                    seeded_bits += 1;
+                let seeded_close = k >= seeded && w.hi.is_finite() && g.hi.is_finite() && {
                     let scale = if k == 14 { 1e-10 * w.to_f64().abs() } else { 1e-12 * w.to_f64().abs().max(1.0) };
                     (g.to_f64() - w.to_f64()).abs() <= scale
-                } else {
-                    flushes && flushed(g, *w, x, y)
                 };
+                seeded_bits += seeded_close as usize;
+                // the flush takes an input's subnormal low part from a seeded
+                // function too
+                let ok = seeded_close || (flushes && flushed(g, *w, x, y));
                 if !ok {
                     bad += 1;
                     if bad < 10 {
