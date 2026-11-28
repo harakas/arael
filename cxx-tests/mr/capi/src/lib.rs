@@ -12,7 +12,7 @@ use arael::simple_lm::{
     LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
     SparseFaerOptions,
 };
-use cxx_mr::{Decay};
+use cxx_mr::{Decay, Tie};
 type Cell = cxx_mr::Cell<f32>;
 
 /// The opaque handle the C ABI hands out: the model, the error /
@@ -2341,6 +2341,185 @@ pub unsafe extern "C" fn decay_cells_get_refs_n(
     true
 }
 #[no_mangle]
+pub unsafe extern "C" fn decay_ties_len(p: *const DecayHandle) -> u32 {
+    (*p).model.ties.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_reserve(p: *mut DecayHandle, additional: u32) {
+    (*p).model.ties.reserve(additional as usize);
+}
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_push(p: *mut DecayHandle) -> *mut Tie {
+    let m = &mut (*p).model.ties;
+    m.push(Default::default());
+    m.last_mut().unwrap() as *mut Tie
+}
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_at(p: *mut DecayHandle, i: u32) -> *mut Tie {
+    let m = &mut (*p).model.ties;
+    &mut m[i as usize] as *mut Tie
+}
+/// Drops the last element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_pop(p: *mut DecayHandle) -> bool {
+    (*p).model.ties.pop().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_clear(p: *mut DecayHandle) {
+    (*p).model.ties.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_truncate(p: *mut DecayHandle, len: u32) {
+    (*p).model.ties.truncate(len as usize);
+}
+/// Appends `n` elements built from `n` slot records of 6 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_push_n(p: *mut DecayHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.ties;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Tie = Default::default();
+        if !slots.is_null() {
+            assign_slots_tie(&mut e, slots.add(i * 6));
+        }
+        m.push(e);
+    }
+    first as u32
+}
+/// Sets `a` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_set_a_n(
+    p: *mut DecayHandle, start: u32, v: *const u32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u32;
+        m[start + i].a = arael::refs::Ref::from_raw(std::ptr::read_unaligned(src));
+    }
+    true
+}
+/// Reads `a` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_get_a_n(
+    p: *const DecayHandle, start: u32, out: *mut u32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u32;
+        std::ptr::write_unaligned(dst, m[start + i].a.to_raw());
+    }
+    true
+}
+/// Sets `b` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_set_b_n(
+    p: *mut DecayHandle, start: u32, v: *const u32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u32;
+        m[start + i].b = arael::refs::Ref::from_raw(std::ptr::read_unaligned(src));
+    }
+    true
+}
+/// Reads `b` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_get_b_n(
+    p: *const DecayHandle, start: u32, out: *mut u32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u32;
+        std::ptr::write_unaligned(dst, m[start + i].b.to_raw());
+    }
+    true
+}
+/// Sets `d` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_set_d_n(
+    p: *mut DecayHandle, start: u32, v: *const f32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f32;
+        m[start + i].d = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `d` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_get_d_n(
+    p: *const DecayHandle, start: u32, out: *mut f32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f32;
+        std::ptr::write_unaligned(dst, m[start + i].d);
+    }
+    true
+}
+/// Sets `at` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_set_at_n(
+    p: *mut DecayHandle, start: u32, v: *const f32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f32;
+        m[start + i].at = std::mem::transmute::<[f32; 2], CVec2F32>(std::ptr::read_unaligned(src as *const [f32; 2])).into();
+    }
+    true
+}
+/// Reads `at` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_ties_get_at_n(
+    p: *const DecayHandle, start: u32, out: *mut f32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f32;
+        let mv: CVec2F32 = m[start + i].at.into();
+        std::ptr::write_unaligned(dst as *mut [f32; 2], std::mem::transmute::<CVec2F32, [f32; 2]>(mv));
+    }
+    true
+}
+#[no_mangle]
 pub unsafe extern "C" fn decay_cell_v(p: *const Cell) -> f32 {
     (*p).v.value
 }
@@ -2372,6 +2551,38 @@ pub unsafe extern "C" fn decay_cell_w(p: *const Cell) -> f32 {
 pub unsafe extern "C" fn decay_cell_set_w(p: *mut Cell, v: f32) {
     (*p).w = v;
 }
+#[no_mangle]
+pub unsafe extern "C" fn decay_tie_a(p: *const Tie) -> u32 {
+    (*p).a.to_raw()
+}
+#[no_mangle]
+pub unsafe extern "C" fn decay_tie_set_a(p: *mut Tie, v: u32) {
+    (*p).a = arael::refs::Ref::from_raw(v);
+}
+#[no_mangle]
+pub unsafe extern "C" fn decay_tie_b(p: *const Tie) -> u32 {
+    (*p).b.to_raw()
+}
+#[no_mangle]
+pub unsafe extern "C" fn decay_tie_set_b(p: *mut Tie, v: u32) {
+    (*p).b = arael::refs::Ref::from_raw(v);
+}
+#[no_mangle]
+pub unsafe extern "C" fn decay_tie_d(p: *const Tie) -> f32 {
+    (*p).d
+}
+#[no_mangle]
+pub unsafe extern "C" fn decay_tie_set_d(p: *mut Tie, v: f32) {
+    (*p).d = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn decay_tie_at(p: *const Tie) -> CVec2F32 {
+    (*p).at.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn decay_tie_set_at(p: *mut Tie, v: CVec2F32) {
+    (*p).at = v.into();
+}
 
 /// Assigns a slot record's masked leaves onto a `Cell`: 1 mask
 /// word(s), then 4 slot(s), one per leaf in field order.
@@ -2388,6 +2599,24 @@ unsafe fn assign_slots_cell(e: &mut Cell, s: *const u64) {
     }
     if *s.add(0) & (1u64 << 3) != 0 {
         e.w = f64::from_bits(*s.add(4)) as f32;
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Tie`: 1 mask
+/// word(s), then 5 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_tie(e: &mut Tie, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.a = arael::refs::Ref::from_raw(*s.add(1) as u32);
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.b = arael::refs::Ref::from_raw(*s.add(2) as u32);
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.d = f64::from_bits(*s.add(3)) as f32;
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.at = std::mem::transmute::<[f32; 2], CVec2F32>([f64::from_bits(*s.add(4)) as f32, f64::from_bits(*s.add(5)) as f32]).into();
     }
 }
 

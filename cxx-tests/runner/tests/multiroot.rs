@@ -2,9 +2,10 @@
 // from ONE C++ translation unit (nested namespaces, one capi
 // staticlib), compared exactly against the same solves in Rust.
 
-use arael::model::{Param, SelfBlock};
+use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus};
-use cxx_mr::{Cell, Decay, Line, Ob};
+use arael::vect::vect2;
+use cxx_mr::{Cell, Decay, Line, Ob, Tie};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -106,6 +107,12 @@ fn verify_mr(got: &HashMap<String, f64>) {
             hb: SelfBlock::new(),
         });
     }
+    // The non-generic entity over the generic one: cells 0 and 2 tied.
+    let (a, b) = (decay.cells.ref_at(0), decay.cells.ref_at(2));
+    decay.ties.push(Tie { a, b, d: 0.75, at: vect2::new(1.5, -2.5), hb: CrossBlock::new() });
+    assert_eq!(g("tie_a_is_cell0"), 1.0);
+    assert_eq!(g("tie_b_is_cell2"), 1.0);
+    assert_eq!((g("tie_at_x"), g("tie_at_y")), (1.5, -2.5));
     let dc = LmConfig::<f32> { max_iters: 30, ..Default::default() };
     let dr = decay.solve_dense(&dc).unwrap();
     assert!(dr.status.is_success(), "{:?}", dr.status);

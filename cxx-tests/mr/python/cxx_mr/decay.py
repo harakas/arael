@@ -337,6 +337,33 @@ class CellRef:
         return "CellRef(%s)" % (self.raw if self.valid else "null")
 
 
+class TieRef:
+    """Typed handle into the collection that issued it -- the Python
+    spelling of Rust's `Ref<Tie>`. Default-constructed it is the null
+    sentinel."""
+
+    __slots__ = ("raw",)
+
+    def __init__(self, raw=0xFFFFFFFF):
+        self.raw = raw
+
+    @property
+    def valid(self):
+        return self.raw != 0xFFFFFFFF
+
+    def __eq__(self, o):
+        return isinstance(o, TieRef) and o.raw == self.raw
+
+    def __hash__(self):
+        return hash((TieRef, self.raw))
+
+    def __repr__(self):
+        return "TieRef(%s)" % (self.raw if self.valid else "null")
+
+
+_Z2 = (0.0,) * 2
+
+
 _cell_rec = struct.Struct("=QdQdd")
 _cell_slots = (ctypes.c_uint64 * 5)()
 
@@ -409,6 +436,80 @@ class Cell:
     @w.setter
     def w(self, v):
         _f.decay_cell_set_w(self._p, v)
+
+
+_tie_rec = struct.Struct("=QQQddd")
+_tie_slots = (ctypes.c_uint64 * 6)()
+
+
+class Tie:
+    """A `Tie` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
+
+    __slots__ = ("_at", "_key")
+    param_count = 0
+
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a TieRef or an index; None for a
+        # nested element).
+        self._at = at
+        self._key = key
+
+    @property
+    def _p(self):
+        return self._at()
+
+    @property
+    def ref(self):
+        """The TieRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, TieRef):
+            return k
+        raise TypeError("Tie addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a TieRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Tie addressed by ref, not by index")
+
+    @property
+    def a(self):
+        return CellRef(_f.decay_tie_a(self._p))
+
+    @a.setter
+    def a(self, r):
+        _f.decay_tie_set_a(self._p, _raw(r))
+
+    @property
+    def b(self):
+        return CellRef(_f.decay_tie_b(self._p))
+
+    @b.setter
+    def b(self, r):
+        _f.decay_tie_set_b(self._p, _raw(r))
+
+    @property
+    def d(self):
+        return _f.decay_tie_d(self._p)
+
+    @d.setter
+    def d(self, v):
+        _f.decay_tie_set_d(self._p, v)
+
+    @property
+    def at(self):
+        return _f.decay_tie_at(self._p)
+
+    @at.setter
+    def at(self, v):
+        _f.decay_tie_set_at(self._p, v if isinstance(v, _m.vect2f) else _m.vect2f(v))
 
 
 def _cov_query(c, fn, p, cap):
@@ -692,6 +793,164 @@ class DecayCellsVec:
         return _cols.column_finish(buf, "I", 1, n)
 
 
+class DecayTiesVec:
+    """View of `ties` (vec of Tie); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
+
+    __slots__ = ("_p",)
+
+    def __init__(self, p):
+        self._p = p
+
+    def __len__(self):
+        return _f.decay_ties_len(self._p)
+
+    def reserve(self, additional):
+        _f.decay_ties_reserve(self._p, additional)
+
+    def __getitem__(self, i):
+        n = len(self)
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError(i)
+        return Tie(lambda i=i: _f.decay_ties_at(self._p, i), i)
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield Tie(lambda i=i: _f.decay_ties_at(self._p, i), i)
+
+    def clear(self):
+        _f.decay_ties_clear(self._p)
+
+    def truncate(self, n):
+        _f.decay_ties_truncate(self._p, n)
+
+    def push(self, *, a=None, b=None, d=None, at=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if a is None: a = 0
+        else: m |= 1 << 0; a = getattr(a, "raw", a)
+        if b is None: b = 0
+        else: m |= 1 << 1; b = getattr(b, "raw", b)
+        if d is None: d = 0.0
+        else: m |= 1 << 2
+        if at is None: at = _Z2
+        else:
+            m |= 1 << 3; at = tuple(at)
+            if len(at) != 2: at = _cols.flat(at, 2)
+        _tie_rec.pack_into(_tie_slots, 0,
+            m, a, b, d, *at)
+        i = _f.decay_ties_push_n(self._p, _tie_slots, 1)
+        return Tie(lambda i=i: _f.decay_ties_at(self._p, i), i)
+
+    def pop(self):
+        """Drops the last element; False when already empty."""
+        return _f.decay_ties_pop(self._p)
+
+    def push_many(self, n=None, *, a=None, b=None, d=None, at=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("a", a), ("b", b), ("d", d), ("at", at)))
+        i0 = len(self)
+        _f.decay_ties_push_n(self._p, None, n)
+        if a is not None:
+            self._set_a(i0, n, a)
+        if b is not None:
+            self._set_b(i0, n, b)
+        if d is not None:
+            self._set_d(i0, n, d)
+        if at is not None:
+            self._set_at(i0, n, at)
+        return i0
+
+    def _set_a(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "I", 1, n, "a")
+        if not _f.decay_ties_set_a_n(self._p, start, ptr, n, stride):
+            raise IndexError("a: %d + %d exceeds the collection" % (start, n))
+
+    def set_a(self, v):
+        """Sets `a` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_a(0, len(self), v)
+
+    def get_a(self):
+        """`a` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("I", 1, n)
+        _f.decay_ties_get_a_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "I", 1, n)
+
+    def _set_b(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "I", 1, n, "b")
+        if not _f.decay_ties_set_b_n(self._p, start, ptr, n, stride):
+            raise IndexError("b: %d + %d exceeds the collection" % (start, n))
+
+    def set_b(self, v):
+        """Sets `b` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_b(0, len(self), v)
+
+    def get_b(self):
+        """`b` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("I", 1, n)
+        _f.decay_ties_get_b_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "I", 1, n)
+
+    def _set_d(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 1, n, "d")
+        if not _f.decay_ties_set_d_n(self._p, start, ptr, n, stride):
+            raise IndexError("d: %d + %d exceeds the collection" % (start, n))
+
+    def set_d(self, v):
+        """Sets `d` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_d(0, len(self), v)
+
+    def get_d(self):
+        """`d` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 1, n)
+        _f.decay_ties_get_d_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 1, n)
+
+    def _set_at(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 2, n, "at")
+        if not _f.decay_ties_set_at_n(self._p, start, ptr, n, stride):
+            raise IndexError("at: %d + %d exceeds the collection" % (start, n))
+
+    def set_at(self, v):
+        """Sets `at` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_at(0, len(self), v)
+
+    def get_at(self):
+        """`at` of every element in one call, as an (n, 2) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 2, n)
+        _f.decay_ties_get_at_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 2, n)
+
+
 class Decay:
     """The model. Owns the underlying Rust instance; free() (or GC)
     releases it. One model, one thread."""
@@ -780,4 +1039,8 @@ class Decay:
     @property
     def cells(self):
         return DecayCellsVec(self._p)
+
+    @property
+    def ties(self):
+        return DecayTiesVec(self._p)
 

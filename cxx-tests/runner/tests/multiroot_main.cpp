@@ -30,6 +30,18 @@ int main() {
         c.set_t(t[i]);
         c.set_w(1.0f + float(i));
     }
+    // A tie is not generic and names the generic Cell: its refs are
+    // CellRef handles, its math value a vect2f.
+    auto tie = decay.ties().push();
+    tie.set_a(decay.cells().ref_at(0));
+    tie.set_b(decay.cells().ref_at(2));
+    tie.set_d(0.75f);
+    tie.set_at(cxx_mr::decay::vect2f{1.5f, -2.5f});
+    cxx_mr::decay::CellRef tb = tie.b();
+    p("tie_a_is_cell0", tie.a().raw == decay.cells().ref_at(0).raw ? 1.0 : 0.0);
+    p("tie_b_is_cell2", tb.raw == decay.cells().ref_at(2).raw ? 1.0 : 0.0);
+    p("tie_at_x", double(tie.at().x));
+    p("tie_at_y", double(tie.at().y));
     cxx_mr::decay::LmConfig dc;
     dc.max_iters = 30;
     auto dr = decay.solve_dense(dc).value();

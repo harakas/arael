@@ -68,23 +68,22 @@ fn block_scalar(spelling: &str) -> &str {
     }
 }
 
+fn is_ident(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 /// A generic struct's spelling at a root's precision: `vect2<T>` ->
 /// `vect2f`, `Point<T>` -> `Point`, `Param<T>` -> `Param<f32>`,
 /// `CrossBlock<Point<T>, Pose<T>, T>` -> `CrossBlock<Point, Pose, f32>`.
+/// The parameter becomes the float, then the spelling is made canonical
+/// ([`canonical`]).
 fn concretize(spelling: &str, generic: &str, precision: &str) -> String {
-    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    let suffix = if precision == "f32" { "f" } else { "d" };
-    let mut s = spelling.to_string();
-    for math in ["vect2", "vect3", "matrix2", "matrix3", "quatern"] {
-        s = s.replace(&format!("{math}<{generic}>"), &format!("{math}{suffix}"));
-    }
-    // The parameter itself is the float.
-    let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(spelling.len());
+    let bytes = spelling.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         let end = i + generic.len();
-        if s[i..].starts_with(generic)
+        if spelling[i..].starts_with(generic)
             && (i == 0 || !is_ident(bytes[i - 1]))
             && (end == bytes.len() || !is_ident(bytes[end]))
         {
@@ -95,21 +94,35 @@ fn concretize(spelling: &str, generic: &str, precision: &str) -> String {
             i += 1;
         }
     }
-    // An entity instantiation drops its argument: the sidecar names
-    // entities without it. Wrappers (`Param<f32>`) and builtin
-    // components keep theirs.
-    let arg = format!("<{precision}>");
-    let mut s = out;
-    let mut from = 0;
-    while let Some(pos) = s[from..].find(&arg) {
-        let at = from + pos;
-        let head_start = s[..at].bytes().rposition(|b| !is_ident(b)).map(|p| p + 1).unwrap_or(0);
-        let head = &s[head_start..at];
-        if registry_lookup(head).is_some_and(|l| !l.component) {
-            s.replace_range(at..at + arg.len(), "");
-            from = at;
-        } else {
-            from = at + arg.len();
+    canonical(&out)
+}
+
+/// The sidecar's form of a spelling whose floats are concrete: a math
+/// type takes its suffix and an entity instantiation drops its argument,
+/// as the sidecar names both. `vect3<f64>` -> `vect3d`, `Ref<Pose<f64>>`
+/// -> `Ref<Pose>`, `CrossBlock<Pose<f32>, Pose<f32>, f32>` ->
+/// `CrossBlock<Pose, Pose, f32>`. Wrappers (`Param<f32>`) and builtin
+/// components keep their argument. A non-generic struct naming a generic
+/// entity at a precision goes through here as a generic one does after
+/// [`concretize`], so both read the same.
+fn canonical(spelling: &str) -> String {
+    let mut s = spelling.to_string();
+    for (float, suffix) in [("f32", "f"), ("f64", "d")] {
+        let arg = format!("<{float}>");
+        let mut from = 0;
+        while let Some(pos) = s[from..].find(&arg) {
+            let at = from + pos;
+            let head_start = s[..at].bytes().rposition(|b| !is_ident(b)).map(|p| p + 1).unwrap_or(0);
+            let head = &s[head_start..at];
+            if matches!(head, "vect2" | "vect3" | "matrix2" | "matrix3" | "quatern") {
+                s.replace_range(at..at + arg.len(), suffix);
+                from = at + suffix.len();
+            } else if registry_lookup(head).is_some_and(|l| !l.component) {
+                s.replace_range(at..at + arg.len(), "");
+                from = at;
+            } else {
+                from = at + arg.len();
+            }
         }
     }
     s
@@ -133,8 +146,10 @@ fn sft_size(sft: &SymFieldType) -> u32 {
     }
 }
 
-/// One field's JSON object body (the `{...}` content, no braces).
-fn field_kind(layout: &SymLayout, fname: &str, spelling: &str) -> String {
+/// One field's JSON object body (the `{...}` content, no braces), from
+/// the field's canonical spelling; `spelled` is what a collection reports
+/// as its spelling.
+fn field_kind(layout: &SymLayout, fname: &str, spelling: &str, spelled: &str) -> String {
     let sft = layout.fields.iter().find(|(n, _)| n == fname).map(|(_, s)| s);
     let bare = spelling.strip_prefix("Option<")
         .and_then(|s| s.strip_suffix('>'))
@@ -203,7 +218,7 @@ fn field_kind(layout: &SymLayout, fname: &str, spelling: &str) -> String {
         parts.push("\"kind\": \"collection\"".into());
         parts.push(format!("\"container\": {}", q(container)));
         parts.push(format!("\"of\": {}", q(&elem)));
-        parts.push(format!("\"spelled\": {}", q(spelling)));
+        parts.push(format!("\"spelled\": {}", q(spelled)));
     } else {
         match sft {
             Some(SymFieldType::OptionalStruct(inner)) => {
@@ -294,13 +309,19 @@ pub(crate) fn build_json(
             e.push_str("      \"fields\": []\n");
         } else {
             e.push_str("      \"fields\": [\n");
+            // Every type name canonical, a generic struct's at the root's
+            // precision. A collection of a non-generic struct keeps its
+            // source spelling beside it.
             let rows: Vec<String> = layout.spelled_types.iter()
                 .map(|(fname, sp)| {
-                    let sp = match &layout.scalar_generic {
-                        Some(g) => concretize(sp, g, precision),
-                        None => sp.clone(),
+                    let (canon, spelled) = match &layout.scalar_generic {
+                        Some(g) => {
+                            let c = concretize(sp, g, precision);
+                            (c.clone(), c)
+                        }
+                        None => (canonical(sp), sp.clone()),
                     };
-                    format!("        {{{}}}", field_kind(&layout, fname, &sp))
+                    format!("        {{{}}}", field_kind(&layout, fname, &canon, &spelled))
                 })
                 .collect();
             e.push_str(&rows.join(",\n"));
@@ -378,6 +399,87 @@ mod tests {
         assert!(!json.contains("<T>"), "{json}");
         assert!(json.contains("\"ScgPt\": {\n      \"role\": \"entity\",\n      \"param_count\": 2,\n      \"generic\": true,"), "{json}");
         assert!(!json.contains("\"ScgWorld\": {\n      \"role\": \"root\",\n      \"param_count\": 0,\n      \"generic\""), "{json}");
+    }
+
+    // A non-generic struct naming a generic entity at a precision reads as
+    // a generic struct does at the root's: the ref's target and the cross
+    // block's sides carry no argument, a math type takes its suffix. The
+    // collection's `spelled` stays the source spelling.
+    #[test]
+    fn a_non_generic_struct_names_a_generic_entity_without_its_argument() {
+        store("ScnPose", SymLayout {
+            fields: vec![
+                ("pos".into(), SymFieldType::Vec3),
+                ("hb".into(), SymFieldType::Skip),
+            ],
+            param_fields: vec!["pos".into()],
+            self_block_field: Some("hb".into()),
+            scalar_generic: Some("T".into()),
+            spelled_types: vec![
+                ("pos".into(), "Param<vect3<T>>".into()),
+                ("hb".into(), "SelfBlock<ScnPose<T>, T>".into()),
+            ],
+            ..Default::default()
+        });
+        store("ScnTie", SymLayout {
+            fields: vec![
+                ("a".into(), SymFieldType::Skip),
+                ("b".into(), SymFieldType::Skip),
+                ("at".into(), SymFieldType::Vec3),
+                ("off".into(), SymFieldType::Vec2),
+                ("hb".into(), SymFieldType::Skip),
+            ],
+            param_fields: vec!["off".into()],
+            ref_paths: vec![("a".into(), "root.poses".into()), ("b".into(), "root.poses".into())],
+            spelled_types: vec![
+                ("a".into(), "Ref<ScnPose<f64>>".into()),
+                ("b".into(), "Option<Ref<ScnPose<f64>>>".into()),
+                ("at".into(), "vect3<f64>".into()),
+                ("off".into(), "Param<arael::vect::vect2<f64>>".into()),
+                ("hb".into(), "CrossBlock<ScnPose<f64>, ScnPose<f64>, f64>".into()),
+            ],
+            ..Default::default()
+        });
+        store("ScnWorld", SymLayout {
+            fields: vec![
+                ("poses".into(), SymFieldType::Struct("ScnPose".into())),
+                ("ties".into(), SymFieldType::Struct("ScnTie".into())),
+            ],
+            collection_fields: vec!["poses".into(), "ties".into()],
+            is_root: true,
+            spelled_types: vec![
+                ("poses".into(), "refs::Vec<ScnPose<f64>>".into()),
+                ("ties".into(), "std::vec::Vec<ScnTie>".into()),
+            ],
+            ..Default::default()
+        });
+
+        assert_eq!(canonical("Ref<ScnPose<f64>>"), "Ref<ScnPose>");
+        assert_eq!(canonical("CrossBlock<ScnPose<f32>, ScnPose<f32>, f32>"), "CrossBlock<ScnPose, ScnPose, f32>");
+        assert_eq!(canonical("Param<vect3<f32>>"), "Param<vect3f>");
+        assert_eq!(canonical("quatern<f64>"), "quaternd");
+        // a wrapper keeps its float, and so does a name that only ends
+        // like a math type or is no entity
+        assert_eq!(canonical("Param<f64>"), "Param<f64>");
+        assert_eq!(canonical("myvect3<f64>"), "myvect3<f64>");
+        assert_eq!(canonical("Unknown<f64>"), "Unknown<f64>");
+
+        let json = build_json("ScnWorld", "f64", false, false,
+            &["ScnPose".to_string(), "ScnTie".to_string(), "ScnWorld".to_string()]);
+        assert!(json.contains(
+            "{\"name\": \"a\", \"kind\": \"ref\", \"of\": \"ScnPose\", \"target\": \"root.poses\"}"), "{json}");
+        assert!(json.contains(
+            "{\"name\": \"b\", \"kind\": \"ref\", \"of\": \"ScnPose\", \"target\": \"root.poses\"}"), "{json}");
+        assert!(json.contains("{\"name\": \"at\", \"kind\": \"data\", \"of\": \"vect3d\"}"), "{json}");
+        assert!(json.contains(
+            "{\"name\": \"off\", \"kind\": \"param\", \"of\": \"arael::vect::vect2d\", \"params\": 2}"), "{json}");
+        assert!(json.contains(
+            "{\"name\": \"hb\", \"kind\": \"cross_block\", \"a\": \"ScnPose\", \"b\": \"ScnPose\", \"scalar\": \"f64\"}"),
+            "{json}");
+        assert!(json.contains(
+            "{\"name\": \"poses\", \"kind\": \"collection\", \"container\": \"vec\", \
+             \"of\": \"ScnPose\", \"spelled\": \"refs::Vec<ScnPose<f64>>\"}"), "{json}");
+        assert_eq!(json.matches("ScnPose<f64>").count(), 1, "only the collection's source spelling keeps the argument: {json}");
     }
 
     #[test]

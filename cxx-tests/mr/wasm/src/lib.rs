@@ -411,6 +411,11 @@ impl DecayDecay {
     pub fn cells(&self) -> DecayDecayCells {
         DecayDecayCells { root: self.root.clone(), at: mk_at(move |o| { Some(o) }), see: mk_see(move |o| { Some(o) }) }
     }
+    /// The `ties` collection.
+    #[wasm_bindgen(js_name = "ties")]
+    pub fn ties(&self) -> DecayDecayTies {
+        DecayDecayTies { root: self.root.clone(), at: mk_at(move |o| { Some(o) }), see: mk_see(move |o| { Some(o) }) }
+    }
 }
 
 /// The `Decay.cells` collection, `refs::Vec<Cell<f32>>`.
@@ -602,6 +607,153 @@ impl DecayDecayCells {
     }
 }
 
+/// The `Decay.ties` collection, `std::vec::Vec<Tie>`.
+#[wasm_bindgen]
+pub struct DecayDecayTies {
+    root: Rc<RefCell<m::Decay>>,
+    at: At<m::Decay>,
+    see: See<m::Decay>,
+}
+
+#[wasm_bindgen]
+impl DecayDecayTies {
+    fn with<R>(&self, f: impl FnOnce(&mut m::Decay) -> R) -> Result<R, JsValue> {
+        let mut g = self.root.borrow_mut();
+        let o = (self.at)(&mut *g).ok_or_else(stale)?;
+        Ok(f(o))
+    }
+    #[wasm_bindgen(getter)]
+    pub fn length(&self) -> Result<u32, JsValue> {
+        self.with(|o| o.ties.len() as u32)
+    }
+    pub fn reserve(&self, additional: u32) -> Result<(), JsValue> {
+        self.with(|o| o.ties.reserve(additional as usize))
+    }
+    pub fn clear(&self) -> Result<(), JsValue> {
+        self.with(|o| o.ties.clear())
+    }
+    /// Append a default `Tie` and hand it back.
+    pub fn push(&self) -> Result<DecayTie, JsValue> {
+        let i = self.with(|o| { o.ties.push(Default::default()); o.ties.len() - 1 })?;
+        Ok(DecayTie { root: self.root.clone(), at: { let p = self.at.clone(); mk_at(move |g| p(g).and_then(|o| o.ties.get_mut(i))) }, see: { let p = self.see.clone(); mk_see(move |g| p(g).and_then(|o| o.ties.get(i))) } })
+    }
+    /// Append `n` default elements; returns the index of the first.
+    #[wasm_bindgen(js_name = "pushN")]
+    pub fn push_n(&self, n: u32) -> Result<u32, JsValue> {
+        self.with(|o| {
+            let first = o.ties.len();
+            o.ties.reserve(n as usize);
+            for _ in 0..n { o.ties.push(Default::default()); }
+            first as u32
+        })
+    }
+    /// The element at index `i`; throws past the end.
+    pub fn at(&self, i: u32) -> Result<DecayTie, JsValue> {
+        let i = i as usize;
+        if !self.with(|o| i < o.ties.len())? { return Err(js_err("index past the end")); }
+        Ok(DecayTie { root: self.root.clone(), at: { let p = self.at.clone(); mk_at(move |g| p(g).and_then(|o| o.ties.get_mut(i))) }, see: { let p = self.see.clone(); mk_see(move |g| p(g).and_then(|o| o.ties.get(i))) } })
+    }
+    /// Drops the last element; false when already empty.
+    pub fn pop(&self) -> Result<bool, JsValue> {
+        self.with(|o| o.ties.pop().is_some())
+    }
+    pub fn truncate(&self, len: u32) -> Result<(), JsValue> {
+        self.with(|o| o.ties.truncate(len as usize))
+    }
+    /// `a` of the elements from `start`, `n` of them, 1 value(s) each.
+    #[wasm_bindgen(js_name = "getAN")]
+    pub fn get_a_n(&self, start: u32, n: u32) -> Result<js_sys::Uint32Array, JsValue> {
+        let v = self.with(|o| {
+            let (s, n) = (start as usize, n as usize);
+            if s + n > o.ties.len() { return Err(js_err("range past the end")); }
+            let mut out: Vec<u32> = Vec::with_capacity(n * 1);
+            for i in s..s + n { let e = &o.ties[i]; out.push(e.a.to_raw()); }
+            Ok(out)
+        })??;
+        Ok(js_sys::Uint32Array::from(&v[..]))
+    }
+    /// Set `a` of the elements from `start`, 1 value(s) each.
+    #[wasm_bindgen(js_name = "setAN")]
+    pub fn set_a_n(&self, start: u32, values: &[u32]) -> Result<(), JsValue> {
+        self.with(|o| {
+            let s = start as usize;
+            let n = values.len() / 1;
+            if s + n > o.ties.len() { return Err(js_err("range past the end")); }
+            for (k, c) in values.chunks_exact(1).enumerate() { let e = &mut o.ties[s + k]; e.a = arael::refs::Ref::from_raw(c[0]); }
+            Ok(())
+        })?
+    }
+    /// `b` of the elements from `start`, `n` of them, 1 value(s) each.
+    #[wasm_bindgen(js_name = "getBN")]
+    pub fn get_b_n(&self, start: u32, n: u32) -> Result<js_sys::Uint32Array, JsValue> {
+        let v = self.with(|o| {
+            let (s, n) = (start as usize, n as usize);
+            if s + n > o.ties.len() { return Err(js_err("range past the end")); }
+            let mut out: Vec<u32> = Vec::with_capacity(n * 1);
+            for i in s..s + n { let e = &o.ties[i]; out.push(e.b.to_raw()); }
+            Ok(out)
+        })??;
+        Ok(js_sys::Uint32Array::from(&v[..]))
+    }
+    /// Set `b` of the elements from `start`, 1 value(s) each.
+    #[wasm_bindgen(js_name = "setBN")]
+    pub fn set_b_n(&self, start: u32, values: &[u32]) -> Result<(), JsValue> {
+        self.with(|o| {
+            let s = start as usize;
+            let n = values.len() / 1;
+            if s + n > o.ties.len() { return Err(js_err("range past the end")); }
+            for (k, c) in values.chunks_exact(1).enumerate() { let e = &mut o.ties[s + k]; e.b = arael::refs::Ref::from_raw(c[0]); }
+            Ok(())
+        })?
+    }
+    /// `d` of the elements from `start`, `n` of them, 1 value(s) each.
+    #[wasm_bindgen(js_name = "getDN")]
+    pub fn get_d_n(&self, start: u32, n: u32) -> Result<js_sys::Float64Array, JsValue> {
+        let v = self.with(|o| {
+            let (s, n) = (start as usize, n as usize);
+            if s + n > o.ties.len() { return Err(js_err("range past the end")); }
+            let mut out: Vec<f64> = Vec::with_capacity(n * 1);
+            for i in s..s + n { let e = &o.ties[i]; out.push(e.d as f64); }
+            Ok(out)
+        })??;
+        Ok(js_sys::Float64Array::from(&v[..]))
+    }
+    /// Set `d` of the elements from `start`, 1 value(s) each.
+    #[wasm_bindgen(js_name = "setDN")]
+    pub fn set_d_n(&self, start: u32, values: &[f64]) -> Result<(), JsValue> {
+        self.with(|o| {
+            let s = start as usize;
+            let n = values.len() / 1;
+            if s + n > o.ties.len() { return Err(js_err("range past the end")); }
+            for (k, c) in values.chunks_exact(1).enumerate() { let e = &mut o.ties[s + k]; e.d = c[0] as f32; }
+            Ok(())
+        })?
+    }
+    /// `at` of the elements from `start`, `n` of them, 2 value(s) each.
+    #[wasm_bindgen(js_name = "getAtN")]
+    pub fn get_at_n(&self, start: u32, n: u32) -> Result<js_sys::Float64Array, JsValue> {
+        let v = self.with(|o| {
+            let (s, n) = (start as usize, n as usize);
+            if s + n > o.ties.len() { return Err(js_err("range past the end")); }
+            let mut out: Vec<f64> = Vec::with_capacity(n * 2);
+            for i in s..s + n { let e = &o.ties[i]; e.at.flat(&mut out); }
+            Ok(out)
+        })??;
+        Ok(js_sys::Float64Array::from(&v[..]))
+    }
+    /// Set `at` of the elements from `start`, 2 value(s) each.
+    #[wasm_bindgen(js_name = "setAtN")]
+    pub fn set_at_n(&self, start: u32, values: &[f64]) -> Result<(), JsValue> {
+        self.with(|o| {
+            let s = start as usize;
+            let n = values.len() / 2;
+            if s + n > o.ties.len() { return Err(js_err("range past the end")); }
+            for (k, c) in values.chunks_exact(2).enumerate() { let e = &mut o.ties[s + k]; e.at = Flat::unflat(c); }
+            Ok(())
+        })?
+    }
+}
+
 /// A `Cell` in its owner's storage, addressed by key rather than by
 /// pointer: the element is re-resolved on every access, so growing the
 /// collection cannot leave this handle dangling.
@@ -654,6 +806,61 @@ impl DecayCell {
     pub fn set_w(&self, v: f64) -> Result<(), JsValue> {
         let v = v as f32;
         self.with(|e| { e.w = v; })
+    }
+}
+
+/// A `Tie` in its owner's storage, addressed by key rather than by
+/// pointer: the element is re-resolved on every access, so growing the
+/// collection cannot leave this handle dangling.
+#[wasm_bindgen]
+pub struct DecayTie {
+    root: Rc<RefCell<m::Decay>>,
+    at: At<m::Tie>,
+    see: See<m::Tie>,
+}
+
+#[wasm_bindgen]
+impl DecayTie {
+    fn with<R>(&self, f: impl FnOnce(&mut m::Tie) -> R) -> Result<R, JsValue> {
+        let mut g = self.root.borrow_mut();
+        let e = (self.at)(&mut *g).ok_or_else(stale)?;
+        Ok(f(e))
+    }
+    /// The ref as a number; 4294967295 is none.
+    #[wasm_bindgen(getter, js_name = "a")]
+    pub fn a(&self) -> Result<u32, JsValue> {
+        self.with(|e| e.a.to_raw())
+    }
+    #[wasm_bindgen(setter, js_name = "a")]
+    pub fn set_a(&self, v: u32) -> Result<(), JsValue> {
+        self.with(|e| { e.a = arael::refs::Ref::from_raw(v); })
+    }
+    /// The ref as a number; 4294967295 is none.
+    #[wasm_bindgen(getter, js_name = "b")]
+    pub fn b(&self) -> Result<u32, JsValue> {
+        self.with(|e| e.b.to_raw())
+    }
+    #[wasm_bindgen(setter, js_name = "b")]
+    pub fn set_b(&self, v: u32) -> Result<(), JsValue> {
+        self.with(|e| { e.b = arael::refs::Ref::from_raw(v); })
+    }
+    #[wasm_bindgen(getter, js_name = "d")]
+    pub fn d(&self) -> Result<f64, JsValue> {
+        self.with(|e| e.d as f64)
+    }
+    #[wasm_bindgen(setter, js_name = "d")]
+    pub fn set_d(&self, v: f64) -> Result<(), JsValue> {
+        let v = v as f32;
+        self.with(|e| { e.d = v; })
+    }
+    #[wasm_bindgen(getter, js_name = "at")]
+    pub fn at(&self) -> Result<JsValue, JsValue> {
+        self.with(|e| vect2_to_js(e.at))
+    }
+    #[wasm_bindgen(setter, js_name = "at")]
+    pub fn set_at(&self, v: JsValue) -> Result<(), JsValue> {
+        let v = vect2_from_js(&v)?;
+        self.with(|e| { e.at = v; })
     }
 }
 

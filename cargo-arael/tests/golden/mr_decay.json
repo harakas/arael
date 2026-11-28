@@ -3,6 +3,7 @@
   "root": "Decay",
   "precision": "f32",
   "jacobian": false,
+  "serde": false,
   "types": {
     "Cell": {
       "role": "entity",
@@ -20,11 +21,24 @@
       "role": "root",
       "param_count": 0,
       "fields": [
-        {"name": "cells", "kind": "collection", "container": "vec", "of": "Cell", "spelled": "refs::Vec<Cell<f32>>"}
+        {"name": "cells", "kind": "collection", "container": "vec", "of": "Cell", "spelled": "refs::Vec<Cell<f32>>"},
+        {"name": "ties", "kind": "collection", "container": "vec", "of": "Tie", "spelled": "std::vec::Vec<Tie>"}
+      ]
+    },
+    "Tie": {
+      "role": "entity",
+      "param_count": 0,
+      "fields": [
+        {"name": "a", "kind": "ref", "of": "Cell", "target": "root.cells"},
+        {"name": "b", "kind": "ref", "of": "Cell", "target": "root.cells"},
+        {"name": "d", "kind": "data", "of": "f32"},
+        {"name": "at", "kind": "data", "of": "vect2f"},
+        {"name": "hb", "kind": "cross_block", "a": "Cell", "b": "Cell", "scalar": "f32"}
       ]
     }
   },
   "constraints": [
-    {"on": "Cell", "label": "Cell", "file": "mr/src/lib.rs", "line": 36}
+    {"on": "Cell", "label": "Cell", "file": "mr/src/lib.rs", "line": 39},
+    {"on": "Tie", "label": "Tie", "file": "mr/src/lib.rs", "line": 54}
   ]
 }

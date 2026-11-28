@@ -85,5 +85,10 @@ an interface.
   `CrossBlock<Point, Pose, f32>`, and entity names carry no argument.
   The type entry carries `"generic": true`, so a generator that names
   the Rust type instantiates it (`Pose<f32>`).
+- A struct that is not generic and names a generic entity or a math
+  type at a float reads the same way: `Ref<Pose<f64>>` gives `"of":
+  "Pose"`, `CrossBlock<Pose<f64>, Pose<f64>, f64>` gives `"a": "Pose",
+  "b": "Pose"`, and `vect3<f64>` reads `vect3d`. Its collections'
+  `spelled` stays the source spelling (`refs::Vec<Pose<f64>>`).
 - Emission never alters generated code -- with the variable unset the
   build is byte-identical.

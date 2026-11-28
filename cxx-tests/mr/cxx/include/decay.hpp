@@ -110,10 +110,18 @@ struct CellRef {
     uint32_t raw = UINT32_MAX;
     bool valid() const { return raw != UINT32_MAX; }
 };
+/// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Tie>`. Default-constructed it is the
+/// null sentinel (same as Rust `Ref::default()`).
+struct TieRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
 
 namespace ffi {
 struct Decay;
 struct Cell;
+struct Tie;
 
 extern "C" {
 float decay_cell_v(const Cell*);
@@ -124,6 +132,14 @@ float decay_cell_t(const Cell*);
 void decay_cell_set_t(Cell*, float);
 float decay_cell_w(const Cell*);
 void decay_cell_set_w(Cell*, float);
+uint32_t decay_tie_a(const Tie*);
+void decay_tie_set_a(Tie*, uint32_t);
+uint32_t decay_tie_b(const Tie*);
+void decay_tie_set_b(Tie*, uint32_t);
+float decay_tie_d(const Tie*);
+void decay_tie_set_d(Tie*, float);
+vect2f decay_tie_at(const Tie*);
+void decay_tie_set_at(Tie*, vect2f);
 struct DecayCov;
 int32_t decay_assemble_covariance(Decay*, uint32_t, DecayCov**);
 int32_t decay_assemble_covariance_with(Decay*, uint32_t, uint32_t, uint32_t, DecayCov**);
@@ -157,6 +173,22 @@ bool decay_cells_get_t_n(const Decay*, uint32_t, float*, uint32_t, int64_t);
 bool decay_cells_set_w_n(Decay*, uint32_t, const float*, uint32_t, int64_t);
 bool decay_cells_get_w_n(const Decay*, uint32_t, float*, uint32_t, int64_t);
 bool decay_cells_get_refs_n(const Decay*, uint32_t, uint32_t*, uint32_t);
+uint32_t decay_ties_len(const Decay*);
+void decay_ties_reserve(Decay*, uint32_t);
+Tie* decay_ties_push(Decay*);
+Tie* decay_ties_at(Decay*, uint32_t);
+bool decay_ties_pop(Decay*);
+void decay_ties_clear(Decay*);
+void decay_ties_truncate(Decay*, uint32_t);
+uint32_t decay_ties_push_n(Decay*, const uint64_t*, uint32_t);
+bool decay_ties_set_a_n(Decay*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool decay_ties_get_a_n(const Decay*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool decay_ties_set_b_n(Decay*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool decay_ties_get_b_n(const Decay*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool decay_ties_set_d_n(Decay*, uint32_t, const float*, uint32_t, int64_t);
+bool decay_ties_get_d_n(const Decay*, uint32_t, float*, uint32_t, int64_t);
+bool decay_ties_set_at_n(Decay*, uint32_t, const float*, uint32_t, int64_t);
+bool decay_ties_get_at_n(const Decay*, uint32_t, float*, uint32_t, int64_t);
 double decay_cost(Decay*);
 int32_t decay_solve_band(Decay*, uint32_t, const LmConfig*, LmResultT<float>*);
 void decay_lm_config(uint32_t, LmConfig*);
@@ -373,6 +405,30 @@ private:
     ffi::Cell* h_;
 };
 
+/// A `Tie` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Tie {
+public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 0;
+    Tie() : h_(nullptr) {}
+    explicit Tie(ffi::Tie* p) : h_(p) {}
+    /// False when default-constructed (e.g. inside an empty option).
+    bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer -- the relaxed escape hatch.
+    ffi::Tie* raw() const { return h_; }
+    CellRef a() const { return CellRef{ffi::decay_tie_a(h_)}; }
+    void set_a(CellRef r) { ffi::decay_tie_set_a(h_, r.raw); }
+    CellRef b() const { return CellRef{ffi::decay_tie_b(h_)}; }
+    void set_b(CellRef r) { ffi::decay_tie_set_b(h_, r.raw); }
+    float d() const { return ffi::decay_tie_d(h_); }
+    void set_d(float v) { ffi::decay_tie_set_d(h_, v); }
+    vect2f at() const { return ffi::decay_tie_at(h_); }
+    void set_at(vect2f v) { ffi::decay_tie_set_at(h_, v); }
+private:
+    ffi::Tie* h_;
+};
+
 /// An assembled covariance (root.assemble_covariance), OWNED: copies
 /// share it, the last copy releases it, and later assemblies are
 /// independent. Entity arguments must come from the live model.
@@ -586,6 +642,139 @@ private:
     ffi::Decay* h_;
 };
 
+/// `Decay.ties`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push.
+class DecayTiesVec {
+public:
+    explicit DecayTiesVec(ffi::Decay* h) : h_(h) {}
+    uint32_t size() const { return ffi::decay_ties_len(h_); }
+    bool empty() const { return size() == 0; }
+    void reserve(uint32_t additional) { ffi::decay_ties_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
+    Tie push() { return Tie(ffi::decay_ties_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
+    Tie operator[](uint32_t i) { return Tie(ffi::decay_ties_at(h_, i)); }
+    /// Front/back of a non-empty vec (empty = UB, like STL).
+    Tie front() { return (*this)[0]; }
+    Tie back() { return (*this)[size() - 1]; }
+    /// Drops the last element; false when already empty.
+    bool pop() { return ffi::decay_ties_pop(h_); }
+    void clear() { ffi::decay_ties_clear(h_); }
+    void truncate(uint32_t n) { ffi::decay_ties_truncate(h_, n); }
+    /// Bidirectional iterator. Standard C++ contract: modifying the
+    /// container while iterating is undefined behavior. Dereference
+    /// yields a value wrapper (Tie), like vector<bool> --
+    /// reference is a value type.
+    class iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Tie;
+        using difference_type = std::ptrdiff_t;
+        using reference = Tie;
+        struct arrow { Tie v; Tie* operator->() { return &v; } };
+        using pointer = arrow;
+
+        iterator() : h_(nullptr), i_(0) {}
+        iterator(ffi::Decay* h, uint32_t i) : h_(h), i_(i) {}
+        Tie operator*() const { return Tie(ffi::decay_ties_at(h_, i_)); }
+        arrow operator->() const { return arrow{**this}; }
+        iterator& operator++() { ++i_; return *this; }
+        iterator& operator--() { --i_; return *this; }
+        iterator operator++(int) { iterator t = *this; ++*this; return t; }
+        iterator operator--(int) { iterator t = *this; --*this; return t; }
+        bool operator==(const iterator& o) const { return i_ == o.i_; }
+        bool operator!=(const iterator& o) const { return i_ != o.i_; }
+    private:
+        ffi::Decay* h_;
+        uint32_t i_;
+    };
+    iterator begin() { return iterator(h_, 0); }
+    iterator end() { return iterator(h_, size()); }
+    class reverse_iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Tie;
+        using difference_type = std::ptrdiff_t;
+        using reference = Tie;
+        using pointer = iterator::arrow;
+
+        reverse_iterator() {}
+        explicit reverse_iterator(iterator base) : base_(base) {}
+        iterator base() const { return base_; }
+        Tie operator*() const { iterator t = base_; --t; return *t; }
+        pointer operator->() const { return pointer{**this}; }
+        reverse_iterator& operator++() { --base_; return *this; }
+        reverse_iterator& operator--() { ++base_; return *this; }
+        reverse_iterator operator++(int) { reverse_iterator t = *this; ++*this; return t; }
+        reverse_iterator operator--(int) { reverse_iterator t = *this; --*this; return t; }
+        bool operator==(const reverse_iterator& o) const { return base_ == o.base_; }
+        bool operator!=(const reverse_iterator& o) const { return base_ != o.base_; }
+    private:
+        iterator base_;
+    };
+    reverse_iterator rbegin() { return reverse_iterator(end()); }
+    reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::decay_ties_push_n(h_, nullptr, n);
+        return first;
+    }
+    /// Sets `a` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_a(uint32_t start, const CellRef* values, uint32_t n, int64_t stride = sizeof(CellRef)) {
+        return ffi::decay_ties_set_a_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `a` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_a(uint32_t start, CellRef* out, uint32_t n, int64_t stride = sizeof(CellRef)) const {
+        return ffi::decay_ties_get_a_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `b` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_b(uint32_t start, const CellRef* values, uint32_t n, int64_t stride = sizeof(CellRef)) {
+        return ffi::decay_ties_set_b_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `b` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_b(uint32_t start, CellRef* out, uint32_t n, int64_t stride = sizeof(CellRef)) const {
+        return ffi::decay_ties_get_b_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `d` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_d(uint32_t start, const float* values, uint32_t n, int64_t stride = sizeof(float)) {
+        return ffi::decay_ties_set_d_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `d` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_d(uint32_t start, float* out, uint32_t n, int64_t stride = sizeof(float)) const {
+        return ffi::decay_ties_get_d_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+    /// Sets `at` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_at(uint32_t start, const vect2f* values, uint32_t n, int64_t stride = sizeof(vect2f)) {
+        return ffi::decay_ties_set_at_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `at` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_at(uint32_t start, vect2f* out, uint32_t n, int64_t stride = sizeof(vect2f)) const {
+        return ffi::decay_ties_get_at_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+private:
+    ffi::Decay* h_;
+};
+
 /// The `Decay` model. Owns the Rust-side object; move-only.
 class Decay {
 public:
@@ -604,6 +793,7 @@ public:
     }
 
     DecayCellsVec cells() { return DecayCellsVec(h_); }
+    DecayTiesVec ties() { return DecayTiesVec(h_); }
 
     /// Ok(LmResult) for every healthy termination, Err(SolveError) for
     /// a solve failure (-1); a caught Rust panic throws PanicError.

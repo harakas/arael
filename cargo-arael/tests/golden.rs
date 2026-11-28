@@ -66,10 +66,35 @@ fn generic_entities_are_instantiated_at_the_root_precision() {
     let shim = emit_ffi::emit(&m, "cxx_mr").unwrap();
     assert!(shim.contains("type Cell = cxx_mr::Cell<f32>;"), "{shim}");
     assert!(!shim.contains("use cxx_mr::{Cell"), "{shim}");
-    assert!(shim.contains("use cxx_mr::{Decay};"), "{shim}");
+    assert!(shim.contains("use cxx_mr::{Decay, Tie};"), "{shim}");
 
     let hpp = emit_hpp::emit(&m, "cxx_mr").unwrap();
     assert!(hpp.contains("float v() const"), "{hpp}");
+}
+
+#[test]
+fn a_non_generic_entity_names_a_generic_one_by_its_handle() {
+    // The cxx-mr fixture's `Tie` is not generic and names `Cell<f32>`: in
+    // two refs, in a cross block and beside a `vect2<f32>`. The sidecar
+    // carries the entity without its argument and the math type by its
+    // suffixed name, so every interface names the handle `CellRef`.
+    let m = Model::parse(include_str!("golden/mr_decay.json")).unwrap();
+    let tie = &m.types["Tie"];
+    assert!(!tie.generic);
+    let field = |n: &str| tie.fields.iter().find(|f| f.name == n).unwrap();
+    assert_eq!(field("a").of.as_deref(), Some("Cell"));
+    assert_eq!(field("at").of.as_deref(), Some("vect2f"));
+    assert_eq!((field("hb").a.as_deref(), field("hb").b.as_deref()), (Some("Cell"), Some("Cell")));
+
+    let hpp = emit_hpp::emit(&m, "cxx_mr").unwrap();
+    assert!(hpp.contains("CellRef a() const"), "{hpp}");
+    assert!(hpp.contains("void set_b(CellRef r)"), "{hpp}");
+    assert!(hpp.contains("vect2f at() const"), "{hpp}");
+    assert!(!hpp.contains("Cell<f32>"), "{hpp}");
+
+    let (_, py) = emit_py::emit(&m, "cxx_mr_capi").unwrap();
+    assert!(py.contains("return CellRef(_f.decay_tie_a(self._p))"), "{py}");
+    assert!(!py.contains("Cell<f32>"), "{py}");
 }
 
 #[test]
