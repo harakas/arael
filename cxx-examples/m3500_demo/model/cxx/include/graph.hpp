@@ -202,6 +202,16 @@ uint32_t graph_poses_last_ref(const Graph*);
 Pose2* graph_poses_get(Graph*, uint32_t);
 bool graph_poses_contains(const Graph*, uint32_t);
 Pose2* graph_poses_try_get(Graph*, uint32_t);
+uint32_t graph_poses_push_n(Graph*, const uint64_t*, uint32_t);
+bool graph_poses_set_pos_n(Graph*, uint32_t, const double*, uint32_t, int64_t);
+bool graph_poses_get_pos_n(const Graph*, uint32_t, double*, uint32_t, int64_t);
+bool graph_poses_set_pos_optimize_n(Graph*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool graph_poses_get_pos_optimize_n(const Graph*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool graph_poses_set_rot_angle_n(Graph*, uint32_t, const double*, uint32_t, int64_t);
+bool graph_poses_get_rot_angle_n(const Graph*, uint32_t, double*, uint32_t, int64_t);
+bool graph_poses_set_rot_angle_optimize_n(Graph*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool graph_poses_get_rot_angle_optimize_n(const Graph*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool graph_poses_get_refs_n(const Graph*, uint32_t, uint32_t*, uint32_t);
 uint32_t graph_edges_len(const Graph*);
 void graph_edges_reserve(Graph*, uint32_t);
 Edge* graph_edges_push(Graph*);
@@ -209,6 +219,21 @@ Edge* graph_edges_at(Graph*, uint32_t);
 bool graph_edges_pop(Graph*);
 void graph_edges_clear(Graph*);
 void graph_edges_truncate(Graph*, uint32_t);
+uint32_t graph_edges_push_n(Graph*, const uint64_t*, uint32_t);
+bool graph_edges_set_a_n(Graph*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool graph_edges_get_a_n(const Graph*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool graph_edges_set_b_n(Graph*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool graph_edges_get_b_n(const Graph*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool graph_edges_set_delta_n(Graph*, uint32_t, const double*, uint32_t, int64_t);
+bool graph_edges_get_delta_n(const Graph*, uint32_t, double*, uint32_t, int64_t);
+bool graph_edges_set_dth_n(Graph*, uint32_t, const double*, uint32_t, int64_t);
+bool graph_edges_get_dth_n(const Graph*, uint32_t, double*, uint32_t, int64_t);
+bool graph_edges_set_s0_n(Graph*, uint32_t, const double*, uint32_t, int64_t);
+bool graph_edges_get_s0_n(const Graph*, uint32_t, double*, uint32_t, int64_t);
+bool graph_edges_set_s1_n(Graph*, uint32_t, const double*, uint32_t, int64_t);
+bool graph_edges_get_s1_n(const Graph*, uint32_t, double*, uint32_t, int64_t);
+bool graph_edges_set_s2_n(Graph*, uint32_t, const double*, uint32_t, int64_t);
+bool graph_edges_get_s2_n(const Graph*, uint32_t, double*, uint32_t, int64_t);
 bool graph_has_prior(const Graph*);
 Prior* graph_make_prior(Graph*);
 void graph_clear_prior(Graph*);
@@ -220,6 +245,17 @@ Lock* graph_locks_at(Graph*, uint32_t);
 bool graph_locks_pop(Graph*);
 void graph_locks_clear(Graph*);
 void graph_locks_truncate(Graph*, uint32_t);
+uint32_t graph_locks_push_n(Graph*, const uint64_t*, uint32_t);
+bool graph_locks_set_p_n(Graph*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool graph_locks_get_p_n(const Graph*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool graph_locks_set_pos_n(Graph*, uint32_t, const double*, uint32_t, int64_t);
+bool graph_locks_get_pos_n(const Graph*, uint32_t, double*, uint32_t, int64_t);
+bool graph_locks_set_th_n(Graph*, uint32_t, const double*, uint32_t, int64_t);
+bool graph_locks_get_th_n(const Graph*, uint32_t, double*, uint32_t, int64_t);
+bool graph_locks_set_w_n(Graph*, uint32_t, const double*, uint32_t, int64_t);
+bool graph_locks_get_w_n(const Graph*, uint32_t, double*, uint32_t, int64_t);
+bool graph_locks_set_on_n(Graph*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool graph_locks_get_on_n(const Graph*, uint32_t, uint8_t*, uint32_t, int64_t);
 double graph_cost(Graph*);
 int32_t graph_solve_band(Graph*, uint32_t, const LmConfig*, LmResultT<double>*);
 void graph_lm_config(uint32_t, LmConfig*);
@@ -669,6 +705,63 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::graph_poses_push_n(h_, nullptr, n);
+        return first;
+    }
+    static_assert(sizeof(bool) == 1, "a bool column crosses as one byte per value");
+    /// Sets `pos` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pos(uint32_t start, const vect2d* values, uint32_t n, int64_t stride = sizeof(vect2d)) {
+        return ffi::graph_poses_set_pos_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `pos` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pos(uint32_t start, vect2d* out, uint32_t n, int64_t stride = sizeof(vect2d)) const {
+        return ffi::graph_poses_get_pos_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `pos_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pos_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::graph_poses_set_pos_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `pos_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pos_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::graph_poses_get_pos_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `rot_angle` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_rot_angle(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::graph_poses_set_rot_angle_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `rot_angle` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_rot_angle(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::graph_poses_get_rot_angle_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `rot_angle_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_rot_angle_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::graph_poses_set_rot_angle_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `rot_angle_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_rot_angle_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::graph_poses_get_rot_angle_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// The refs of elements `start..start + n` into `out`, in index order;
+    /// false when the range exceeds the collection.
+    bool get_refs(uint32_t start, Pose2Ref* out, uint32_t n) const {
+        return ffi::graph_poses_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);
+    }
 private:
     ffi::Graph* h_;
 };
@@ -751,6 +844,90 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::graph_edges_push_n(h_, nullptr, n);
+        return first;
+    }
+    /// Sets `a` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_a(uint32_t start, const Pose2Ref* values, uint32_t n, int64_t stride = sizeof(Pose2Ref)) {
+        return ffi::graph_edges_set_a_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `a` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_a(uint32_t start, Pose2Ref* out, uint32_t n, int64_t stride = sizeof(Pose2Ref)) const {
+        return ffi::graph_edges_get_a_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `b` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_b(uint32_t start, const Pose2Ref* values, uint32_t n, int64_t stride = sizeof(Pose2Ref)) {
+        return ffi::graph_edges_set_b_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `b` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_b(uint32_t start, Pose2Ref* out, uint32_t n, int64_t stride = sizeof(Pose2Ref)) const {
+        return ffi::graph_edges_get_b_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `delta` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_delta(uint32_t start, const vect2d* values, uint32_t n, int64_t stride = sizeof(vect2d)) {
+        return ffi::graph_edges_set_delta_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `delta` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_delta(uint32_t start, vect2d* out, uint32_t n, int64_t stride = sizeof(vect2d)) const {
+        return ffi::graph_edges_get_delta_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `dth` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_dth(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::graph_edges_set_dth_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `dth` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_dth(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::graph_edges_get_dth_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `s0` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_s0(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::graph_edges_set_s0_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `s0` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_s0(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::graph_edges_get_s0_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `s1` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_s1(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::graph_edges_set_s1_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `s1` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_s1(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::graph_edges_get_s1_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `s2` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_s2(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::graph_edges_set_s2_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `s2` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_s2(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::graph_edges_get_s2_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
 private:
     ffi::Graph* h_;
 };
@@ -833,6 +1010,69 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::graph_locks_push_n(h_, nullptr, n);
+        return first;
+    }
+    static_assert(sizeof(bool) == 1, "a bool column crosses as one byte per value");
+    /// Sets `p` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_p(uint32_t start, const Pose2Ref* values, uint32_t n, int64_t stride = sizeof(Pose2Ref)) {
+        return ffi::graph_locks_set_p_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `p` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_p(uint32_t start, Pose2Ref* out, uint32_t n, int64_t stride = sizeof(Pose2Ref)) const {
+        return ffi::graph_locks_get_p_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `pos` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pos(uint32_t start, const vect2d* values, uint32_t n, int64_t stride = sizeof(vect2d)) {
+        return ffi::graph_locks_set_pos_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `pos` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pos(uint32_t start, vect2d* out, uint32_t n, int64_t stride = sizeof(vect2d)) const {
+        return ffi::graph_locks_get_pos_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `th` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_th(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::graph_locks_set_th_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `th` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_th(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::graph_locks_get_th_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `w` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_w(uint32_t start, const double* values, uint32_t n, int64_t stride = sizeof(double)) {
+        return ffi::graph_locks_set_w_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `w` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_w(uint32_t start, double* out, uint32_t n, int64_t stride = sizeof(double)) const {
+        return ffi::graph_locks_get_w_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `on` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_on(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::graph_locks_set_on_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `on` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_on(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::graph_locks_get_on_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
 private:
     ffi::Graph* h_;
 };

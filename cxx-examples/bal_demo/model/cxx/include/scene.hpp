@@ -183,6 +183,20 @@ uint32_t scene_cameras_last_ref(const Scene*);
 Camera* scene_cameras_get(Scene*, uint32_t);
 bool scene_cameras_contains(const Scene*, uint32_t);
 Camera* scene_cameras_try_get(Scene*, uint32_t);
+uint32_t scene_cameras_push_n(Scene*, const uint64_t*, uint32_t);
+bool scene_cameras_set_t_n(Scene*, uint32_t, const double*, uint32_t, int64_t);
+bool scene_cameras_get_t_n(const Scene*, uint32_t, double*, uint32_t, int64_t);
+bool scene_cameras_set_t_optimize_n(Scene*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool scene_cameras_get_t_optimize_n(const Scene*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool scene_cameras_set_ea_n(Scene*, uint32_t, const double*, uint32_t, int64_t);
+bool scene_cameras_get_ea_n(const Scene*, uint32_t, double*, uint32_t, int64_t);
+bool scene_cameras_set_ea_optimize_n(Scene*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool scene_cameras_get_ea_optimize_n(const Scene*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool scene_cameras_set_intr_n(Scene*, uint32_t, const double*, uint32_t, int64_t);
+bool scene_cameras_get_intr_n(const Scene*, uint32_t, double*, uint32_t, int64_t);
+bool scene_cameras_set_intr_optimize_n(Scene*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool scene_cameras_get_intr_optimize_n(const Scene*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool scene_cameras_get_refs_n(const Scene*, uint32_t, uint32_t*, uint32_t);
 uint32_t scene_points_len(const Scene*);
 void scene_points_reserve(Scene*, uint32_t);
 Point* scene_points_push(Scene*);
@@ -196,6 +210,12 @@ uint32_t scene_points_last_ref(const Scene*);
 Point* scene_points_get(Scene*, uint32_t);
 bool scene_points_contains(const Scene*, uint32_t);
 Point* scene_points_try_get(Scene*, uint32_t);
+uint32_t scene_points_push_n(Scene*, const uint64_t*, uint32_t);
+bool scene_points_set_pos_n(Scene*, uint32_t, const double*, uint32_t, int64_t);
+bool scene_points_get_pos_n(const Scene*, uint32_t, double*, uint32_t, int64_t);
+bool scene_points_set_pos_optimize_n(Scene*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool scene_points_get_pos_optimize_n(const Scene*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool scene_points_get_refs_n(const Scene*, uint32_t, uint32_t*, uint32_t);
 uint32_t scene_observations_len(const Scene*);
 void scene_observations_reserve(Scene*, uint32_t);
 Obs* scene_observations_push(Scene*);
@@ -203,6 +223,13 @@ Obs* scene_observations_at(Scene*, uint32_t);
 bool scene_observations_pop(Scene*);
 void scene_observations_clear(Scene*);
 void scene_observations_truncate(Scene*, uint32_t);
+uint32_t scene_observations_push_n(Scene*, const uint64_t*, uint32_t);
+bool scene_observations_set_cam_n(Scene*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool scene_observations_get_cam_n(const Scene*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool scene_observations_set_pt_n(Scene*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool scene_observations_get_pt_n(const Scene*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool scene_observations_set_xy_n(Scene*, uint32_t, const double*, uint32_t, int64_t);
+bool scene_observations_get_xy_n(const Scene*, uint32_t, double*, uint32_t, int64_t);
 double scene_cost(Scene*);
 int32_t scene_solve_band(Scene*, uint32_t, const LmConfig*, LmResultT<double>*);
 void scene_lm_config(uint32_t, LmConfig*);
@@ -647,6 +674,85 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::scene_cameras_push_n(h_, nullptr, n);
+        return first;
+    }
+    static_assert(sizeof(bool) == 1, "a bool column crosses as one byte per value");
+    /// Sets `t` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_t(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::scene_cameras_set_t_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `t` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_t(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::scene_cameras_get_t_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `t_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_t_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::scene_cameras_set_t_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `t_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_t_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::scene_cameras_get_t_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `ea` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_ea(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::scene_cameras_set_ea_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `ea` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_ea(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::scene_cameras_get_ea_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `ea_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_ea_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::scene_cameras_set_ea_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `ea_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_ea_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::scene_cameras_get_ea_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `intr` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_intr(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::scene_cameras_set_intr_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `intr` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_intr(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::scene_cameras_get_intr_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `intr_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_intr_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::scene_cameras_set_intr_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `intr_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_intr_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::scene_cameras_get_intr_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// The refs of elements `start..start + n` into `out`, in index order;
+    /// false when the range exceeds the collection.
+    bool get_refs(uint32_t start, CameraRef* out, uint32_t n) const {
+        return ffi::scene_cameras_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);
+    }
 private:
     ffi::Scene* h_;
 };
@@ -741,6 +847,41 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::scene_points_push_n(h_, nullptr, n);
+        return first;
+    }
+    static_assert(sizeof(bool) == 1, "a bool column crosses as one byte per value");
+    /// Sets `pos` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pos(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::scene_points_set_pos_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `pos` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pos(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::scene_points_get_pos_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `pos_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pos_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::scene_points_set_pos_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `pos_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pos_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::scene_points_get_pos_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// The refs of elements `start..start + n` into `out`, in index order;
+    /// false when the range exceeds the collection.
+    bool get_refs(uint32_t start, PointRef* out, uint32_t n) const {
+        return ffi::scene_points_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);
+    }
 private:
     ffi::Scene* h_;
 };
@@ -823,6 +964,46 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::scene_observations_push_n(h_, nullptr, n);
+        return first;
+    }
+    /// Sets `cam` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_cam(uint32_t start, const CameraRef* values, uint32_t n, int64_t stride = sizeof(CameraRef)) {
+        return ffi::scene_observations_set_cam_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `cam` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_cam(uint32_t start, CameraRef* out, uint32_t n, int64_t stride = sizeof(CameraRef)) const {
+        return ffi::scene_observations_get_cam_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `pt` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pt(uint32_t start, const PointRef* values, uint32_t n, int64_t stride = sizeof(PointRef)) {
+        return ffi::scene_observations_set_pt_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `pt` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pt(uint32_t start, PointRef* out, uint32_t n, int64_t stride = sizeof(PointRef)) const {
+        return ffi::scene_observations_get_pt_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `xy` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_xy(uint32_t start, const vect2d* values, uint32_t n, int64_t stride = sizeof(vect2d)) {
+        return ffi::scene_observations_set_xy_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `xy` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_xy(uint32_t start, vect2d* out, uint32_t n, int64_t stride = sizeof(vect2d)) const {
+        return ffi::scene_observations_get_xy_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
 private:
     ffi::Scene* h_;
 };

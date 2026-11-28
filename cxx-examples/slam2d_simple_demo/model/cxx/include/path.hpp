@@ -157,6 +157,13 @@ Frine* path_landmark_frines_at(Landmark*, uint32_t);
 bool path_landmark_frines_pop(Landmark*);
 void path_landmark_frines_clear(Landmark*);
 void path_landmark_frines_truncate(Landmark*, uint32_t);
+uint32_t path_landmark_frines_push_n(Landmark*, const uint64_t*, uint32_t);
+bool path_landmark_frines_set_pose_n(Landmark*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool path_landmark_frines_get_pose_n(const Landmark*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool path_landmark_frines_set_bearing_n(Landmark*, uint32_t, const float*, uint32_t, int64_t);
+bool path_landmark_frines_get_bearing_n(const Landmark*, uint32_t, float*, uint32_t, int64_t);
+bool path_landmark_frines_set_isigma_n(Landmark*, uint32_t, const float*, uint32_t, int64_t);
+bool path_landmark_frines_get_isigma_n(const Landmark*, uint32_t, float*, uint32_t, int64_t);
 vect2f path_pose_pos(const Pose*);
 void path_pose_set_pos(Pose*, vect2f);
 bool path_pose_pos_optimize(const Pose*);
@@ -208,6 +215,24 @@ uint32_t path_poses_back_ref(const Path*);
 Pose* path_poses_get(Path*, uint32_t);
 bool path_poses_contains(const Path*, uint32_t);
 Pose* path_poses_try_get(Path*, uint32_t);
+uint32_t path_poses_push_back_n(Path*, const uint64_t*, uint32_t);
+bool path_poses_set_pos_n(Path*, uint32_t, const float*, uint32_t, int64_t);
+bool path_poses_get_pos_n(const Path*, uint32_t, float*, uint32_t, int64_t);
+bool path_poses_set_pos_optimize_n(Path*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool path_poses_get_pos_optimize_n(const Path*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool path_poses_set_gamma_n(Path*, uint32_t, const float*, uint32_t, int64_t);
+bool path_poses_get_gamma_n(const Path*, uint32_t, float*, uint32_t, int64_t);
+bool path_poses_set_gamma_optimize_n(Path*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool path_poses_get_gamma_optimize_n(const Path*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool path_poses_set_delta_pos_n(Path*, uint32_t, const float*, uint32_t, int64_t);
+bool path_poses_get_delta_pos_n(const Path*, uint32_t, float*, uint32_t, int64_t);
+bool path_poses_set_delta_gamma_n(Path*, uint32_t, const float*, uint32_t, int64_t);
+bool path_poses_get_delta_gamma_n(const Path*, uint32_t, float*, uint32_t, int64_t);
+bool path_poses_set_delta_pos_isigma_n(Path*, uint32_t, const float*, uint32_t, int64_t);
+bool path_poses_get_delta_pos_isigma_n(const Path*, uint32_t, float*, uint32_t, int64_t);
+bool path_poses_set_delta_gamma_isigma_n(Path*, uint32_t, const float*, uint32_t, int64_t);
+bool path_poses_get_delta_gamma_isigma_n(const Path*, uint32_t, float*, uint32_t, int64_t);
+bool path_poses_get_refs_n(const Path*, uint32_t, uint32_t*, uint32_t);
 uint32_t path_pose_pairs_len(const Path*);
 void path_pose_pairs_reserve(Path*, uint32_t);
 PosePair* path_pose_pairs_push(Path*);
@@ -215,6 +240,11 @@ PosePair* path_pose_pairs_at(Path*, uint32_t);
 bool path_pose_pairs_pop(Path*);
 void path_pose_pairs_clear(Path*);
 void path_pose_pairs_truncate(Path*, uint32_t);
+uint32_t path_pose_pairs_push_n(Path*, const uint64_t*, uint32_t);
+bool path_pose_pairs_set_prev_n(Path*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool path_pose_pairs_get_prev_n(const Path*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool path_pose_pairs_set_cur_n(Path*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool path_pose_pairs_get_cur_n(const Path*, uint32_t, uint32_t*, uint32_t, int64_t);
 uint32_t path_landmarks_len(const Path*);
 void path_landmarks_reserve(Path*, uint32_t);
 uint32_t path_landmarks_push(Path*);
@@ -519,6 +549,46 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::path_landmark_frines_push_n(h_, nullptr, n);
+        return first;
+    }
+    /// Sets `pose` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pose(uint32_t start, const PoseRef* values, uint32_t n, int64_t stride = sizeof(PoseRef)) {
+        return ffi::path_landmark_frines_set_pose_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `pose` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pose(uint32_t start, PoseRef* out, uint32_t n, int64_t stride = sizeof(PoseRef)) const {
+        return ffi::path_landmark_frines_get_pose_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `bearing` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_bearing(uint32_t start, const float* values, uint32_t n, int64_t stride = sizeof(float)) {
+        return ffi::path_landmark_frines_set_bearing_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `bearing` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_bearing(uint32_t start, float* out, uint32_t n, int64_t stride = sizeof(float)) const {
+        return ffi::path_landmark_frines_get_bearing_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+    /// Sets `isigma` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_isigma(uint32_t start, const float* values, uint32_t n, int64_t stride = sizeof(float)) {
+        return ffi::path_landmark_frines_set_isigma_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `isigma` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_isigma(uint32_t start, float* out, uint32_t n, int64_t stride = sizeof(float)) const {
+        return ffi::path_landmark_frines_get_isigma_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
 private:
     ffi::Landmark* h_;
 };
@@ -783,6 +853,107 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_back_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::path_poses_push_back_n(h_, nullptr, n);
+        return first;
+    }
+    static_assert(sizeof(bool) == 1, "a bool column crosses as one byte per value");
+    /// Sets `pos` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pos(uint32_t start, const vect2f* values, uint32_t n, int64_t stride = sizeof(vect2f)) {
+        return ffi::path_poses_set_pos_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `pos` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pos(uint32_t start, vect2f* out, uint32_t n, int64_t stride = sizeof(vect2f)) const {
+        return ffi::path_poses_get_pos_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+    /// Sets `pos_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pos_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::path_poses_set_pos_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `pos_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pos_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::path_poses_get_pos_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `gamma` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_gamma(uint32_t start, const float* values, uint32_t n, int64_t stride = sizeof(float)) {
+        return ffi::path_poses_set_gamma_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `gamma` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_gamma(uint32_t start, float* out, uint32_t n, int64_t stride = sizeof(float)) const {
+        return ffi::path_poses_get_gamma_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+    /// Sets `gamma_optimize` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_gamma_optimize(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::path_poses_set_gamma_optimize_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `gamma_optimize` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_gamma_optimize(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::path_poses_get_gamma_optimize_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `delta_pos` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_delta_pos(uint32_t start, const vect2f* values, uint32_t n, int64_t stride = sizeof(vect2f)) {
+        return ffi::path_poses_set_delta_pos_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `delta_pos` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_delta_pos(uint32_t start, vect2f* out, uint32_t n, int64_t stride = sizeof(vect2f)) const {
+        return ffi::path_poses_get_delta_pos_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+    /// Sets `delta_gamma` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_delta_gamma(uint32_t start, const float* values, uint32_t n, int64_t stride = sizeof(float)) {
+        return ffi::path_poses_set_delta_gamma_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `delta_gamma` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_delta_gamma(uint32_t start, float* out, uint32_t n, int64_t stride = sizeof(float)) const {
+        return ffi::path_poses_get_delta_gamma_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+    /// Sets `delta_pos_isigma` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_delta_pos_isigma(uint32_t start, const float* values, uint32_t n, int64_t stride = sizeof(float)) {
+        return ffi::path_poses_set_delta_pos_isigma_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `delta_pos_isigma` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_delta_pos_isigma(uint32_t start, float* out, uint32_t n, int64_t stride = sizeof(float)) const {
+        return ffi::path_poses_get_delta_pos_isigma_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+    /// Sets `delta_gamma_isigma` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_delta_gamma_isigma(uint32_t start, const float* values, uint32_t n, int64_t stride = sizeof(float)) {
+        return ffi::path_poses_set_delta_gamma_isigma_n(h_, start, reinterpret_cast<const float*>(values), n, stride);
+    }
+    /// Reads `delta_gamma_isigma` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_delta_gamma_isigma(uint32_t start, float* out, uint32_t n, int64_t stride = sizeof(float)) const {
+        return ffi::path_poses_get_delta_gamma_isigma_n(h_, start, reinterpret_cast<float*>(out), n, stride);
+    }
+    /// The refs of elements `start..start + n` into `out`, in index order;
+    /// false when the range exceeds the collection.
+    bool get_refs(uint32_t start, PoseRef* out, uint32_t n) const {
+        return ffi::path_poses_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);
+    }
 private:
     ffi::Path* h_;
 };
@@ -865,6 +1036,35 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::path_pose_pairs_push_n(h_, nullptr, n);
+        return first;
+    }
+    /// Sets `prev` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_prev(uint32_t start, const PoseRef* values, uint32_t n, int64_t stride = sizeof(PoseRef)) {
+        return ffi::path_pose_pairs_set_prev_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `prev` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_prev(uint32_t start, PoseRef* out, uint32_t n, int64_t stride = sizeof(PoseRef)) const {
+        return ffi::path_pose_pairs_get_prev_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `cur` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_cur(uint32_t start, const PoseRef* values, uint32_t n, int64_t stride = sizeof(PoseRef)) {
+        return ffi::path_pose_pairs_set_cur_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `cur` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_cur(uint32_t start, PoseRef* out, uint32_t n, int64_t stride = sizeof(PoseRef)) const {
+        return ffi::path_pose_pairs_get_cur_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
 private:
     ffi::Path* h_;
 };

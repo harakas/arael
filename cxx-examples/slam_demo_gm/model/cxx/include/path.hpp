@@ -204,6 +204,11 @@ PointFrine* path_point_landmark_frines_at(PointLandmark*, uint32_t);
 bool path_point_landmark_frines_pop(PointLandmark*);
 void path_point_landmark_frines_clear(PointLandmark*);
 void path_point_landmark_frines_truncate(PointLandmark*, uint32_t);
+uint32_t path_point_landmark_frines_push_n(PointLandmark*, const uint64_t*, uint32_t);
+bool path_point_landmark_frines_set_pose_n(PointLandmark*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool path_point_landmark_frines_get_pose_n(const PointLandmark*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool path_point_landmark_frines_set_feature_n(PointLandmark*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool path_point_landmark_frines_get_feature_n(const PointLandmark*, uint32_t, uint32_t*, uint32_t, int64_t);
 vect3d path_pose_info_delta_pos(const PoseInfo*);
 void path_pose_info_set_delta_pos(PoseInfo*, vect3d);
 matrix3d path_pose_info_delta_rot(const PoseInfo*);
@@ -235,6 +240,16 @@ uint32_t path_pose_info_features_last_ref(const PoseInfo*);
 PointFeature* path_pose_info_features_get(PoseInfo*, uint32_t);
 bool path_pose_info_features_contains(const PoseInfo*, uint32_t);
 PointFeature* path_pose_info_features_try_get(PoseInfo*, uint32_t);
+uint32_t path_pose_info_features_push_n(PoseInfo*, const uint64_t*, uint32_t);
+bool path_pose_info_features_set_pixel_n(PoseInfo*, uint32_t, const double*, uint32_t, int64_t);
+bool path_pose_info_features_get_pixel_n(const PoseInfo*, uint32_t, double*, uint32_t, int64_t);
+bool path_pose_info_features_set_mf2r_n(PoseInfo*, uint32_t, const double*, uint32_t, int64_t);
+bool path_pose_info_features_get_mf2r_n(const PoseInfo*, uint32_t, double*, uint32_t, int64_t);
+bool path_pose_info_features_set_camera_pos_n(PoseInfo*, uint32_t, const double*, uint32_t, int64_t);
+bool path_pose_info_features_get_camera_pos_n(const PoseInfo*, uint32_t, double*, uint32_t, int64_t);
+bool path_pose_info_features_set_isigma_n(PoseInfo*, uint32_t, const double*, uint32_t, int64_t);
+bool path_pose_info_features_get_isigma_n(const PoseInfo*, uint32_t, double*, uint32_t, int64_t);
+bool path_pose_info_features_get_refs_n(const PoseInfo*, uint32_t, uint32_t*, uint32_t);
 vect3d path_pose_r2w_translation(const Pose*);
 void path_pose_r2w_set_translation(Pose*, vect3d);
 quaternd path_pose_r2w_rotation(const Pose*);
@@ -279,6 +294,16 @@ uint32_t path_poses_back_ref(const Path*);
 Pose* path_poses_get(Path*, uint32_t);
 bool path_poses_contains(const Path*, uint32_t);
 Pose* path_poses_try_get(Path*, uint32_t);
+uint32_t path_poses_push_back_n(Path*, const uint64_t*, uint32_t);
+bool path_poses_set_r2w_translation_n(Path*, uint32_t, const double*, uint32_t, int64_t);
+bool path_poses_get_r2w_translation_n(const Path*, uint32_t, double*, uint32_t, int64_t);
+bool path_poses_set_r2w_rotation_n(Path*, uint32_t, const double*, uint32_t, int64_t);
+bool path_poses_get_r2w_rotation_n(const Path*, uint32_t, double*, uint32_t, int64_t);
+bool path_poses_set_r2w_optimize_translation_n(Path*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool path_poses_get_r2w_optimize_translation_n(const Path*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool path_poses_set_r2w_optimize_rotation_n(Path*, uint32_t, const uint8_t*, uint32_t, int64_t);
+bool path_poses_get_r2w_optimize_rotation_n(const Path*, uint32_t, uint8_t*, uint32_t, int64_t);
+bool path_poses_get_refs_n(const Path*, uint32_t, uint32_t*, uint32_t);
 uint32_t path_landmarks_len(const Path*);
 void path_landmarks_reserve(Path*, uint32_t);
 uint32_t path_landmarks_push(Path*);
@@ -298,6 +323,11 @@ PosePair* path_pose_pairs_at(Path*, uint32_t);
 bool path_pose_pairs_pop(Path*);
 void path_pose_pairs_clear(Path*);
 void path_pose_pairs_truncate(Path*, uint32_t);
+uint32_t path_pose_pairs_push_n(Path*, const uint64_t*, uint32_t);
+bool path_pose_pairs_set_prev_n(Path*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool path_pose_pairs_get_prev_n(const Path*, uint32_t, uint32_t*, uint32_t, int64_t);
+bool path_pose_pairs_set_cur_n(Path*, uint32_t, const uint32_t*, uint32_t, int64_t);
+bool path_pose_pairs_get_cur_n(const Path*, uint32_t, uint32_t*, uint32_t, int64_t);
 double path_drift_rho_isigma(const Path*);
 void path_set_drift_rho_isigma(Path*, double);
 double path_tilt_isigma(const Path*);
@@ -657,6 +687,35 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::path_point_landmark_frines_push_n(h_, nullptr, n);
+        return first;
+    }
+    /// Sets `pose` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pose(uint32_t start, const PoseRef* values, uint32_t n, int64_t stride = sizeof(PoseRef)) {
+        return ffi::path_point_landmark_frines_set_pose_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `pose` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pose(uint32_t start, PoseRef* out, uint32_t n, int64_t stride = sizeof(PoseRef)) const {
+        return ffi::path_point_landmark_frines_get_pose_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `feature` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_feature(uint32_t start, const PointFeatureRef* values, uint32_t n, int64_t stride = sizeof(PointFeatureRef)) {
+        return ffi::path_point_landmark_frines_set_feature_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `feature` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_feature(uint32_t start, PointFeatureRef* out, uint32_t n, int64_t stride = sizeof(PointFeatureRef)) const {
+        return ffi::path_point_landmark_frines_get_feature_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
 private:
     ffi::PointLandmark* h_;
 };
@@ -783,6 +842,62 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::path_pose_info_features_push_n(h_, nullptr, n);
+        return first;
+    }
+    /// Sets `pixel` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_pixel(uint32_t start, const vect2d* values, uint32_t n, int64_t stride = sizeof(vect2d)) {
+        return ffi::path_pose_info_features_set_pixel_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `pixel` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_pixel(uint32_t start, vect2d* out, uint32_t n, int64_t stride = sizeof(vect2d)) const {
+        return ffi::path_pose_info_features_get_pixel_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `mf2r` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_mf2r(uint32_t start, const matrix3d* values, uint32_t n, int64_t stride = sizeof(matrix3d)) {
+        return ffi::path_pose_info_features_set_mf2r_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `mf2r` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_mf2r(uint32_t start, matrix3d* out, uint32_t n, int64_t stride = sizeof(matrix3d)) const {
+        return ffi::path_pose_info_features_get_mf2r_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `camera_pos` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_camera_pos(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::path_pose_info_features_set_camera_pos_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `camera_pos` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_camera_pos(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::path_pose_info_features_get_camera_pos_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `isigma` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_isigma(uint32_t start, const vect2d* values, uint32_t n, int64_t stride = sizeof(vect2d)) {
+        return ffi::path_pose_info_features_set_isigma_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `isigma` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_isigma(uint32_t start, vect2d* out, uint32_t n, int64_t stride = sizeof(vect2d)) const {
+        return ffi::path_pose_info_features_get_isigma_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// The refs of elements `start..start + n` into `out`, in index order;
+    /// false when the range exceeds the collection.
+    bool get_refs(uint32_t start, PointFeatureRef* out, uint32_t n) const {
+        return ffi::path_pose_info_features_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);
+    }
 private:
     ffi::PoseInfo* h_;
 };
@@ -1059,6 +1174,63 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_back_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::path_poses_push_back_n(h_, nullptr, n);
+        return first;
+    }
+    static_assert(sizeof(bool) == 1, "a bool column crosses as one byte per value");
+    /// Sets `r2w_translation` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_r2w_translation(uint32_t start, const vect3d* values, uint32_t n, int64_t stride = sizeof(vect3d)) {
+        return ffi::path_poses_set_r2w_translation_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `r2w_translation` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_r2w_translation(uint32_t start, vect3d* out, uint32_t n, int64_t stride = sizeof(vect3d)) const {
+        return ffi::path_poses_get_r2w_translation_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `r2w_rotation` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_r2w_rotation(uint32_t start, const quaternd* values, uint32_t n, int64_t stride = sizeof(quaternd)) {
+        return ffi::path_poses_set_r2w_rotation_n(h_, start, reinterpret_cast<const double*>(values), n, stride);
+    }
+    /// Reads `r2w_rotation` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_r2w_rotation(uint32_t start, quaternd* out, uint32_t n, int64_t stride = sizeof(quaternd)) const {
+        return ffi::path_poses_get_r2w_rotation_n(h_, start, reinterpret_cast<double*>(out), n, stride);
+    }
+    /// Sets `r2w_optimize_translation` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_r2w_optimize_translation(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::path_poses_set_r2w_optimize_translation_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `r2w_optimize_translation` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_r2w_optimize_translation(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::path_poses_get_r2w_optimize_translation_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// Sets `r2w_optimize_rotation` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_r2w_optimize_rotation(uint32_t start, const bool* values, uint32_t n, int64_t stride = sizeof(bool)) {
+        return ffi::path_poses_set_r2w_optimize_rotation_n(h_, start, reinterpret_cast<const uint8_t*>(values), n, stride);
+    }
+    /// Reads `r2w_optimize_rotation` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_r2w_optimize_rotation(uint32_t start, bool* out, uint32_t n, int64_t stride = sizeof(bool)) const {
+        return ffi::path_poses_get_r2w_optimize_rotation_n(h_, start, reinterpret_cast<uint8_t*>(out), n, stride);
+    }
+    /// The refs of elements `start..start + n` into `out`, in index order;
+    /// false when the range exceeds the collection.
+    bool get_refs(uint32_t start, PoseRef* out, uint32_t n) const {
+        return ffi::path_poses_get_refs_n(h_, start, reinterpret_cast<uint32_t*>(out), n);
+    }
 private:
     ffi::Path* h_;
 };
@@ -1221,6 +1393,35 @@ public:
     };
     reverse_iterator rbegin() { return reverse_iterator(end()); }
     reverse_iterator rend() { return reverse_iterator(begin()); }
+    /// Appends `n` default elements in one call and returns the index of
+    /// the first; the set_<field>() calls below fill them in.
+    uint32_t push_many(uint32_t n) {
+        uint32_t first = size();
+        ffi::path_pose_pairs_push_n(h_, nullptr, n);
+        return first;
+    }
+    /// Sets `prev` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_prev(uint32_t start, const PoseRef* values, uint32_t n, int64_t stride = sizeof(PoseRef)) {
+        return ffi::path_pose_pairs_set_prev_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `prev` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_prev(uint32_t start, PoseRef* out, uint32_t n, int64_t stride = sizeof(PoseRef)) const {
+        return ffi::path_pose_pairs_get_prev_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
+    /// Sets `cur` of elements `start..start + n` from `values`, `stride`
+    /// bytes apart (0 sets every one to `values[0]`); false when the range
+    /// exceeds the collection.
+    bool set_cur(uint32_t start, const PoseRef* values, uint32_t n, int64_t stride = sizeof(PoseRef)) {
+        return ffi::path_pose_pairs_set_cur_n(h_, start, reinterpret_cast<const uint32_t*>(values), n, stride);
+    }
+    /// Reads `cur` of elements `start..start + n` into `out`, `stride`
+    /// bytes apart; false when the range exceeds the collection.
+    bool get_cur(uint32_t start, PoseRef* out, uint32_t n, int64_t stride = sizeof(PoseRef)) const {
+        return ffi::path_pose_pairs_get_cur_n(h_, start, reinterpret_cast<uint32_t*>(out), n, stride);
+    }
 private:
     ffi::Path* h_;
 };
