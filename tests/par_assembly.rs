@@ -1039,6 +1039,38 @@ fn the_stores_filled_on_threads_are_the_stores_built_in_turn() {
     }
 }
 
+/// `__cross_counts_at` is the number of blocks each cross array of a store
+/// gets from its ranges -- what the fill reserves, so no array grows while
+/// the stores fill on threads. A freed arena slot in a range counts nothing.
+#[test]
+fn a_stores_cross_counts_are_its_blocks() {
+    let mut w = build(60);
+    let r = w.landmarks.first_ref().unwrap();
+    w.landmarks.remove(r);
+    let mut x = Vec::new();
+    w.serialize(&mut x);
+    for threads in [1, 2, 3, 8] {
+        let mut ctx = context(threads);
+        w.begin_with_context(&mut ctx);
+        let filled = ctx.blocks_list::<WebBlocks>().expect("the stores are built");
+        let cut = ctx.cut();
+        for (s, store) in filled.iter().enumerate() {
+            let held = [
+                store.__a_frine__hb.len(),
+                store.__a_link__hb.len(),
+                store.__a_tri__hb_ab.len(),
+                store.__a_tri__hb_ac.len(),
+                store.__a_tri__hb_bc.len(),
+            ];
+            assert_eq!(w.__cross_counts_at(cut.store(s)), held, "{threads} stores: store {s}");
+        }
+    }
+    // The whole model: every block of each array.
+    let whole = w.__cross_counts_at(&[]);
+    let frines: usize = w.landmarks.iter().map(|l| l.frines.len()).sum();
+    assert_eq!(whole, [frines, w.links.len(), w.tris.len(), w.tris.len(), w.tris.len()]);
+}
+
 /// A thread count set on the context takes hold in `begin_with_context`:
 /// an assembly called directly on a context nobody began builds one
 /// store, whatever the count says.

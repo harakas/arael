@@ -9530,6 +9530,10 @@ pub fn generate_root_methods(
     // shape a build is recorded under.
     let mut store_cross_counts: std::collections::HashMap<String, Vec<TokenStream2>> =
         std::collections::HashMap::new();
+    // Per cross array, one term per path to its type: the blocks a store
+    // takes from its range of that path's walk.
+    let mut store_cross_range_counts: std::collections::HashMap<String, Vec<TokenStream2>> =
+        std::collections::HashMap::new();
     // The arrays stored at their live size, whose value bytes a build
     // reads off the stores rather than off a per-block constant: the
     // cross ones, held by one store each, and the self ones, held by
@@ -9576,6 +9580,9 @@ pub fn generate_root_methods(
                 // unit they sit under, so theirs is.
                 let mut body_self: Vec<TokenStream2> = Vec::new();
                 let mut body: Vec<TokenStream2> = Vec::new();
+                // The cross arrays `body` pushes to, one block each per unit
+                // of the walk.
+                let mut body_arrays: Vec<String> = Vec::new();
                 // The type's own self block: its indices are its params.
                 if let Some(hb) = &self_field {
                     let n = param_total(type_name);
@@ -9666,6 +9673,7 @@ pub fn generate_root_methods(
                     });
                     store_cross_counts.entry(name.to_string()).or_default()
                         .push(slot_count_expr(&path));
+                    body_arrays.push(name.to_string());
                     if store_seen.insert(name.to_string()) {
                         // A `VarCrossBlock` field takes the array that
                         // stores each block at its live size.
@@ -9706,6 +9714,24 @@ pub fn generate_root_methods(
                             #walk
                         }
                     });
+                    // The same walk, counting its units.
+                    let count_walk = if path.is_empty() {
+                        quote! { if __r.0 == 0 { __n += 1; } }
+                    } else {
+                        wrap_in_prefix_ranged(&path, false, quote! { __n += 1; }, None, false,
+                            Some(&quote! { __r }))
+                    };
+                    let units = quote! {
+                        {
+                            let __r = arael::store::walk_range(__ranges, #cid);
+                            let mut __n = 0usize;
+                            #count_walk
+                            __n
+                        }
+                    };
+                    for name in body_arrays {
+                        store_cross_range_counts.entry(name).or_default().push(units.clone());
+                    }
                 }
             }
         }
@@ -9716,6 +9742,12 @@ pub fn generate_root_methods(
     let store_self_slot_counts: Vec<TokenStream2> = store_self_names.iter().map(|name| {
         let terms = &store_self_counts[&name.to_string()];
         quote! { (0u64 #(+ #terms)*) as usize }
+    }).collect();
+    // The blocks each cross array takes from a store's ranges, in the
+    // arrays' order.
+    let store_cross_range_terms: Vec<TokenStream2> = store_cross_names.iter().map(|name| {
+        let terms = &store_cross_range_counts[&name.to_string()];
+        quote! { 0usize #(+ #terms)* }
     }).collect();
     // The model's shape: the count of every block array, self arrays
     // then cross arrays. A build is recorded under it, and a direct call
@@ -10227,6 +10259,11 @@ pub fn generate_root_methods(
                 let __self_ref = &*self;
                 let _ = __self_ref;
                 #(__store.#store_names.clear();)*
+                // The cross arrays sized to their blocks first: grown on
+                // several threads at once, large reallocations can stall
+                // for seconds (macOS copies them through the kernel).
+                let __counts = self.__cross_counts_at(__ranges);
+                #(__store.#store_cross_names.reserve(__counts[#cross_idx]);)*
                 // A split store's maps, sized once to what the numbering
                 // can reach, so a claim never grows them.
                 if __split {
@@ -10235,6 +10272,16 @@ pub fn generate_root_methods(
                 #(#self_claim_walks)*
                 #(#build_walks)*
                 #(__store.#store_names.finish();)*
+            }
+
+            /// The blocks each cross array of a store takes from the units
+            /// `__ranges` gives it, in the arrays' order: one per unit the
+            /// fill walks.
+            #[doc(hidden)]
+            #[allow(unused_variables, dead_code)]
+            pub fn __cross_counts_at(&self, __ranges: &[(u32, u32)]) -> [usize; #n_cross] {
+                use arael::store::Leaves as _;
+                [#(#store_cross_range_terms),*]
             }
 
             /// The whole model into one store.
